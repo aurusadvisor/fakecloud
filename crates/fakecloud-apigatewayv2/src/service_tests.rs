@@ -1359,3 +1359,361 @@ async fn execute_api_jwt_authorizer_no_delivery_returns_500() {
     let err = expect_err(svc.handle(req).await);
     assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
+
+// ─── Lambda authorizer tests ───────────────────────────────────────
+
+struct MockLambdaInvoker {
+    response: Result<Vec<u8>, String>,
+}
+
+impl fakecloud_core::delivery::LambdaDelivery for MockLambdaInvoker {
+    fn invoke_lambda(
+        &self,
+        _function_arn: &str,
+        _payload: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>> {
+        let res = self.response.clone();
+        Box::pin(async move { res })
+    }
+}
+
+fn make_svc_with_lambda(response: Result<Vec<u8>, String>) -> ApiGatewayV2Service {
+    let state = make_state();
+    let delivery = Arc::new(
+        fakecloud_core::delivery::DeliveryBus::new()
+            .with_lambda(Arc::new(MockLambdaInvoker { response })),
+    );
+    ApiGatewayV2Service::new(state).with_delivery(delivery)
+}
+
+#[tokio::test]
+async fn execute_api_lambda_authorizer_simple_response_allow() {
+    let svc = make_svc_with_lambda(Ok(serde_json::json!({
+        "isAuthorized": true,
+        "context": {"role": "admin"}
+    })
+    .to_string()
+    .into_bytes()));
+    let api_id = create_api(&svc);
+
+    // Create REQUEST authorizer
+    let body = serde_json::json!({
+        "name": "lambda-auth",
+        "authorizerType": "REQUEST",
+        "identitySource": ["$request.header.Authorization"],
+        "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:authorizer/invocations"
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/authorizers"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let auth_id = body_json(&resp)["authorizerId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create MOCK integration
+    let body = serde_json::json!({"integrationType": "MOCK"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create route with authorizer
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+        "authorizerId": auth_id
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Create stage
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Execute with token -> 200 (authorizer allows)
+    let mut req = make_request(Method::GET, "/prod/pets", "");
+    req.headers
+        .insert("Authorization", "Bearer tok".parse().unwrap());
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn execute_api_lambda_authorizer_simple_response_deny() {
+    let svc = make_svc_with_lambda(Ok(serde_json::json!({"isAuthorized": false})
+        .to_string()
+        .into_bytes()));
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "name": "lambda-auth",
+        "authorizerType": "REQUEST",
+        "identitySource": ["$request.header.Authorization"],
+        "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:authorizer/invocations"
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/authorizers"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let auth_id = body_json(&resp)["authorizerId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({"integrationType": "MOCK"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+        "authorizerId": auth_id
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let mut req = make_request(Method::GET, "/prod/pets", "");
+    req.headers
+        .insert("Authorization", "Bearer tok".parse().unwrap());
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn execute_api_lambda_authorizer_policy_allow() {
+    let svc = make_svc_with_lambda(Ok(serde_json::json!({
+        "principalId": "user-1",
+        "policyDocument": {
+            "Statement": [{"Effect": "Allow", "Resource": "*"}]
+        },
+        "context": {"role": "admin"}
+    })
+    .to_string()
+    .into_bytes()));
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "name": "lambda-auth",
+        "authorizerType": "REQUEST",
+        "identitySource": ["$request.header.Authorization"],
+        "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:authorizer/invocations"
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/authorizers"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let auth_id = body_json(&resp)["authorizerId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({"integrationType": "MOCK"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+        "authorizerId": auth_id
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let mut req = make_request(Method::GET, "/prod/pets", "");
+    req.headers
+        .insert("Authorization", "Bearer tok".parse().unwrap());
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn execute_api_lambda_authorizer_policy_deny() {
+    let svc = make_svc_with_lambda(Ok(serde_json::json!({
+        "principalId": "user-1",
+        "policyDocument": {
+            "Statement": [{"Effect": "Deny", "Resource": "*"}]
+        }
+    })
+    .to_string()
+    .into_bytes()));
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "name": "lambda-auth",
+        "authorizerType": "REQUEST",
+        "identitySource": ["$request.header.Authorization"],
+        "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:authorizer/invocations"
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/authorizers"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let auth_id = body_json(&resp)["authorizerId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({"integrationType": "MOCK"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+        "authorizerId": auth_id
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let mut req = make_request(Method::GET, "/prod/pets", "");
+    req.headers
+        .insert("Authorization", "Bearer tok".parse().unwrap());
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn execute_api_lambda_authorizer_no_identity_source_returns_401() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "name": "lambda-auth",
+        "authorizerType": "REQUEST",
+        "identitySource": ["$request.header.Authorization"],
+        "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:authorizer/invocations"
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/authorizers"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let auth_id = body_json(&resp)["authorizerId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({"integrationType": "MOCK"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+        "authorizerId": auth_id
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // No Authorization header -> 401
+    let req = make_request(Method::GET, "/prod/pets", "");
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+}

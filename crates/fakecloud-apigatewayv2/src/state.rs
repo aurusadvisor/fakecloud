@@ -360,6 +360,13 @@ pub struct ApiRequest {
     pub status_code: u16,
 }
 
+/// Result of evaluating a Lambda-authorizer policy document.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AuthEffect {
+    Allow,
+    Deny,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
