@@ -734,6 +734,14 @@ mod port_mapping_tests {
             depends_on: Vec::new(),
             health_check: None,
             volume_mounts: Vec::new(),
+            ulimits: Vec::new(),
+            linux_parameters: None,
+            stop_timeout: None,
+            user: None,
+            working_directory: None,
+            tty: false,
+            interactive: false,
+            readonly_rootfs: false,
         }
     }
 

@@ -921,6 +921,25 @@ pub(crate) struct ContainerPlan {
     /// renders as one `-v` flag on the `docker run` invocation. Empty when
     /// the container has no mount points or no matching volume entries.
     pub(crate) volume_mounts: Vec<VolumeMount>,
+    /// Parsed `ulimits` from the container definition. Each entry becomes
+    /// `--ulimit <name>=<soft>:<hard>` on `docker run`.
+    pub(crate) ulimits: Vec<Ulimit>,
+    /// Parsed `linuxParameters` from the container definition. Emits
+    /// `--cap-add`, `--cap-drop`, `--device`, `--init`, `--shm-size`,
+    /// `--sysctl`, `--tmpfs`, `--privileged`, and `--read-only` flags.
+    pub(crate) linux_parameters: Option<LinuxParameters>,
+    /// `stopTimeout` in seconds. Becomes `--stop-timeout <N>` on `docker run`.
+    pub(crate) stop_timeout: Option<u32>,
+    /// `user` from the container definition. Becomes `--user <value>`.
+    pub(crate) user: Option<String>,
+    /// `workingDirectory` from the container definition. Becomes `--workdir`.
+    pub(crate) working_directory: Option<String>,
+    /// `tty` from the container definition. Emits `--tty` when true.
+    pub(crate) tty: bool,
+    /// `interactive` from the container definition. Emits `--interactive` when true.
+    pub(crate) interactive: bool,
+    /// `readonlyRootFilesystem` from the container definition. Emits `--read-only` when true.
+    pub(crate) readonly_rootfs: bool,
 }
 
 /// One parsed `dependsOn[]` entry on a container. Pairs the upstream
@@ -1045,6 +1064,50 @@ pub(crate) struct VolumeMount {
     /// `-v` flag so the bind/named volume is read-only inside the
     /// container. Defaults to false (read-write) when omitted.
     pub read_only: bool,
+}
+
+/// One `ulimits` entry. Becomes `--ulimit <name>=<soft>:<hard>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Ulimit {
+    pub name: String,
+    pub soft_limit: i32,
+    pub hard_limit: i32,
+}
+
+/// One `linuxParameters.devices` entry. Becomes `--device <hostPath>:<containerPath><permissions>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Device {
+    pub host_path: String,
+    pub container_path: String,
+    pub permissions: String,
+}
+
+/// One `linuxParameters.sysctl` entry. Becomes `--sysctl <name>=<value>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Sysctl {
+    pub name: String,
+    pub value: String,
+}
+
+/// Parsed `linuxParameters` from the container definition.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct LinuxParameters {
+    pub capabilities_add: Vec<String>,
+    pub capabilities_drop: Vec<String>,
+    pub devices: Vec<Device>,
+    pub init_process_enabled: bool,
+    pub shared_memory_size: Option<i32>,
+    pub sysctls: Vec<Sysctl>,
+    pub tmpfs: Vec<Tmpfs>,
+    pub privileged: bool,
+}
+
+/// One `linuxParameters.tmpfs` entry. Becomes `--tmpfs <containerPath>:size=<size>M<,options>*`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Tmpfs {
+    pub container_path: String,
+    pub size: i32,
+    pub mount_options: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1210,6 +1273,40 @@ fn build_container_plans(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let ulimits = def
+            .as_ref()
+            .and_then(|d| d.get("ulimits").and_then(|v| v.as_array()).cloned())
+            .map(|arr| arr.iter().filter_map(parse_ulimit).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let linux_parameters = def
+            .as_ref()
+            .and_then(|d| d.get("linuxParameters"))
+            .and_then(parse_linux_parameters);
+        let stop_timeout = def.as_ref().and_then(|d| {
+            d.get("stopTimeout")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32)
+        });
+        let user = def
+            .as_ref()
+            .and_then(|d| d.get("user").and_then(|v| v.as_str()).map(String::from));
+        let working_directory = def.as_ref().and_then(|d| {
+            d.get("workingDirectory")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        });
+        let tty = def
+            .as_ref()
+            .and_then(|d| d.get("tty").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+        let interactive = def
+            .as_ref()
+            .and_then(|d| d.get("interactive").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+        let readonly_rootfs = def
+            .as_ref()
+            .and_then(|d| d.get("readonlyRootFilesystem").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
         plans.push(ContainerPlan {
             container_name: container.name.clone(),
             image: container.image.clone(),
@@ -1224,6 +1321,14 @@ fn build_container_plans(
             depends_on,
             health_check,
             volume_mounts,
+            ulimits,
+            linux_parameters,
+            stop_timeout,
+            user,
+            working_directory,
+            tty,
+            interactive,
+            readonly_rootfs,
         });
     }
     let plans = topo_sort_plans(plans);
@@ -1606,6 +1711,123 @@ fn parse_health_check(value: &serde_json::Value) -> Option<HealthCheckSpec> {
     })
 }
 
+/// Parse one `ulimits` entry from the container definition JSON.
+fn parse_ulimit(value: &serde_json::Value) -> Option<Ulimit> {
+    let name = value.get("name").and_then(|v| v.as_str())?;
+    let soft = value
+        .get("softLimit")
+        .and_then(|v| v.as_i64())
+        .filter(|n| *n >= 0)? as i32;
+    let hard = value
+        .get("hardLimit")
+        .and_then(|v| v.as_i64())
+        .filter(|n| *n >= 0)? as i32;
+    Some(Ulimit {
+        name: name.to_string(),
+        soft_limit: soft,
+        hard_limit: hard,
+    })
+}
+
+/// Parse `linuxParameters` from the container definition JSON.
+fn parse_linux_parameters(value: &serde_json::Value) -> Option<LinuxParameters> {
+    let mut lp = LinuxParameters::default();
+    if let Some(arr) = value
+        .get("capabilities")
+        .and_then(|v| v.get("add"))
+        .and_then(|v| v.as_array())
+    {
+        lp.capabilities_add = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+    }
+    if let Some(arr) = value
+        .get("capabilities")
+        .and_then(|v| v.get("drop"))
+        .and_then(|v| v.as_array())
+    {
+        lp.capabilities_drop = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+    }
+    if let Some(arr) = value.get("devices").and_then(|v| v.as_array()) {
+        lp.devices = arr.iter().filter_map(parse_device).collect();
+    }
+    lp.init_process_enabled = value
+        .get("initProcessEnabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    lp.shared_memory_size = value
+        .get("sharedMemorySize")
+        .and_then(|v| v.as_i64())
+        .map(|n| n as i32);
+    if let Some(arr) = value.get("sysctl").and_then(|v| v.as_array()) {
+        lp.sysctls = arr.iter().filter_map(parse_sysctl).collect();
+    }
+    if let Some(arr) = value.get("tmpfs").and_then(|v| v.as_array()) {
+        lp.tmpfs = arr.iter().filter_map(parse_tmpfs).collect();
+    }
+    lp.privileged = value
+        .get("privileged")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Some(lp)
+}
+
+fn parse_device(value: &serde_json::Value) -> Option<Device> {
+    let host_path = value.get("hostPath").and_then(|v| v.as_str())?.to_string();
+    let container_path = value
+        .get("containerPath")
+        .and_then(|v| v.as_str())?
+        .to_string();
+    let permissions = value
+        .get("permissions")
+        .and_then(|v| v.as_str())
+        .unwrap_or("rwm")
+        .to_string();
+    Some(Device {
+        host_path,
+        container_path,
+        permissions,
+    })
+}
+
+fn parse_sysctl(value: &serde_json::Value) -> Option<Sysctl> {
+    let name = value.get("name").and_then(|v| v.as_str())?.to_string();
+    let value_str = value.get("value").and_then(|v| v.as_str())?.to_string();
+    Some(Sysctl {
+        name,
+        value: value_str,
+    })
+}
+
+fn parse_tmpfs(value: &serde_json::Value) -> Option<Tmpfs> {
+    let container_path = value
+        .get("containerPath")
+        .and_then(|v| v.as_str())?
+        .to_string();
+    let size = value
+        .get("size")
+        .and_then(|v| v.as_i64())
+        .filter(|n| *n > 0)? as i32;
+    let mount_options = value
+        .get("mountOptions")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Tmpfs {
+        container_path,
+        size,
+        mount_options,
+    })
+}
+
 /// Render a [`HealthCheckSpec`] into the docker run flags that emulate
 /// the equivalent ECS healthCheck. AWS's `command[0]` is a sentinel
 /// (`CMD-SHELL`/`CMD`/`NONE`); docker's `--health-cmd` always takes a
@@ -1739,6 +1961,70 @@ pub(crate) fn build_run_argv(
         argv.push("-v".into());
         let suffix = if vm.read_only { ":ro" } else { "" };
         argv.push(format!("{}:{}{}", vm.source, vm.container_path, suffix));
+    }
+    for ul in &plan.ulimits {
+        argv.push("--ulimit".into());
+        argv.push(format!("{}={}:{}", ul.name, ul.soft_limit, ul.hard_limit));
+    }
+    if let Some(ref lp) = plan.linux_parameters {
+        for cap in &lp.capabilities_add {
+            argv.push("--cap-add".into());
+            argv.push(cap.clone());
+        }
+        for cap in &lp.capabilities_drop {
+            argv.push("--cap-drop".into());
+            argv.push(cap.clone());
+        }
+        for dev in &lp.devices {
+            argv.push("--device".into());
+            argv.push(format!(
+                "{}:{}{}",
+                dev.host_path, dev.container_path, dev.permissions
+            ));
+        }
+        if lp.init_process_enabled {
+            argv.push("--init".into());
+        }
+        if let Some(size) = lp.shared_memory_size {
+            argv.push("--shm-size".into());
+            argv.push(format!("{}m", size));
+        }
+        for sys in &lp.sysctls {
+            argv.push("--sysctl".into());
+            argv.push(format!("{}={}", sys.name, sys.value));
+        }
+        for tmp in &lp.tmpfs {
+            let mut opts = tmp.mount_options.join(",");
+            if !opts.is_empty() {
+                opts = format!(",{}", opts);
+            }
+            argv.push("--tmpfs".into());
+            argv.push(format!("{}:size={}M{}", tmp.container_path, tmp.size, opts));
+        }
+        if lp.privileged {
+            argv.push("--privileged".into());
+        }
+    }
+    if let Some(timeout) = plan.stop_timeout {
+        argv.push("--stop-timeout".into());
+        argv.push(format!("{}", timeout));
+    }
+    if let Some(ref user) = plan.user {
+        argv.push("--user".into());
+        argv.push(user.clone());
+    }
+    if let Some(ref wd) = plan.working_directory {
+        argv.push("--workdir".into());
+        argv.push(wd.clone());
+    }
+    if plan.tty {
+        argv.push("--tty".into());
+    }
+    if plan.interactive {
+        argv.push("--interactive".into());
+    }
+    if plan.readonly_rootfs {
+        argv.push("--read-only".into());
     }
     if let Some(first) = plan.entry_point.first() {
         argv.push("--entrypoint".into());
@@ -2332,6 +2618,14 @@ mod tests {
                 .collect(),
             health_check: None,
             volume_mounts: Vec::new(),
+            ulimits: Vec::new(),
+            linux_parameters: None,
+            stop_timeout: None,
+            user: None,
+            working_directory: None,
+            tty: false,
+            interactive: false,
+            readonly_rootfs: false,
         }
     }
 
@@ -2486,6 +2780,14 @@ mod tests {
                 start_period_seconds: 1,
             }),
             volume_mounts: Vec::new(),
+            ulimits: Vec::new(),
+            linux_parameters: None,
+            stop_timeout: None,
+            user: None,
+            working_directory: None,
+            tty: false,
+            interactive: false,
+            readonly_rootfs: false,
         };
         let argv = build_run_argv(&plan, &[], "task-1", "host-gateway", "alpine");
         let joined = argv.join(" ");
@@ -2515,6 +2817,14 @@ mod tests {
             depends_on: Vec::new(),
             health_check: None,
             volume_mounts: Vec::new(),
+            ulimits: Vec::new(),
+            linux_parameters: None,
+            stop_timeout: None,
+            user: None,
+            working_directory: None,
+            tty: false,
+            interactive: false,
+            readonly_rootfs: false,
         };
         let argv = build_run_argv(&plan, &[], "task-1", "host-gateway", "alpine");
         assert!(!argv.iter().any(|s| s.starts_with("--health")));
@@ -2573,6 +2883,14 @@ mod tests {
                 container_path: "/in/container".into(),
                 read_only: true,
             }],
+            ulimits: Vec::new(),
+            linux_parameters: None,
+            stop_timeout: None,
+            user: None,
+            working_directory: None,
+            tty: false,
+            interactive: false,
+            readonly_rootfs: false,
         };
         let argv = build_run_argv(&plan, &[], "task-1", "host-gateway", "alpine");
         let pair = argv
@@ -2812,5 +3130,127 @@ mod tests {
         );
         assert_eq!(DependsOnCondition::parse("start"), None);
         assert_eq!(DependsOnCondition::parse("ANY"), None);
+    }
+
+    // ── ulimits + linuxParameters + misc docker flags (O6) ──
+
+    #[test]
+    fn build_run_argv_emits_ulimits() {
+        let plan = ContainerPlan {
+            container_name: "app".into(),
+            image: "alpine".into(),
+            env: Vec::new(),
+            entry_point: Vec::new(),
+            command: Vec::new(),
+            secrets_refs: Vec::new(),
+            essential: true,
+            has_task_role: false,
+            port_mappings: Vec::new(),
+            network_mode: None,
+            depends_on: Vec::new(),
+            health_check: None,
+            volume_mounts: Vec::new(),
+            ulimits: vec![Ulimit {
+                name: "nofile".into(),
+                soft_limit: 1024,
+                hard_limit: 2048,
+            }],
+            linux_parameters: None,
+            stop_timeout: None,
+            user: None,
+            working_directory: None,
+            tty: false,
+            interactive: false,
+            readonly_rootfs: false,
+        };
+        let argv = build_run_argv(&plan, &[], "t", "host", "img");
+        assert!(argv.contains(&"--ulimit".to_string()));
+        assert!(argv.contains(&"nofile=1024:2048".to_string()));
+    }
+
+    #[test]
+    fn build_run_argv_emits_linux_parameters() {
+        let plan = ContainerPlan {
+            container_name: "app".into(),
+            image: "alpine".into(),
+            env: Vec::new(),
+            entry_point: Vec::new(),
+            command: Vec::new(),
+            secrets_refs: Vec::new(),
+            essential: true,
+            has_task_role: false,
+            port_mappings: Vec::new(),
+            network_mode: None,
+            depends_on: Vec::new(),
+            health_check: None,
+            volume_mounts: Vec::new(),
+            ulimits: Vec::new(),
+            linux_parameters: Some(LinuxParameters {
+                capabilities_add: vec!["NET_ADMIN".into()],
+                capabilities_drop: vec!["ALL".into()],
+                devices: vec![Device {
+                    host_path: "/dev/zero".into(),
+                    container_path: "/dev/zero".into(),
+                    permissions: "rwm".into(),
+                }],
+                init_process_enabled: true,
+                shared_memory_size: Some(256),
+                sysctls: vec![Sysctl {
+                    name: "net.ipv4.ip_forward".into(),
+                    value: "1".into(),
+                }],
+                tmpfs: vec![Tmpfs {
+                    container_path: "/tmp".into(),
+                    size: 128,
+                    mount_options: vec!["noexec".into()],
+                }],
+                privileged: true,
+            }),
+            stop_timeout: Some(30),
+            user: Some("1000:1000".into()),
+            working_directory: Some("/app".into()),
+            tty: true,
+            interactive: true,
+            readonly_rootfs: true,
+        };
+        let argv = build_run_argv(&plan, &[], "t", "host", "img");
+        assert!(argv.contains(&"--cap-add".to_string()));
+        assert!(argv.contains(&"NET_ADMIN".to_string()));
+        assert!(argv.contains(&"--cap-drop".to_string()));
+        assert!(argv.contains(&"ALL".to_string()));
+        assert!(argv.contains(&"--device".to_string()));
+        assert!(argv.contains(&"/dev/zero:/dev/zerorwm".to_string()));
+        assert!(argv.contains(&"--init".to_string()));
+        assert!(argv.contains(&"--shm-size".to_string()));
+        assert!(argv.contains(&"256m".to_string()));
+        assert!(argv.contains(&"--sysctl".to_string()));
+        assert!(argv.contains(&"net.ipv4.ip_forward=1".to_string()));
+        assert!(argv.contains(&"--tmpfs".to_string()));
+        assert!(argv.contains(&"--privileged".to_string()));
+        assert!(argv.contains(&"--stop-timeout".to_string()));
+        assert!(argv.contains(&"30".to_string()));
+        assert!(argv.contains(&"--user".to_string()));
+        assert!(argv.contains(&"1000:1000".to_string()));
+        assert!(argv.contains(&"--workdir".to_string()));
+        assert!(argv.contains(&"/app".to_string()));
+        assert!(argv.contains(&"--tty".to_string()));
+        assert!(argv.contains(&"--interactive".to_string()));
+        assert!(argv.contains(&"--read-only".to_string()));
+    }
+
+    #[test]
+    fn parse_linux_parameters_fills_defaults() {
+        let raw = serde_json::json!({"initProcessEnabled": true});
+        let lp = parse_linux_parameters(&raw).expect("parses");
+        assert!(lp.init_process_enabled);
+        assert!(!lp.privileged);
+        assert!(lp.capabilities_add.is_empty());
+    }
+
+    #[test]
+    fn parse_device_uses_default_permissions() {
+        let raw = serde_json::json!({"hostPath": "/dev/null", "containerPath": "/dev/null"});
+        let dev = parse_device(&raw).expect("parses");
+        assert_eq!(dev.permissions, "rwm");
     }
 }
