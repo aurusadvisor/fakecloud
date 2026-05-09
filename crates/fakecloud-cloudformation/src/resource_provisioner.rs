@@ -15479,6 +15479,15 @@ impl ResourceProvisioner {
                     .collect()
             });
 
+        let access_log_settings = props.get("AccessLogSettings").and_then(|v| {
+            let destination_arn = v.get("DestinationArn")?.as_str()?.to_string();
+            let format = v.get("Format").and_then(|f| f.as_str().map(String::from));
+            Some(fakecloud_apigatewayv2::AccessLogSettings {
+                destination_arn,
+                format,
+            })
+        });
+
         let stage = ApiGwV2Stage {
             stage_name: stage_name.clone(),
             description: props
@@ -15491,6 +15500,7 @@ impl ResourceProvisioner {
             last_updated_date: None,
             web_acl_arn: None,
             stage_variables,
+            access_log_settings,
         };
 
         let mut accounts = self.apigatewayv2_state.write();

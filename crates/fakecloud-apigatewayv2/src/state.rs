@@ -313,6 +313,17 @@ pub struct Stage {
     /// time via `${stageVariables.<name>}`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub stage_variables: Option<BTreeMap<String, String>>,
+    /// Access log destination + format for this stage.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub access_log_settings: Option<AccessLogSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessLogSettings {
+    pub destination_arn: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
