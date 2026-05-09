@@ -245,6 +245,71 @@ fn json_type_str(types: &Value) -> String {
     }
 }
 
+fn is_ipv6(s: &str) -> bool {
+    // Pure IPv6
+    let pure_re = Regex::new(
+        r"^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$",
+    )
+    .unwrap();
+    if pure_re.is_match(s) {
+        return true;
+    }
+
+    // Mixed notation (embedded IPv4)
+    if !s.contains('.') {
+        return false;
+    }
+
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() < 3 {
+        return false;
+    }
+
+    // Last part must be valid IPv4
+    let last = parts.last().unwrap();
+    let ipv4_re = Regex::new(
+        r"^(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$",
+    )
+    .unwrap();
+    if !ipv4_re.is_match(last) {
+        return false;
+    }
+
+    // Count valid prefix groups
+    let prefix = &parts[..parts.len() - 1];
+    let mut non_empty = 0;
+    let mut empty = 0;
+    for p in prefix {
+        if p.is_empty() {
+            empty += 1;
+        } else if p.len() <= 4 && p.chars().all(|c| c.is_ascii_hexdigit()) {
+            non_empty += 1;
+        } else {
+            return false;
+        }
+    }
+
+    if s == "::" {
+        return true;
+    }
+
+    if empty == 0 {
+        non_empty + 2 == 8
+    } else if empty == 1 {
+        non_empty + 2 < 8
+    } else if empty == 2 {
+        let at_start = prefix.iter().take(2).all(|p| p.is_empty());
+        let at_end = prefix.iter().rev().take(2).all(|p| p.is_empty());
+        if at_start || at_end {
+            non_empty + 2 <= 8
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
 fn check_format(fmt: &str, s: &str) -> bool {
     match fmt {
         "email" => {
@@ -274,11 +339,7 @@ fn check_format(fmt: &str, s: &str) -> bool {
         )
         .map(|re| re.is_match(s))
         .unwrap_or(true),
-        "ipv6" => Regex::new(
-            r"^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$",
-        )
-        .map(|re| re.is_match(s))
-        .unwrap_or(true),
+        "ipv6" => is_ipv6(s),
         _ => true,
     }
 }
@@ -404,5 +465,22 @@ mod tests {
         assert!(validate(&schema, &json!("not-an-ip")).is_err());
         assert!(validate(&schema, &json!("192.168.1.1")).is_err());
         assert!(validate(&schema, &json!(":::")).is_err());
+    }
+
+    #[test]
+    fn format_ipv6_mixed_notation_accepts_valid() {
+        let schema = json!({"type": "string", "format": "ipv6"});
+        assert!(validate(&schema, &json!("::ffff:192.168.1.1")).is_ok());
+        assert!(validate(&schema, &json!("::192.168.1.1")).is_ok());
+        assert!(validate(&schema, &json!("2001:db8::192.168.1.1")).is_ok());
+    }
+
+    #[test]
+    fn format_ipv6_mixed_notation_rejects_invalid() {
+        let schema = json!({"type": "string", "format": "ipv6"});
+        // Too many groups before IPv4
+        assert!(validate(&schema, &json!("2001:db8:1:2:3:4:5:192.168.1.1")).is_err());
+        // Not an IPv4 address
+        assert!(validate(&schema, &json!("::ffff:999.999.999.999")).is_err());
     }
 }
