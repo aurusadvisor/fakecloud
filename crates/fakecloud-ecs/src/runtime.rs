@@ -137,6 +137,42 @@ impl EcsRuntime {
         self
     }
 
+    fn register_lb_targets(&self, state: &SharedEcsState, account_id: &str, task_id: &str) {
+        let Some(ref bus) = self.delivery_bus else {
+            return;
+        };
+        let accounts = state.read();
+        let Some(s) = accounts.get(account_id) else {
+            return;
+        };
+        let Some(task) = s.tasks.get(task_id) else {
+            return;
+        };
+        let targets = compute_elbv2_targets(s, task);
+        drop(accounts);
+        for (tg_arn, tg_targets) in targets {
+            bus.register_elbv2_targets(account_id, &tg_arn, tg_targets);
+        }
+    }
+
+    fn deregister_lb_targets(&self, state: &SharedEcsState, account_id: &str, task_id: &str) {
+        let Some(ref bus) = self.delivery_bus else {
+            return;
+        };
+        let accounts = state.read();
+        let Some(s) = accounts.get(account_id) else {
+            return;
+        };
+        let Some(task) = s.tasks.get(task_id) else {
+            return;
+        };
+        let targets = compute_elbv2_targets(s, task);
+        drop(accounts);
+        for (tg_arn, tg_targets) in targets {
+            bus.deregister_elbv2_targets(account_id, &tg_arn, tg_targets);
+        }
+    }
+
     /// Wire CloudWatch Logs state so tasks using the `awslogs` driver
     /// get their captured stdout/stderr forwarded.
     pub fn with_logs(mut self, logs: SharedLogsState) -> Self {
@@ -464,6 +500,7 @@ impl EcsRuntime {
             );
         }
         mark_running_multi(state, account_id, task_id, &started);
+        self.register_lb_targets(state, account_id, task_id);
         self.emit_state_change(state, account_id, task_id, "RUNNING", None);
 
         // Wait for the first essential container (or, if none are
@@ -577,6 +614,7 @@ impl EcsRuntime {
             wait_outcome.stop_code,
             None,
         );
+        self.deregister_lb_targets(state, account_id, task_id);
         self.emit_state_change(
             state,
             account_id,
@@ -2189,6 +2227,80 @@ pub(crate) fn network_bindings_for(plan: &ContainerPlan) -> Vec<serde_json::Valu
         .collect()
 }
 
+/// Compute ELBv2 target registrations for a task based on its service's
+/// loadBalancers configuration. Returns (target_group_arn, [(target_id, port)])
+/// for each target group that should receive this task.
+#[allow(clippy::type_complexity)]
+pub(crate) fn compute_elbv2_targets(
+    ecs_state: &crate::state::EcsState,
+    task: &crate::state::Task,
+) -> Vec<(String, Vec<(String, Option<i64>)>)> {
+    let mut result = Vec::new();
+    let Some(group) = task.group.as_deref() else {
+        return result;
+    };
+    let service_name = group.strip_prefix("service:").unwrap_or(group);
+    let key = crate::state::EcsState::service_key(&task.cluster_name, service_name);
+    let Some(service) = ecs_state.services.get(&key) else {
+        return result;
+    };
+
+    let network_mode = ecs_state
+        .task_definitions
+        .get(&task.family)
+        .and_then(|revs| revs.get(&task.revision))
+        .and_then(|td| td.network_mode.as_deref());
+
+    for lb in &service.load_balancers {
+        let tg_arn = lb.get("targetGroupArn").and_then(|v| v.as_str());
+        let container_name = lb.get("containerName").and_then(|v| v.as_str());
+        let container_port = lb.get("containerPort").and_then(|v| v.as_i64());
+        let Some(tg_arn) = tg_arn else { continue };
+        let Some(container_name) = container_name else {
+            continue;
+        };
+
+        let target_id = if network_mode == Some("awsvpc") {
+            task.attachments
+                .iter()
+                .find(|a| a.attachment_type == "eni")
+                .and_then(|eni| {
+                    eni.details
+                        .iter()
+                        .find(|d| d.name == "privateIPv4Address")
+                        .map(|d| d.value.clone())
+                })
+        } else {
+            Some("127.0.0.1".to_string())
+        };
+
+        let port = if network_mode == Some("awsvpc") {
+            container_port
+        } else {
+            task.containers
+                .iter()
+                .find(|c| c.name == container_name)
+                .and_then(|c| {
+                    c.network_bindings
+                        .iter()
+                        .find(|nb| {
+                            nb.get("containerPort").and_then(|v| v.as_i64()) == container_port
+                        })
+                        .and_then(|nb| nb.get("hostPort").and_then(|v| v.as_i64()))
+                })
+        };
+
+        if let Some(id) = target_id {
+            if let Some(entry) = result.iter_mut().find(|(arn, _)| arn == tg_arn) {
+                entry.1.push((id, port));
+            } else {
+                result.push((tg_arn.to_string(), vec![(id, port)]));
+            }
+        }
+    }
+    result
+}
+
 struct TaskSnapshot {
     task_arn: String,
     cluster_arn: String,
@@ -3382,5 +3494,261 @@ mod tests {
         let raw = serde_json::json!({"hostPath": "/dev/null", "containerPath": "/dev/null"});
         let dev = parse_device(&raw).expect("parses");
         assert_eq!(dev.permissions, "rwm");
+    }
+
+    #[test]
+    fn compute_elbv2_targets_empty_when_no_group() {
+        let mut accounts: MultiAccountState<EcsState> =
+            MultiAccountState::new("000000000000", "us-east-1", "http://localhost:4566");
+        let acct = accounts.get_or_create("000000000000");
+        let mut task = make_task("t1");
+        task.group = None;
+        acct.tasks.insert("t1".into(), task);
+        let state = acct.clone();
+        let targets = compute_elbv2_targets(&state, state.tasks.get("t1").unwrap());
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn compute_elbv2_targets_bridge_mode_uses_localhost_and_host_port() {
+        let mut accounts: MultiAccountState<EcsState> =
+            MultiAccountState::new("000000000000", "us-east-1", "http://localhost:4566");
+        let acct = accounts.get_or_create("000000000000");
+
+        let td = crate::state::TaskDefinition {
+            family: "app".into(),
+            revision: 1,
+            task_definition_arn: "arn:aws:ecs:us-east-1:000000000000:task-definition/app:1".into(),
+            container_definitions: Vec::new(),
+            network_mode: Some("bridge".into()),
+            status: "ACTIVE".into(),
+            task_role_arn: None,
+            execution_role_arn: None,
+            requires_compatibilities: Vec::new(),
+            compatibilities: Vec::new(),
+            cpu: None,
+            memory: None,
+            pid_mode: None,
+            ipc_mode: None,
+            volumes: Vec::new(),
+            placement_constraints: Vec::new(),
+            proxy_configuration: None,
+            inference_accelerators: Vec::new(),
+            ephemeral_storage: None,
+            runtime_platform: None,
+            requires_attributes: Vec::new(),
+            registered_at: Utc::now(),
+            registered_by: None,
+            deregistered_at: None,
+            tags: Vec::new(),
+            enable_fault_injection: None,
+        };
+        acct.task_definitions.insert("app".into(), {
+            let mut m = std::collections::BTreeMap::new();
+            m.insert(1, td);
+            m
+        });
+
+        let service = crate::state::Service {
+            service_name: "svc".into(),
+            service_arn: "arn:aws:ecs:us-east-1:000000000000:service/default/svc".into(),
+            cluster_name: "default".into(),
+            cluster_arn: "arn:aws:ecs:us-east-1:000000000000:cluster/default".into(),
+            task_definition_arn: "arn:aws:ecs:us-east-1:000000000000:task-definition/app:1".into(),
+            family: "app".into(),
+            revision: 1,
+            desired_count: 1,
+            running_count: 0,
+            pending_count: 0,
+            launch_type: "FARGATE".into(),
+            status: "ACTIVE".into(),
+            scheduling_strategy: "REPLICA".into(),
+            deployment_controller: "ECS".into(),
+            minimum_healthy_percent: Some(0),
+            maximum_percent: Some(200),
+            circuit_breaker: None,
+            deployments: Vec::new(),
+            load_balancers: vec![serde_json::json!({
+                "targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/tg/abc",
+                "containerName": "app",
+                "containerPort": 80,
+            })],
+            service_registries: Vec::new(),
+            placement_constraints: Vec::new(),
+            placement_strategy: Vec::new(),
+            network_configuration: None,
+            tags: Vec::new(),
+            created_at: Utc::now(),
+            created_by: None,
+            role_arn: None,
+            platform_version: None,
+            health_check_grace_period_seconds: None,
+            enable_execute_command: false,
+            enable_ecs_managed_tags: false,
+            propagate_tags: None,
+            capacity_provider_strategy: Vec::new(),
+            availability_zone_rebalancing: None,
+        };
+        acct.services.insert(
+            crate::state::EcsState::service_key("default", "svc"),
+            service,
+        );
+
+        let mut task = make_task("t1");
+        task.group = Some("service:svc".into());
+        task.containers = vec![crate::state::Container {
+            container_arn: "arn:aws:ecs:us-east-1:000000000000:container/default/abc/app".into(),
+            name: "app".into(),
+            image: "alpine".into(),
+            task_arn: task.task_arn.clone(),
+            last_status: "RUNNING".into(),
+            exit_code: None,
+            reason: None,
+            runtime_id: Some("dockerid-app".into()),
+            essential: true,
+            cpu: None,
+            memory: None,
+            memory_reservation: None,
+            network_bindings: vec![serde_json::json!({
+                "bindIP": "0.0.0.0",
+                "containerPort": 80,
+                "hostPort": 32768,
+                "protocol": "tcp",
+            })],
+            network_interfaces: Vec::new(),
+            health_status: None,
+            managed_agents: None,
+            image_digest: None,
+        }];
+        acct.tasks.insert("t1".into(), task);
+
+        let state = acct.clone();
+        let targets = compute_elbv2_targets(&state, state.tasks.get("t1").unwrap());
+        assert_eq!(targets.len(), 1);
+        let (arn, tg_targets) = &targets[0];
+        assert_eq!(
+            arn,
+            "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/tg/abc"
+        );
+        assert_eq!(tg_targets.len(), 1);
+        assert_eq!(tg_targets[0].0, "127.0.0.1");
+        assert_eq!(tg_targets[0].1, Some(32768));
+    }
+
+    #[test]
+    fn compute_elbv2_targets_awsvpc_uses_eni_ip() {
+        let mut accounts: MultiAccountState<EcsState> =
+            MultiAccountState::new("000000000000", "us-east-1", "http://localhost:4566");
+        let acct = accounts.get_or_create("000000000000");
+
+        let td = crate::state::TaskDefinition {
+            family: "app".into(),
+            revision: 1,
+            task_definition_arn: "arn:aws:ecs:us-east-1:000000000000:task-definition/app:1".into(),
+            container_definitions: Vec::new(),
+            network_mode: Some("awsvpc".into()),
+            status: "ACTIVE".into(),
+            task_role_arn: None,
+            execution_role_arn: None,
+            requires_compatibilities: Vec::new(),
+            compatibilities: Vec::new(),
+            cpu: None,
+            memory: None,
+            pid_mode: None,
+            ipc_mode: None,
+            volumes: Vec::new(),
+            placement_constraints: Vec::new(),
+            proxy_configuration: None,
+            inference_accelerators: Vec::new(),
+            ephemeral_storage: None,
+            runtime_platform: None,
+            requires_attributes: Vec::new(),
+            registered_at: Utc::now(),
+            registered_by: None,
+            deregistered_at: None,
+            tags: Vec::new(),
+            enable_fault_injection: None,
+        };
+        acct.task_definitions.insert("app".into(), {
+            let mut m = std::collections::BTreeMap::new();
+            m.insert(1, td);
+            m
+        });
+
+        let service = crate::state::Service {
+            service_name: "svc".into(),
+            service_arn: "arn:aws:ecs:us-east-1:000000000000:service/default/svc".into(),
+            cluster_name: "default".into(),
+            cluster_arn: "arn:aws:ecs:us-east-1:000000000000:cluster/default".into(),
+            task_definition_arn: "arn:aws:ecs:us-east-1:000000000000:task-definition/app:1".into(),
+            family: "app".into(),
+            revision: 1,
+            desired_count: 1,
+            running_count: 0,
+            pending_count: 0,
+            launch_type: "FARGATE".into(),
+            status: "ACTIVE".into(),
+            scheduling_strategy: "REPLICA".into(),
+            deployment_controller: "ECS".into(),
+            minimum_healthy_percent: Some(0),
+            maximum_percent: Some(200),
+            circuit_breaker: None,
+            deployments: Vec::new(),
+            load_balancers: vec![serde_json::json!({
+                "targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/tg/abc",
+                "containerName": "app",
+                "containerPort": 80,
+            })],
+            service_registries: Vec::new(),
+            placement_constraints: Vec::new(),
+            placement_strategy: Vec::new(),
+            network_configuration: None,
+            tags: Vec::new(),
+            created_at: Utc::now(),
+            created_by: None,
+            role_arn: None,
+            platform_version: None,
+            health_check_grace_period_seconds: None,
+            enable_execute_command: false,
+            enable_ecs_managed_tags: false,
+            propagate_tags: None,
+            capacity_provider_strategy: Vec::new(),
+            availability_zone_rebalancing: None,
+        };
+        acct.services.insert(
+            crate::state::EcsState::service_key("default", "svc"),
+            service,
+        );
+
+        let mut task = make_task("t1");
+        task.group = Some("service:svc".into());
+        task.attachments = vec![crate::state::TaskAttachment {
+            id: "eni-123".into(),
+            attachment_type: "eni".into(),
+            status: "ATTACHED".into(),
+            details: vec![
+                crate::state::AttachmentDetail {
+                    name: "privateIPv4Address".into(),
+                    value: "172.18.0.2".into(),
+                },
+                crate::state::AttachmentDetail {
+                    name: "macAddress".into(),
+                    value: "02:42:ac:12:00:02".into(),
+                },
+            ],
+        }];
+        acct.tasks.insert("t1".into(), task);
+
+        let state = acct.clone();
+        let targets = compute_elbv2_targets(&state, state.tasks.get("t1").unwrap());
+        assert_eq!(targets.len(), 1);
+        let (arn, tg_targets) = &targets[0];
+        assert_eq!(
+            arn,
+            "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/tg/abc"
+        );
+        assert_eq!(tg_targets.len(), 1);
+        assert_eq!(tg_targets[0].0, "172.18.0.2");
+        assert_eq!(tg_targets[0].1, Some(80));
     }
 }
