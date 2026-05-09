@@ -434,6 +434,10 @@ pub struct Task {
     /// the task uses `awsvpc` network mode. Synthetic for fakecloud.
     #[serde(default)]
     pub attachments: Vec<TaskAttachment>,
+    /// Per-task volume configurations (EBS / FSx) supplied at RunTask or
+    /// inherited from the service. Stored as raw JSON.
+    #[serde(default)]
+    pub volume_configurations: Vec<Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -578,6 +582,10 @@ pub struct Service {
     /// DISABLED (default). Surface field for AvailabilityZoneRebalancing.
     #[serde(default)]
     pub availability_zone_rebalancing: Option<String>,
+    /// Per-service volume configurations (EBS / FSx) inherited by tasks
+    /// launched under this service. Stored as raw JSON.
+    #[serde(default)]
+    pub volume_configurations: Vec<Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

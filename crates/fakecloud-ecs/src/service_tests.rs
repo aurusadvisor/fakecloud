@@ -81,6 +81,7 @@ fn resolve_service_key_handles_short_and_long() {
             propagate_tags: None,
             capacity_provider_strategy: vec![],
             availability_zone_rebalancing: None,
+            volume_configurations: vec![],
         },
     );
     // Long-form: cluster/service.

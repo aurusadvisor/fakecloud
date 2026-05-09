@@ -95,6 +95,11 @@ impl EcsService {
             .unwrap_or_default();
         let availability_zone_rebalancing =
             opt_str(&body, "availabilityZoneRebalancing").map(String::from);
+        let volume_configurations: Vec<Value> = body
+            .get("volumeConfigurations")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
 
         let runtime = self.runtime.clone();
         let account = request.account_id.clone();
@@ -187,6 +192,7 @@ impl EcsService {
                 propagate_tags: propagate_tags.clone(),
                 capacity_provider_strategy: capacity_provider_strategy.clone(),
                 availability_zone_rebalancing: availability_zone_rebalancing.clone(),
+                volume_configurations: volume_configurations.clone(),
             };
             state.services.insert(key.clone(), service.clone());
             if let Some(cluster) = state.clusters.get_mut(&cluster_name) {

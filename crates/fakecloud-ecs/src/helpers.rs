@@ -546,6 +546,12 @@ pub(crate) fn task_to_json(task: &Task) -> Value {
                 .collect::<Vec<_>>()),
         );
     }
+    if !task.volume_configurations.is_empty() {
+        map.insert(
+            "volumeConfigurations".into(),
+            Value::Array(task.volume_configurations.clone()),
+        );
+    }
     Value::Object(map)
 }
 
@@ -805,6 +811,7 @@ pub(crate) fn spawn_service_tasks(
             protection: None,
             enable_execute_command: service_exec,
             attachments: Vec::new(),
+            volume_configurations: Vec::new(),
         };
         state.tasks.insert(task_id.clone(), task);
         if let Some(cluster) = state.clusters.get_mut(&cluster_name) {
@@ -940,7 +947,10 @@ pub(crate) fn service_to_json(svc: &Service) -> Value {
             .as_deref()
             .unwrap_or("DISABLED")),
     );
-    map.insert("volumeConfigurations".into(), json!([]));
+    map.insert(
+        "volumeConfigurations".into(),
+        Value::Array(svc.volume_configurations.clone()),
+    );
     map.insert("taskSets".into(), json!([]));
     map.insert("events".into(), json!([]));
     map.insert(
