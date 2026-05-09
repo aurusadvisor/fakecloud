@@ -1559,10 +1559,20 @@ impl Wafv2Service {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let _name = require_str(&body, "Name")?;
-        let _id = require_str(&body, "Id")?;
-        let _lock_token = require_str(&body, "LockToken")?;
+        let name = require_str(&body, "Name")?;
+        fakecloud_core::validation::validate_string_length("Name", &name, 1, 128)?;
+        let id = require_str(&body, "Id")?;
+        fakecloud_core::validation::validate_string_length("Id", &id, 1, 255)?;
+        let lock_token = require_str(&body, "LockToken")?;
+        fakecloud_core::validation::validate_string_length("LockToken", &lock_token, 1, 36)?;
         let _scope = require_scope(&body)?;
+        let recommended_version = require_str(&body, "RecommendedVersion")?;
+        fakecloud_core::validation::validate_string_length(
+            "RecommendedVersion",
+            &recommended_version,
+            1,
+            64,
+        )?;
         Ok(AwsResponse::ok_json(json!({
             "NextLockToken": synth_uuid(),
         })))
@@ -1573,15 +1583,24 @@ impl Wafv2Service {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let _name = require_str(&body, "Name")?;
-        let _id = require_str(&body, "Id")?;
-        let _lock_token = require_str(&body, "LockToken")?;
+        let name = require_str(&body, "Name")?;
+        fakecloud_core::validation::validate_string_length("Name", &name, 1, 128)?;
+        let id = require_str(&body, "Id")?;
+        fakecloud_core::validation::validate_string_length("Id", &id, 1, 255)?;
+        let lock_token = require_str(&body, "LockToken")?;
+        fakecloud_core::validation::validate_string_length("LockToken", &lock_token, 1, 36)?;
         let _scope = require_scope(&body)?;
         let version_to_expire = require_str(&body, "VersionToExpire")?;
+        fakecloud_core::validation::validate_string_length(
+            "VersionToExpire",
+            &version_to_expire,
+            1,
+            64,
+        )?;
         let expiry_timestamp = body
             .get("ExpiryTimestamp")
             .and_then(Value::as_f64)
-            .unwrap_or_else(|| Utc::now().timestamp() as f64);
+            .ok_or_else(|| invalid_param("ExpiryTimestamp is required"))?;
         Ok(AwsResponse::ok_json(json!({
             "ExpiringVersion": version_to_expire,
             "ExpiryTimestamp": expiry_timestamp,
@@ -2183,5 +2202,117 @@ mod arn_norm_tests {
         assert_eq!(normalize_resource_arn(apigw), apigw);
         let cog = "arn:aws:cognito-idp:us-east-1:123456789012:userpool/us-east-1_xxx";
         assert_eq!(normalize_resource_arn(cog), cog);
+    }
+}
+
+#[cfg(test)]
+mod managed_rule_set_validation_tests {
+    use super::*;
+
+    fn make_body(fields: &[(&str, &str)]) -> Value {
+        let mut m = serde_json::Map::new();
+        for (k, v) in fields {
+            m.insert(k.to_string(), Value::String(v.to_string()));
+        }
+        Value::Object(m)
+    }
+
+    #[test]
+    fn put_managed_rule_set_versions_rejects_empty_name() {
+        let body = make_body(&[
+            ("Name", ""),
+            ("Id", "id"),
+            ("LockToken", "tok"),
+            ("Scope", "REGIONAL"),
+            ("RecommendedVersion", "1.0"),
+        ]);
+        let svc = Wafv2Service::default();
+        let req = AwsRequest {
+            service: "wafv2".into(),
+            action: "PutManagedRuleSetVersions".into(),
+            method: http::Method::POST,
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            path_segments: Vec::new(),
+            query_params: std::collections::HashMap::new(),
+            headers: http::HeaderMap::new(),
+            body: serde_json::to_vec(&body).unwrap().into(),
+            body_stream: parking_lot::Mutex::new(None),
+            account_id: "123456789012".into(),
+            region: "us-east-1".into(),
+            request_id: "r".into(),
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        };
+        let res = svc.put_managed_rule_set_versions(&req);
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().code(), "ValidationException");
+    }
+
+    #[test]
+    fn put_managed_rule_set_versions_rejects_long_name() {
+        let body = make_body(&[
+            ("Name", &"x".repeat(129)),
+            ("Id", "id"),
+            ("LockToken", "tok"),
+            ("Scope", "REGIONAL"),
+            ("RecommendedVersion", "1.0"),
+        ]);
+        let svc = Wafv2Service::default();
+        let req = AwsRequest {
+            service: "wafv2".into(),
+            action: "PutManagedRuleSetVersions".into(),
+            method: http::Method::POST,
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            path_segments: Vec::new(),
+            query_params: std::collections::HashMap::new(),
+            headers: http::HeaderMap::new(),
+            body: serde_json::to_vec(&body).unwrap().into(),
+            body_stream: parking_lot::Mutex::new(None),
+            account_id: "123456789012".into(),
+            region: "us-east-1".into(),
+            request_id: "r".into(),
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        };
+        let res = svc.put_managed_rule_set_versions(&req);
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().code(), "ValidationException");
+    }
+
+    #[test]
+    fn update_managed_rule_set_version_expiry_date_rejects_missing_timestamp() {
+        let body = make_body(&[
+            ("Name", "name"),
+            ("Id", "id"),
+            ("LockToken", "tok"),
+            ("Scope", "REGIONAL"),
+            ("VersionToExpire", "1.0"),
+        ]);
+        let svc = Wafv2Service::default();
+        let req = AwsRequest {
+            service: "wafv2".into(),
+            action: "UpdateManagedRuleSetVersionExpiryDate".into(),
+            method: http::Method::POST,
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            path_segments: Vec::new(),
+            query_params: std::collections::HashMap::new(),
+            headers: http::HeaderMap::new(),
+            body: serde_json::to_vec(&body).unwrap().into(),
+            body_stream: parking_lot::Mutex::new(None),
+            account_id: "123456789012".into(),
+            region: "us-east-1".into(),
+            request_id: "r".into(),
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        };
+        let res = svc.update_managed_rule_set_version_expiry_date(&req);
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().code(), "WAFInvalidParameterException");
     }
 }
