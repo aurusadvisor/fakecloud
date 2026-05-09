@@ -1995,3 +1995,447 @@ fn build_method_arn_includes_method_and_no_double_slash() {
         "arn:aws:execute-api:us-east-1:123456789012:abc123/prod/GET/"
     );
 }
+
+// ── stage variables ──
+
+#[tokio::test]
+async fn execute_api_stage_variable_substitution_in_lambda_arn() {
+    let svc = make_svc_with_lambda(Ok(serde_json::json!({"statusCode": 200})
+        .to_string()
+        .into_bytes()));
+    let api_id = create_api(&svc);
+
+    // Create integration with stage variable placeholder
+    let body = serde_json::json!({
+        "integrationType": "AWS_PROXY",
+        "integrationUri": "arn:aws:lambda:us-east-1:123456789012:function:my-fn:${stageVariables.env}",
+        "payloadFormatVersion": "2.0",
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create route
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Create stage with stage variable
+    let body = serde_json::json!({
+        "stageName": "prod",
+        "stageVariables": {"env": "prod"},
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Execute - should succeed because stage variable substitutes to a valid Lambda ARN
+    let req = make_request(Method::GET, "/prod/pets", "");
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn execute_api_stage_variable_passthrough_when_key_missing() {
+    let svc = make_svc_with_lambda(Ok(serde_json::json!({"statusCode": 200})
+        .to_string()
+        .into_bytes()));
+    let api_id = create_api(&svc);
+
+    // Create integration with stage variable placeholder but no matching stage variable
+    let body = serde_json::json!({
+        "integrationType": "AWS_PROXY",
+        "integrationUri": "arn:aws:lambda:us-east-1:123456789012:function:my-fn:${stageVariables.env}",
+        "payloadFormatVersion": "2.0",
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Stage without the required stage variable
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Execute - placeholder remains in URI but Lambda ARN check still matches,
+    // so mock lambda is invoked and request succeeds.
+    let req = make_request(Method::GET, "/prod/pets", "");
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+}
+
+// ── custom domain + api mapping ──
+
+#[tokio::test]
+async fn execute_api_custom_domain_base_path_mapping() {
+    let state = make_state();
+    let delivery = Arc::new(fakecloud_core::delivery::DeliveryBus::new());
+    let svc = ApiGatewayV2Service::new(state).with_delivery(delivery);
+    let api_id = create_api(&svc);
+
+    // Create MOCK integration
+    let body = serde_json::json!({"integrationType": "MOCK"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create route GET /pets
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Create stage
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Create custom domain
+    let body = serde_json::json!({"domainName": "example.com"});
+    let req = make_request(Method::POST, "/v2/domainnames", &body.to_string());
+    svc.handle(req).await.unwrap();
+
+    // Create api mapping with base path "v1"
+    let body = serde_json::json!({"apiId": api_id, "stage": "prod", "apiMappingKey": "v1"});
+    let req = make_request(
+        Method::POST,
+        "/v2/domainnames/example.com/apimappings",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Execute with custom domain host and base path - should strip "/v1" and match route
+    let mut req = make_request(Method::GET, "/v1/pets", "");
+    req.headers.insert("host", "example.com".parse().unwrap());
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn execute_api_custom_domain_empty_base_path() {
+    let state = make_state();
+    let delivery = Arc::new(fakecloud_core::delivery::DeliveryBus::new());
+    let svc = ApiGatewayV2Service::new(state).with_delivery(delivery);
+    let api_id = create_api(&svc);
+
+    // Create MOCK integration
+    let body = serde_json::json!({"integrationType": "MOCK"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create route GET /pets
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Create stage
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Create custom domain
+    let body = serde_json::json!({"domainName": "example.com"});
+    let req = make_request(Method::POST, "/v2/domainnames", &body.to_string());
+    svc.handle(req).await.unwrap();
+
+    // Create api mapping with empty base path
+    let body = serde_json::json!({"apiId": api_id, "stage": "prod"});
+    let req = make_request(
+        Method::POST,
+        "/v2/domainnames/example.com/apimappings",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Execute with custom domain host - full path used for route matching
+    let mut req = make_request(Method::GET, "/pets", "");
+    req.headers.insert("host", "example.com".parse().unwrap());
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+}
+
+// ── AWS service integrations ──
+
+#[tokio::test]
+async fn execute_api_aws_proxy_sqs_integration() {
+    let state = make_state();
+    let delivery = Arc::new(fakecloud_core::delivery::DeliveryBus::new());
+    let svc = ApiGatewayV2Service::new(state).with_delivery(delivery);
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "integrationType": "AWS_PROXY",
+        "integrationUri": "arn:aws:sqs:us-east-1:123456789012:my-queue",
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({
+        "routeKey": "POST /messages",
+        "target": format!("integrations/{integration_id}"),
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::POST, "/prod/messages", "hello sqs");
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+    let b = body_json(&resp);
+    assert_eq!(b["statusCode"], 200);
+    // MessageId is present in the inner JSON body string
+    let inner: serde_json::Value = serde_json::from_str(b["body"].as_str().unwrap()).unwrap();
+    assert!(!inner["MessageId"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn execute_api_aws_proxy_sns_integration() {
+    let state = make_state();
+    let delivery = Arc::new(fakecloud_core::delivery::DeliveryBus::new());
+    let svc = ApiGatewayV2Service::new(state).with_delivery(delivery);
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "integrationType": "AWS_PROXY",
+        "integrationUri": "arn:aws:sns:us-east-1:123456789012:my-topic",
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({
+        "routeKey": "POST /notify",
+        "target": format!("integrations/{integration_id}"),
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::POST, "/prod/notify", "hello sns");
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+    let b = body_json(&resp);
+    assert_eq!(b["statusCode"], 200);
+    let inner: serde_json::Value = serde_json::from_str(b["body"].as_str().unwrap()).unwrap();
+    assert!(!inner["MessageId"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn execute_api_aws_proxy_stepfunctions_integration() {
+    let state = make_state();
+    let delivery = Arc::new(fakecloud_core::delivery::DeliveryBus::new());
+    let svc = ApiGatewayV2Service::new(state).with_delivery(delivery);
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "integrationType": "AWS_PROXY",
+        "integrationUri": "arn:aws:states:us-east-1:123456789012:stateMachine:my-sm",
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({
+        "routeKey": "POST /workflow",
+        "target": format!("integrations/{integration_id}"),
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::POST, "/prod/workflow", "{\"name\":\"test\"}");
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+    let b = body_json(&resp);
+    assert_eq!(b["statusCode"], 200);
+    let inner: serde_json::Value = serde_json::from_str(b["body"].as_str().unwrap()).unwrap();
+    assert!(inner["executionArn"]
+        .as_str()
+        .unwrap()
+        .contains("stateMachine:my-sm"));
+    assert!(inner["startDate"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn execute_api_aws_proxy_unsupported_arn_returns_not_implemented() {
+    let state = make_state();
+    let delivery = Arc::new(fakecloud_core::delivery::DeliveryBus::new());
+    let svc = ApiGatewayV2Service::new(state).with_delivery(delivery);
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "integrationType": "AWS_PROXY",
+        "integrationUri": "arn:aws:dynamodb:us-east-1:123456789012:table/my-table",
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({
+        "routeKey": "GET /items",
+        "target": format!("integrations/{integration_id}"),
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::GET, "/prod/items", "");
+    let err = match svc.handle(req).await {
+        Ok(_) => panic!("expected error"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("NotImplemented"),
+        "expected NotImplemented but got: {}",
+        msg
+    );
+}

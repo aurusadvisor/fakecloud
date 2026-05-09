@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use http::{Method, StatusCode};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -1265,6 +1266,11 @@ impl ApiGatewayV2Service {
         let description = body["description"].as_str().map(|s| s.to_string());
         let auto_deploy = body["autoDeploy"].as_bool().unwrap_or(false);
         let deployment_id = body["deploymentId"].as_str().map(|s| s.to_string());
+        let stage_variables = body["stageVariables"].as_object().map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect::<BTreeMap<String, String>>()
+        });
 
         let created_date = chrono::Utc::now();
 
@@ -1276,6 +1282,7 @@ impl ApiGatewayV2Service {
             created_date,
             last_updated_date: None,
             web_acl_arn: None,
+            stage_variables,
         };
 
         let mut accounts = self.state.write();
@@ -1446,6 +1453,16 @@ impl ApiGatewayV2Service {
 
         if let Some(deployment_id) = body["deploymentId"].as_str() {
             stage.deployment_id = Some(deployment_id.to_string());
+        }
+
+        if let Some(vars) = body["stageVariables"].as_object() {
+            let mut map = BTreeMap::new();
+            for (k, v) in vars.iter() {
+                if let Some(s) = v.as_str() {
+                    map.insert(k.clone(), s.to_string());
+                }
+            }
+            stage.stage_variables = Some(map);
         }
 
         stage.last_updated_date = Some(chrono::Utc::now());
@@ -1947,59 +1964,92 @@ impl ApiGatewayV2Service {
 
     // ─── EXECUTE API ────────────────────────────────────────────────────
 
-    async fn handle_execute_api(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        // Execute API format: /{stage}/{path...}
-        if req.path_segments.is_empty() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "NotFoundException",
-                "Stage not specified",
-            ));
-        }
-
-        let stage_name = &req.path_segments[0];
-        let resource_path = format!("/{}", req.path_segments[1..].join("/"));
-
-        // Find the API for this stage and get CORS configuration
-        let (api_id, routes, cors_config) = {
+    async fn handle_execute_api(
+        &self,
+        mut req: AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // Try custom domain resolution first.
+        let (api_id, stage_name, stage_vars) = {
             let accounts = self.state.read();
             let empty = ApiGatewayV2State::new(&req.account_id, &req.region);
             let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
-            // Find which API has this stage (sort by API ID for deterministic resolution)
-            let mut stage_entries: Vec<_> = state
-                .stages
-                .iter()
-                .filter_map(|(api_id, stages)| {
-                    stages
-                        .get(stage_name)
-                        .map(|stage| (api_id.clone(), stage.clone()))
-                })
-                .collect();
-            stage_entries.sort_by(|a, b| a.0.cmp(&b.0));
-            let (api_id, _stage) = stage_entries.into_iter().next().ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "NotFoundException",
-                    format!("Stage not found: {}", stage_name),
-                )
-            })?;
+            if let Some((api_id, stage_name, new_segs, new_raw_path)) =
+                resolve_custom_domain(&req, state)
+            {
+                req.path_segments = new_segs;
+                req.raw_path = new_raw_path;
+                let stage_vars = state
+                    .stages
+                    .get(&api_id)
+                    .and_then(|stages| stages.get(&stage_name))
+                    .and_then(|s| s.stage_variables.clone())
+                    .unwrap_or_default();
+                (api_id, stage_name, stage_vars)
+            } else {
+                // Execute API format: /{stage}/{path...}
+                if req.path_segments.is_empty() {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "NotFoundException",
+                        "Stage not specified",
+                    ));
+                }
+                let stage_name = req.path_segments[0].clone();
+                // Strip the stage segment so route matching uses the resource path.
+                req.path_segments.remove(0);
+                let stage_vars = state
+                    .stages
+                    .iter()
+                    .find_map(|(_, stages)| stages.get(&stage_name))
+                    .and_then(|s| s.stage_variables.clone())
+                    .unwrap_or_default();
+                // Find which API has this stage (sort by API ID for deterministic resolution)
+                let mut stage_entries: Vec<_> = state
+                    .stages
+                    .iter()
+                    .filter_map(|(api_id, stages)| {
+                        stages
+                            .get(&stage_name)
+                            .map(|stage| (api_id.clone(), stage.clone()))
+                    })
+                    .collect();
+                stage_entries.sort_by(|a, b| a.0.cmp(&b.0));
+                let (api_id, _) = stage_entries.into_iter().next().ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "NotFoundException",
+                        format!("Stage not found: {}", stage_name),
+                    )
+                })?;
+                (api_id, stage_name, stage_vars)
+            }
+        };
 
-            // Get routes for this API
+        let resource_path = if req.path_segments.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", req.path_segments.join("/"))
+        };
+
+        let (routes, cors_config) = {
+            let accounts = self.state.read();
+            let empty = ApiGatewayV2State::new(&req.account_id, &req.region);
+            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
             let routes = state
                 .routes
                 .get(&api_id)
                 .map(|r| r.values().cloned().collect())
                 .unwrap_or_default();
 
-            // Get CORS configuration from API
             let cors_config = state
                 .apis
                 .get(&api_id)
                 .and_then(|api| api.cors_configuration.clone());
 
-            Ok::<_, AwsServiceError>((api_id, routes, cors_config))
-        }?;
+            (routes, cors_config)
+        };
 
         // Handle CORS preflight requests
         if let Some(ref cors_cfg) = cors_config {
@@ -2013,11 +2063,11 @@ impl ApiGatewayV2Service {
         // evaluate the request before route match / authorizer /
         // integration. Block / Captcha / Challenge short-circuit;
         // Count is recorded but lets the request continue.
-        if let Some(resp) = self.evaluate_waf(&req, &api_id, stage_name) {
+        if let Some(resp) = self.evaluate_waf(&req, &api_id, &stage_name) {
             self.record_request(
                 &req,
                 &api_id,
-                stage_name,
+                &stage_name,
                 &resource_path,
                 resp.status.as_u16(),
             );
@@ -2055,7 +2105,7 @@ impl ApiGatewayV2Service {
                 )
             })?;
 
-        let integration = {
+        let mut integration = {
             let accounts = self.state.read();
             let empty = ApiGatewayV2State::new(&req.account_id, &req.region);
             let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -2073,10 +2123,17 @@ impl ApiGatewayV2Service {
                 .clone()
         };
 
+        // Substitute stage variables into the integration URI before dispatch.
+        if let Some(ref uri) = integration.integration_uri {
+            let substituted = substitute_stage_variables(uri, &stage_vars);
+            if substituted != *uri {
+                integration.integration_uri = Some(substituted);
+            }
+        }
+
         // Handle based on integration type
         let mut response = match integration.integration_type.as_str() {
             "AWS_PROXY" => {
-                // Lambda proxy integration
                 let delivery = self.delivery.as_ref().ok_or_else(|| {
                     AwsServiceError::aws_error(
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -2085,7 +2142,7 @@ impl ApiGatewayV2Service {
                     )
                 })?;
 
-                let function_arn = integration.integration_uri.as_ref().ok_or_else(|| {
+                let integration_uri = integration.integration_uri.as_ref().ok_or_else(|| {
                     AwsServiceError::aws_error(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "InternalError",
@@ -2093,15 +2150,18 @@ impl ApiGatewayV2Service {
                     )
                 })?;
 
-                let event = lambda_proxy::construct_event(
-                    &req,
-                    &route_match.route.route_key,
-                    stage_name,
-                    route_match.path_parameters,
-                    authorizer_info,
-                );
-
-                lambda_proxy::invoke_lambda(delivery, function_arn, event).await?
+                if is_lambda_arn(integration_uri) {
+                    let event = lambda_proxy::construct_event(
+                        &req,
+                        &route_match.route.route_key,
+                        &stage_name,
+                        route_match.path_parameters,
+                        authorizer_info,
+                    );
+                    lambda_proxy::invoke_lambda(delivery, integration_uri, event).await?
+                } else {
+                    dispatch_aws_service_integration(delivery, integration_uri, &req)?
+                }
             }
             "HTTP_PROXY" => {
                 // HTTP proxy integration
@@ -2140,7 +2200,7 @@ impl ApiGatewayV2Service {
         self.record_request(
             &req,
             &api_id,
-            stage_name,
+            &stage_name,
             &resource_path,
             response.status.as_u16(),
         );
@@ -2743,6 +2803,147 @@ fn arn_matches(pattern: &str, target: &str) -> bool {
             _ => return false,
         }
     }
+}
+
+/// Replace `${stageVariables.<name>}` placeholders in `uri` with values
+/// from `stage_variables`. Unknown names are left as-is.
+fn substitute_stage_variables(uri: &str, stage_variables: &BTreeMap<String, String>) -> String {
+    let mut result = uri.to_string();
+    for (k, v) in stage_variables {
+        let placeholder = format!("${{stageVariables.{}}}", k);
+        result = result.replace(&placeholder, v);
+    }
+    result
+}
+
+/// When the request Host header matches a custom domain name, look up
+/// the ApiMapping for the base path and return `(api_id, stage_name,
+/// remaining_path_segments, resource_path)`.
+///
+/// The returned `remaining_path_segments` is what should be used for
+/// route matching (the base path prefix is stripped). `resource_path`
+/// is the display path recorded in request history.
+fn resolve_custom_domain(
+    req: &AwsRequest,
+    state: &ApiGatewayV2State,
+) -> Option<(String, String, Vec<String>, String)> {
+    let host = req.headers.get("host").and_then(|v| v.to_str().ok())?;
+
+    // Only consider hosts that don't look like the default execute-api endpoint.
+    if host.contains(".execute-api.") {
+        return None;
+    }
+
+    let domain = state.domain_names.get(host)?;
+    let domain_name = domain["DomainName"].as_str()?;
+
+    let mappings = state.api_mappings.get(domain_name)?;
+    if mappings.is_empty() {
+        return None;
+    }
+
+    // Find the mapping whose ApiMappingKey matches the longest prefix of the path.
+    let raw_path = &req.raw_path;
+    let mut best: Option<(&str, &str, Vec<String>, String)> = None;
+
+    for mapping in mappings.values() {
+        let key = mapping["ApiMappingKey"].as_str().unwrap_or("");
+        let api_id = mapping["ApiId"].as_str()?;
+        let stage = mapping["Stage"].as_str()?;
+
+        let (stripped_path, remaining) = if key.is_empty() {
+            (raw_path.to_string(), raw_path.to_string())
+        } else {
+            let prefix = format!("/{}/", key);
+            let prefix_root = format!("/{}", key);
+            if *raw_path == *prefix_root || raw_path.starts_with(&prefix) {
+                let rest = &raw_path[prefix_root.len()..];
+                (rest.to_string(), rest.to_string())
+            } else {
+                continue;
+            }
+        };
+
+        let segs: Vec<String> = if stripped_path.is_empty() || stripped_path == "/" {
+            vec![]
+        } else {
+            stripped_path
+                .split('/')
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect()
+        };
+
+        let best_key_len = best.as_ref().map(|(k, _, _, _)| k.len()).unwrap_or(0);
+        if key.len() >= best_key_len {
+            best = Some((api_id, stage, segs, remaining));
+        }
+    }
+
+    best.map(|(api_id, stage, segs, resource_path)| {
+        (api_id.to_string(), stage.to_string(), segs, resource_path)
+    })
+}
+
+/// Returns true when `uri` is a Lambda function ARN.
+fn is_lambda_arn(uri: &str) -> bool {
+    uri.starts_with("arn:aws:lambda:") && uri.contains(":function:")
+}
+
+/// Dispatch a non-Lambda AWS_PROXY integration to the appropriate
+/// AWS service via the delivery bus. Supported targets:
+///   - SQS queue ARN
+///   - SNS topic ARN
+///   - StepFunctions state-machine ARN
+fn dispatch_aws_service_integration(
+    delivery: &DeliveryBus,
+    integration_uri: &str,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    if integration_uri.starts_with("arn:aws:sqs:") {
+        let message = String::from_utf8_lossy(&req.body);
+        delivery.send_to_sqs(integration_uri, &message, &std::collections::HashMap::new());
+        return Ok(AwsResponse::ok_json(json!({
+            "statusCode": 200,
+            "body": json!({"MessageId": uuid::Uuid::new_v4().to_string()}).to_string()
+        })));
+    }
+
+    if integration_uri.starts_with("arn:aws:sns:") {
+        let message = String::from_utf8_lossy(&req.body);
+        let subject = req
+            .headers
+            .get("x-amz-sns-subject")
+            .and_then(|v| v.to_str().ok());
+        delivery.publish_to_sns(integration_uri, &message, subject);
+        return Ok(AwsResponse::ok_json(json!({
+            "statusCode": 200,
+            "body": json!({"MessageId": uuid::Uuid::new_v4().to_string()}).to_string()
+        })));
+    }
+
+    if integration_uri.starts_with("arn:aws:states:") && integration_uri.contains(":stateMachine:")
+    {
+        let input = String::from_utf8_lossy(&req.body);
+        let execution_name = format!("apigw-{}-{}", req.request_id, uuid::Uuid::new_v4().simple());
+        delivery.start_stepfunctions_execution(integration_uri, &input);
+        return Ok(AwsResponse::ok_json(json!({
+            "statusCode": 200,
+            "body": json!({
+                "executionArn": format!("{}/execution/{}", integration_uri, execution_name),
+                "startDate": chrono::Utc::now().to_rfc3339()
+            }).to_string()
+        })));
+    }
+
+    Err(AwsServiceError::aws_error(
+        StatusCode::NOT_IMPLEMENTED,
+        "NotImplemented",
+        format!(
+            "AWS_PROXY integration target not supported: {}",
+            integration_uri
+        ),
+    ))
 }
 
 #[path = "service_helpers.rs"]

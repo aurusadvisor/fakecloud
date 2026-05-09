@@ -15470,6 +15470,15 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .map(String::from);
 
+        let stage_variables = props
+            .get("StageVariables")
+            .and_then(|v| v.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            });
+
         let stage = ApiGwV2Stage {
             stage_name: stage_name.clone(),
             description: props
@@ -15481,6 +15490,7 @@ impl ResourceProvisioner {
             created_date: Utc::now(),
             last_updated_date: None,
             web_acl_arn: None,
+            stage_variables,
         };
 
         let mut accounts = self.apigatewayv2_state.write();
