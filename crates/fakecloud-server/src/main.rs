@@ -2411,7 +2411,8 @@ async fn main() {
             None
         };
     let mut apigw_v1_service = ApiGatewayService::new(apigatewayv1_state.clone())
-        .with_waf(wafv2_state.clone(), wafv2_rate_limiter.clone());
+        .with_waf(wafv2_state.clone(), wafv2_rate_limiter.clone())
+        .with_elbv2(elbv2_state.clone());
     {
         let cognito_jwt_verifier: Arc<dyn fakecloud_core::delivery::CognitoJwtVerifier> = Arc::new(
             fakecloud_cognito::StateBackedJwtVerifier::new(cognito_state.clone()),
