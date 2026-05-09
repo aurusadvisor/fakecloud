@@ -88,13 +88,16 @@ pub async fn handle(
     // When the Host header matches a DomainName's regionalDomainName,
     // look up BasePathMappings to determine the target API + stage.
     // The longest matching basePath prefix wins (AWS behavior).
-    let (stage_name, remaining, custom_domain_api_hint) = resolve_custom_domain(service, req);
-    let stage_name = stage_name.unwrap_or_else(|| req.path_segments[0].clone());
-    let remaining = if remaining.is_empty() {
-        req.path_segments[1..].to_vec()
-    } else {
-        remaining
+    let (stage_name, remaining, custom_domain_api_hint) = match resolve_custom_domain(service, req)
+    {
+        Some(triple) => triple,
+        None => {
+            let stage = req.path_segments[0].clone();
+            let rest = req.path_segments[1..].to_vec();
+            (Some(stage), rest, None)
+        }
     };
+    let stage_name = stage_name.unwrap_or_else(|| req.path_segments[0].clone());
 
     // Find the API/stage pair that owns this request.
     let DataPlaneMatch {
@@ -1886,26 +1889,23 @@ fn decision_to_response(decision: fakecloud_wafv2::Decision) -> Option<AwsRespon
 /// `regionalDomainName`, look up BasePathMappings for that domain and
 /// return the resolved `(stage, remaining_path_segments, api_id_hint)`.
 /// The longest matching `basePath` prefix wins — AWS semantics.
-/// Returns `(None, [], None)` when no custom domain matches, letting the
-/// caller fall back to the default stage-in-first-segment behaviour.
+/// Returns `None` when no custom domain matches, letting the caller fall
+/// back to the default stage-in-first-segment behaviour.
 fn resolve_custom_domain(
     service: &ApiGatewayService,
     req: &AwsRequest,
-) -> (Option<String>, Vec<String>, Option<String>) {
+) -> Option<(Option<String>, Vec<String>, Option<String>)> {
     let host = req
         .headers
         .get("host")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if host.is_empty() {
-        return (None, Vec::new(), None);
+        return None;
     }
 
     let accounts = service.state_handle().read();
-    let state = match accounts.get(&req.account_id) {
-        Some(s) => s,
-        None => return (None, Vec::new(), None),
-    };
+    let state = accounts.get(&req.account_id)?;
 
     // Find domain whose regionalDomainName matches the Host header.
     let domain_entry = state.domain_names.iter().find(|(_name, value)| {
@@ -1914,15 +1914,9 @@ fn resolve_custom_domain(
             .and_then(Value::as_str)
             .is_some_and(|rdn| rdn.eq_ignore_ascii_case(host))
     });
-    let (domain_name, _domain_value) = match domain_entry {
-        Some(e) => e,
-        None => return (None, Vec::new(), None),
-    };
+    let (domain_name, _domain_value) = domain_entry?;
 
-    let mappings = match state.base_path_mappings.get(domain_name) {
-        Some(m) => m,
-        None => return (None, Vec::new(), None),
-    };
+    let mappings = state.base_path_mappings.get(domain_name)?;
 
     // Find the longest matching basePath prefix.
     // AWS sorts by basePath length descending; `(none)` = empty prefix.
@@ -1952,10 +1946,10 @@ fn resolve_custom_domain(
             .and_then(Value::as_str)
             .map(String::from);
         let remaining = req.path_segments[prefix_len..].to_vec();
-        return (stage, remaining, api_id);
+        return Some((stage, remaining, api_id));
     }
 
-    (None, Vec::new(), None)
+    None
 }
 
 #[cfg(test)]
@@ -2020,10 +2014,7 @@ mod tests {
         let state = build_state("NONE", None);
         let service = ApiGatewayService::new(state);
         let req = make_request(HeaderMap::new());
-        let (stage, remaining, api) = resolve_custom_domain(&service, &req);
-        assert!(stage.is_none());
-        assert!(remaining.is_empty());
-        assert!(api.is_none());
+        assert!(resolve_custom_domain(&service, &req).is_none());
     }
 
     #[test]
@@ -2050,7 +2041,7 @@ mod tests {
         let mut req = make_request(headers);
         req.path_segments = vec!["v1".to_string(), "items".to_string()];
 
-        let (stage, remaining, api) = resolve_custom_domain(&service, &req);
+        let (stage, remaining, api) = resolve_custom_domain(&service, &req).unwrap();
         assert_eq!(stage, Some("prod".to_string()));
         assert_eq!(remaining, vec!["items".to_string()]);
         assert_eq!(api, Some(TEST_API_ID.to_string()));
@@ -2088,7 +2079,7 @@ mod tests {
             "items".to_string(),
         ];
 
-        let (stage, remaining, api) = resolve_custom_domain(&service, &req);
+        let (stage, remaining, api) = resolve_custom_domain(&service, &req).unwrap();
         assert_eq!(stage, Some("dev".to_string()));
         assert_eq!(remaining, vec!["items".to_string()]);
         assert_eq!(api, Some("other123".to_string()));
@@ -2118,9 +2109,40 @@ mod tests {
         let mut req = make_request(headers);
         req.path_segments = vec!["items".to_string()];
 
-        let (stage, remaining, api) = resolve_custom_domain(&service, &req);
+        let (stage, remaining, api) = resolve_custom_domain(&service, &req).unwrap();
         assert_eq!(stage, Some("prod".to_string()));
         assert_eq!(remaining, vec!["items".to_string()]);
+        assert_eq!(api, Some(TEST_API_ID.to_string()));
+    }
+
+    #[test]
+    fn resolve_custom_domain_exact_base_path_leaves_empty_remaining() {
+        let state = build_state("NONE", None);
+        {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(TEST_ACCOUNT);
+            s.domain_names.insert(
+                "api.example.com".to_string(),
+                json!({"regionalDomainName": "api.example.com.fakecloud"}),
+            );
+            let mut mappings = BTreeMap::new();
+            mappings.insert(
+                "v1".to_string(),
+                json!({"restApiId": TEST_API_ID, "stage": "prod"}),
+            );
+            s.base_path_mappings
+                .insert("api.example.com".to_string(), mappings);
+        }
+        let service = ApiGatewayService::new(state);
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "api.example.com.fakecloud".parse().unwrap());
+        let mut req = make_request(headers);
+        // Request path is exactly the base path "v1" — no trailing segments.
+        req.path_segments = vec!["v1".to_string()];
+
+        let (stage, remaining, api) = resolve_custom_domain(&service, &req).unwrap();
+        assert_eq!(stage, Some("prod".to_string()));
+        assert!(remaining.is_empty());
         assert_eq!(api, Some(TEST_API_ID.to_string()));
     }
 
