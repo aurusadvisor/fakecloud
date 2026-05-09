@@ -166,6 +166,11 @@ pub struct ApiGatewayService {
     /// by `"<acl-arn>|<rule-name>"`; exposed via the admin endpoint
     /// for tests and future metrics scraping.
     pub(crate) waf_count_metrics: Arc<parking_lot::Mutex<BTreeMap<String, u64>>>,
+    /// Deferred-fill handle to the central [`ServiceRegistry`]. Populated
+    /// after all services have been registered so AWS direct integrations
+    /// can dispatch to other fakecloud service handlers.
+    pub(crate) registry:
+        Option<Arc<std::sync::OnceLock<Arc<fakecloud_core::registry::ServiceRegistry>>>>,
 }
 
 impl ApiGatewayService {
@@ -181,6 +186,7 @@ impl ApiGatewayService {
             waf_state: None,
             waf_rate_limiter: None,
             waf_count_metrics: Arc::new(parking_lot::Mutex::new(BTreeMap::new())),
+            registry: None,
         }
     }
 
@@ -216,8 +222,22 @@ impl ApiGatewayService {
         self.waf_count_metrics.lock().clone()
     }
 
+    pub fn with_registry(
+        mut self,
+        registry: Arc<std::sync::OnceLock<Arc<fakecloud_core::registry::ServiceRegistry>>>,
+    ) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
     pub(crate) fn delivery(&self) -> Option<&Arc<DeliveryBus>> {
         self.delivery.as_ref()
+    }
+
+    pub(crate) fn registry(
+        &self,
+    ) -> Option<&Arc<std::sync::OnceLock<Arc<fakecloud_core::registry::ServiceRegistry>>>> {
+        self.registry.as_ref()
     }
 
     pub fn state_handle(&self) -> &SharedApiGatewayState {
