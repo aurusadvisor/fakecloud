@@ -309,6 +309,10 @@ pub struct Stage {
     /// is attached, which is the common case.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub web_acl_arn: Option<String>,
+    /// Stage variables substituted into integration URIs at request
+    /// time via `${stageVariables.<name>}`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub stage_variables: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
