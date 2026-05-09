@@ -1093,7 +1093,7 @@ fn apply_request_template(
 #[allow(clippy::too_many_arguments)]
 async fn apply_response_template(
     backend_resp: AwsResponse,
-    _integration: &Integration,
+    integration: &Integration,
     req: &AwsRequest,
     vtl_ctx: &mut crate::vtl::Context,
     api_id: &str,
@@ -1104,7 +1104,7 @@ async fn apply_response_template(
     service: &ApiGatewayService,
 ) -> Result<AwsResponse, AwsServiceError> {
     let status_code = backend_resp.status.as_u16().to_string();
-    let key = response_key(api_id, resource_path, req.method.as_str(), &status_code);
+    let key = response_key(api_id, resource_path, &integration.http_method, &status_code);
     let accounts = service.state_handle().read();
     let state = accounts.get(&req.account_id);
     let resp_template = state.and_then(|st| {
@@ -1146,14 +1146,14 @@ async fn apply_response_template(
 #[allow(clippy::too_many_arguments)]
 async fn mock_response(
     req: &AwsRequest,
-    _integration: &Integration,
+    integration: &Integration,
     vtl_ctx: &mut crate::vtl::Context,
     api_id: &str,
     resource_path: &str,
     _stage_name: &str,
     service: &ApiGatewayService,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let method = req.method.as_str();
+    let method = integration.http_method.as_str();
     // Default to 200 when no explicit status code is configured.
     let status_code = "200";
     let key = response_key(api_id, resource_path, method, status_code);

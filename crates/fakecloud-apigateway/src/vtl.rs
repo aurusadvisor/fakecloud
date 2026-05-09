@@ -569,12 +569,13 @@ fn eval_method(name: &str, args: &[Value], receiver: &Value, _ctx: &mut Context)
             }
         }
         "escapeJavaScript" => {
-            if let Some(arg) = args.first() {
-                let s = json_to_string(arg);
-                return serde_json::to_string(&s).unwrap_or_default().into();
-            }
-            serde_json::to_string(&json_to_string(receiver))
-                .unwrap_or_default()
+            let src = args.first().map(json_to_string).unwrap_or_else(|| json_to_string(receiver));
+            let json = serde_json::to_string(&src).unwrap_or_default();
+            // Strip the JSON wrapping quotes; AWS returns only the escaped
+            // content so templates can embed it inside their own quotes.
+            json.strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .unwrap_or(&json)
                 .into()
         }
         "urlEncode" => {
@@ -658,13 +659,24 @@ fn is_truthy(val: &Value) -> bool {
 }
 
 fn find_binary_op(expr: &str) -> Option<(&str, &str, &str)> {
+    // Lower number = lower precedence (binds looser, so split here first).
+    let precedence = |op: &str| match op {
+        "||" => 1,
+        "&&" => 2,
+        "==" | "!=" => 3,
+        "<" | ">" | "<=" | ">=" => 4,
+        "+" | "-" => 5,
+        "*" | "/" => 6,
+        _ => 100,
+    };
     let ops = [
-        "==", "!=", "<=", ">=", "&&", "||", "<", ">", "+", "-", "*", "/",
+        "||", "&&", "==", "!=", "<=", ">=", "<", ">", "+", "-", "*", "/",
     ];
     let mut depth = 0;
     let mut in_string = false;
     let mut string_char = ' ';
     let mut escaped = false;
+    let mut best: Option<(usize, &str)> = None;
     for (i, c) in expr.char_indices() {
         if escaped {
             escaped = false;
@@ -696,14 +708,25 @@ fn find_binary_op(expr: &str) -> Option<(&str, &str, &str)> {
         if depth == 0 {
             for op in &ops {
                 if expr[i..].starts_with(op) {
-                    let lhs = expr[..i].trim();
-                    let rhs = expr[i + op.len()..].trim();
-                    return Some((*op, lhs, rhs));
+                    let p = precedence(op);
+                    let replace = if let Some((bi, cur)) = best {
+                        let cur_p = precedence(cur);
+                        p < cur_p || (p == cur_p && i > bi)
+                    } else {
+                        true
+                    };
+                    if replace {
+                        best = Some((i, *op));
+                    }
                 }
             }
         }
     }
-    None
+    best.map(|(i, op)| {
+        let lhs = expr[..i].trim();
+        let rhs = expr[i + op.len()..].trim();
+        (op, lhs, rhs)
+    })
 }
 
 fn eval_binary_op(op: &str, lhs: &Value, rhs: &Value) -> Value {
@@ -956,7 +979,7 @@ mod tests {
     fn util_escape_javascript() {
         let mut ctx = Context::new().with_var("util", json!({"_type":"util"}));
         let out = render(r#"$util.escapeJavaScript('a"b')"#, &mut ctx);
-        assert_eq!(out, r#""a\"b""#);
+        assert_eq!(out, r#"a\"b"#);
     }
 
     #[test]
