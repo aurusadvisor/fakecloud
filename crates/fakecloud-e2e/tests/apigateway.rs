@@ -730,3 +730,106 @@ async fn data_plane_throttle_returns_429_when_burst_exhausted() {
         .expect("send");
     assert_eq!(second.status(), 429);
 }
+
+// ── Request validator enforcement (Phase R3) ──
+
+#[tokio::test]
+async fn data_plane_request_validator_rejects_missing_body_field() {
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+
+    let api = client
+        .create_rest_api()
+        .name("validator-test")
+        .send()
+        .await
+        .expect("create_rest_api");
+    let api_id = api.id().unwrap().to_string();
+    let root = api.root_resource_id().unwrap().to_string();
+
+    let resource = client
+        .create_resource()
+        .rest_api_id(&api_id)
+        .parent_id(&root)
+        .path_part("items")
+        .send()
+        .await
+        .expect("create_resource");
+    let res_id = resource.id().unwrap().to_string();
+
+    // Create a model with required "name" field.
+    client
+        .create_model()
+        .rest_api_id(&api_id)
+        .name("ItemModel")
+        .content_type("application/json")
+        .schema(r#"{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}"#)
+        .send()
+        .await
+        .expect("create_model");
+
+    // Create a validator that validates the request body.
+    let validator = client
+        .create_request_validator()
+        .rest_api_id(&api_id)
+        .name("body-validator")
+        .validate_request_body(true)
+        .send()
+        .await
+        .expect("create_request_validator");
+    let validator_id = validator.id().unwrap().to_string();
+
+    client
+        .put_method()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("POST")
+        .authorization_type("NONE")
+        .request_validator_id(&validator_id)
+        .request_models("application/json", "ItemModel")
+        .send()
+        .await
+        .expect("put_method");
+
+    client
+        .put_integration()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("POST")
+        .r#type(aws_sdk_apigateway::types::IntegrationType::Mock)
+        .send()
+        .await
+        .expect("put_integration");
+
+    client
+        .create_deployment()
+        .rest_api_id(&api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .expect("create_deployment");
+
+    let http = reqwest::Client::new();
+
+    // Missing required "name" field must return 400.
+    let bad = http
+        .post(format!("{}/prod/items", server.endpoint()))
+        .header("host", execute_api_host(&api_id))
+        .header("content-type", "application/json")
+        .body(r#"{"count": 42}"#)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(bad.status(), 400);
+
+    // Valid body with required "name" field must pass.
+    let good = http
+        .post(format!("{}/prod/items", server.endpoint()))
+        .header("host", execute_api_host(&api_id))
+        .header("content-type", "application/json")
+        .body(r#"{"name": "hello"}"#)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(good.status(), 200);
+}

@@ -40,6 +40,15 @@ struct DataPlaneMatch {
     stage_vars: BTreeMap<String, String>,
     authorization_type: String,
     authorizer: Option<Authorizer>,
+    /// Method-level request parameter declarations (`method.request.*`).
+    /// `true` = required, `false` = optional.
+    request_parameters: BTreeMap<String, bool>,
+    /// Content-type → model name mapping for request body validation.
+    request_models: BTreeMap<String, String>,
+    /// Optional validator ID. When set, the data plane validates request
+    /// parameters and/or body per the validator's configuration before
+    /// invoking the integration.
+    request_validator_id: Option<String>,
     /// Whether the matched method has `apiKeyRequired = true`. When set,
     /// the data plane enforces the `x-api-key` header + the associated
     /// usage plan's throttle/quota before invoking the integration.
@@ -81,6 +90,9 @@ pub async fn handle(
         stage_vars,
         authorization_type,
         authorizer,
+        request_parameters,
+        request_models,
+        request_validator_id,
         api_key_required,
         stage_web_acl_arn,
     } = {
@@ -151,6 +163,17 @@ pub async fn handle(
                             .as_ref()
                             .map(|m| m.api_key_required)
                             .unwrap_or(false);
+                        let request_parameters = method_record
+                            .as_ref()
+                            .map(|m| m.request_parameters.clone())
+                            .unwrap_or_default();
+                        let request_models = method_record
+                            .as_ref()
+                            .map(|m| m.request_models.clone())
+                            .unwrap_or_default();
+                        let request_validator_id = method_record
+                            .as_ref()
+                            .and_then(|m| m.request_validator_id.clone());
                         let stage_web_acl_arn = api_stages
                             .get(&stage_name)
                             .and_then(|s| s.web_acl_arn.clone());
@@ -162,6 +185,9 @@ pub async fn handle(
                             stage_vars,
                             authorization_type,
                             authorizer,
+                            request_parameters,
+                            request_models,
+                            request_validator_id,
                             api_key_required,
                             stage_web_acl_arn,
                         });
@@ -271,6 +297,25 @@ pub async fn handle(
         // `<resource_path>/<HTTP_METHOD>` (e.g. `/items/GET`).
         let method_path = format!("{}/{}", resource_path, req.method.as_str().to_uppercase());
         if let Err(err) = enforce_usage_plan(service, req, &api_id, &stage_name, &method_path) {
+            service.record_request(&req.account_id, &api_id, &stage_name, req, err.status());
+            return Err(err);
+        }
+    }
+
+    // Request validator enforcement: when the matched method references a
+    // validator, check required parameters and/or validate the request body
+    // against the declared model before invoking the integration.
+    if let Some(validator_id) = &request_validator_id {
+        if let Err(err) = enforce_request_validator(
+            service,
+            req,
+            &api_id,
+            &stage_name,
+            validator_id,
+            &request_parameters,
+            &request_models,
+            &path_params,
+        ) {
             service.record_request(&req.account_id, &api_id, &stage_name, req, err.status());
             return Err(err);
         }
@@ -1244,6 +1289,129 @@ fn parse_throttle(t: &serde_json::Value) -> Option<(f64, f64)> {
 /// quota counters at the start of the period (UTC midnight for DAY,
 /// Sunday for WEEK, first-of-month for MONTH); `offset` shifts the
 /// boundary by N days. The returned string is purely a counter key.
+#[allow(clippy::too_many_arguments)]
+fn enforce_request_validator(
+    service: &ApiGatewayService,
+    req: &AwsRequest,
+    api_id: &str,
+    _stage_name: &str,
+    validator_id: &str,
+    request_parameters: &BTreeMap<String, bool>,
+    request_models: &BTreeMap<String, String>,
+    path_params: &BTreeMap<String, String>,
+) -> Result<(), AwsServiceError> {
+    let accounts = service.state_handle().read();
+    let state = accounts
+        .get(&req.account_id)
+        .ok_or_else(|| bad_request("Request validation failed"))?;
+
+    let validator = state
+        .request_validators
+        .get(api_id)
+        .and_then(|m| m.get(validator_id))
+        .ok_or_else(|| bad_request("Request validation failed"))?;
+
+    let validate_body = validator
+        .get("validateRequestBody")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let validate_params = validator
+        .get("validateRequestParameters")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if validate_params {
+        for (param_key, required) in request_parameters {
+            if !*required {
+                continue;
+            }
+            let present = if let Some(name) = param_key.strip_prefix("method.request.querystring.")
+            {
+                req.query_params
+                    .get(name)
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false)
+            } else if let Some(name) = param_key.strip_prefix("method.request.path.") {
+                path_params
+                    .get(name)
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false)
+            } else if let Some(name) = param_key.strip_prefix("method.request.header.") {
+                req.headers
+                    .get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false)
+            } else {
+                // Unknown parameter source — skip.
+                true
+            };
+            if !present {
+                return Err(bad_request(format!(
+                    "Missing required request parameter: {}",
+                    param_key
+                )));
+            }
+        }
+    }
+
+    if validate_body {
+        let content_type = req
+            .headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/json");
+        // Normalize content-type by stripping charset suffix.
+        let normalized = content_type
+            .split(';')
+            .next()
+            .unwrap_or(content_type)
+            .trim();
+
+        let model_name = match request_models.get(normalized) {
+            Some(name) => name,
+            None => match request_models.get("$default") {
+                Some(name) => name,
+                None => {
+                    // No model for this content type and no $default — skip body validation.
+                    return Ok(());
+                }
+            },
+        };
+
+        let model = state
+            .models
+            .get(api_id)
+            .and_then(|m| m.get(model_name))
+            .ok_or_else(|| bad_request("Request body does not match model schema"))?;
+
+        let schema_str = model
+            .schema
+            .as_deref()
+            .ok_or_else(|| bad_request("Request body does not match model schema"))?;
+        let schema: serde_json::Value = serde_json::from_str(schema_str)
+            .map_err(|_| bad_request("Request body does not match model schema"))?;
+
+        let body_json: serde_json::Value = serde_json::from_slice(&req.body)
+            .map_err(|_| bad_request("Request body does not match model schema"))?;
+
+        drop(accounts);
+
+        if let Err(e) = crate::model_validation::validate(&schema, &body_json) {
+            return Err(bad_request(format!(
+                "Request body does not match model schema for content type {}: {}",
+                normalized, e
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn bad_request(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "BadRequestException", msg.into())
+}
+
 fn current_quota_window(
     now: chrono::DateTime<chrono::Utc>,
     period: QuotaPeriod,
@@ -2434,5 +2602,299 @@ mod tests {
         assert_eq!(payload["headers"]["x-custom"], "secret");
         assert_eq!(payload["httpMethod"], "GET");
         assert!(payload["methodArn"].as_str().unwrap().contains("/items"));
+    }
+
+    // ── Request validator tests ──
+
+    fn install_validator_and_model(
+        state: &SharedApiGatewayState,
+        validator_id: &str,
+        validate_params: bool,
+        validate_body: bool,
+    ) {
+        use crate::state::Model;
+        let mut accounts = state.write();
+        let st = accounts.get_or_create(TEST_ACCOUNT);
+        // Register validator
+        let mut validators = std::collections::BTreeMap::new();
+        validators.insert(
+            validator_id.to_string(),
+            serde_json::json!({
+                "id": validator_id,
+                "name": "test-validator",
+                "validateRequestParameters": validate_params,
+                "validateRequestBody": validate_body,
+            }),
+        );
+        st.request_validators
+            .insert(TEST_API_ID.to_string(), validators);
+        // Register model
+        let mut models = std::collections::BTreeMap::new();
+        models.insert(
+            "ItemModel".to_string(),
+            Model {
+                id: "model1".to_string(),
+                name: "ItemModel".to_string(),
+                description: None,
+                schema: Some(r#"{"type":"object","required":["name"],"properties":{"name":{"type":"string"},"count":{"type":"integer"}}}"#.to_string()),
+                content_type: "application/json".to_string(),
+            },
+        );
+        st.models.insert(TEST_API_ID.to_string(), models);
+    }
+
+    #[tokio::test]
+    async fn missing_required_query_parameter_returns_400() {
+        let state = build_state("NONE", None);
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mkey = format!("{TEST_API_ID}/{RES_ID}/GET");
+            if let Some(m) = st.methods.get_mut(&mkey) {
+                m.request_validator_id = Some("val1".to_string());
+                m.request_parameters
+                    .insert("method.request.querystring.name".to_string(), true);
+            }
+        }
+        install_validator_and_model(&state, "val1", true, false);
+        let lambda = Arc::new(StubLambda::new());
+        let service = build_service(state, lambda.clone(), None);
+        let err = match handle(
+            &service,
+            &AwsRequest {
+                query_params: std::collections::HashMap::new(),
+                ..make_request(HeaderMap::new())
+            },
+        )
+        .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("missing query param must 400"),
+        };
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.message().contains("Missing required request parameter"));
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+    }
+
+    #[tokio::test]
+    async fn missing_required_header_returns_400() {
+        let state = build_state("NONE", None);
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mkey = format!("{TEST_API_ID}/{RES_ID}/GET");
+            if let Some(m) = st.methods.get_mut(&mkey) {
+                m.request_validator_id = Some("val1".to_string());
+                m.request_parameters
+                    .insert("method.request.header.X-Required".to_string(), true);
+            }
+        }
+        install_validator_and_model(&state, "val1", true, false);
+        let lambda = Arc::new(StubLambda::new());
+        let service = build_service(state, lambda.clone(), None);
+        let err = match handle(&service, &make_request(HeaderMap::new())).await {
+            Err(e) => e,
+            Ok(_) => panic!("missing header must 400"),
+        };
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.message().contains("Missing required request parameter"));
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+    }
+
+    #[tokio::test]
+    async fn present_required_parameters_passes_validation() {
+        let state = build_state("NONE", None);
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mkey = format!("{TEST_API_ID}/{RES_ID}/GET");
+            if let Some(m) = st.methods.get_mut(&mkey) {
+                m.request_validator_id = Some("val1".to_string());
+                m.request_parameters
+                    .insert("method.request.querystring.name".to_string(), true);
+            }
+        }
+        install_validator_and_model(&state, "val1", true, false);
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(
+            BACKEND_ARN,
+            serde_json::json!({"statusCode": 200, "body": "ok"}),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let mut req = make_request(HeaderMap::new());
+        req.query_params
+            .insert("name".to_string(), "test".to_string());
+        let resp = handle(&service, &req)
+            .await
+            .expect("present params must pass");
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_body_returns_400() {
+        let state = build_state("NONE", None);
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mkey = format!("{TEST_API_ID}/{RES_ID}/GET");
+            if let Some(m) = st.methods.get_mut(&mkey) {
+                m.request_validator_id = Some("val1".to_string());
+                m.request_models
+                    .insert("application/json".to_string(), "ItemModel".to_string());
+            }
+        }
+        install_validator_and_model(&state, "val1", false, true);
+        let lambda = Arc::new(StubLambda::new());
+        let service = build_service(state, lambda.clone(), None);
+        let mut req = make_request(HeaderMap::new());
+        req.body = bytes::Bytes::from(r#"{"count": 42}"#);
+        let err = match handle(&service, &req).await {
+            Err(e) => e,
+            Ok(_) => panic!("invalid body must 400"),
+        };
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err
+            .message()
+            .contains("Request body does not match model schema"));
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+    }
+
+    #[tokio::test]
+    async fn valid_body_passes_validation() {
+        let state = build_state("NONE", None);
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mkey = format!("{TEST_API_ID}/{RES_ID}/GET");
+            if let Some(m) = st.methods.get_mut(&mkey) {
+                m.request_validator_id = Some("val1".to_string());
+                m.request_models
+                    .insert("application/json".to_string(), "ItemModel".to_string());
+            }
+        }
+        install_validator_and_model(&state, "val1", false, true);
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(
+            BACKEND_ARN,
+            serde_json::json!({"statusCode": 200, "body": "ok"}),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let mut req = make_request(HeaderMap::new());
+        req.body = bytes::Bytes::from(r#"{"name": "hello", "count": 42}"#);
+        let resp = handle(&service, &req).await.expect("valid body must pass");
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 1);
+    }
+
+    #[tokio::test]
+    async fn missing_model_for_content_type_skips_validation() {
+        let state = build_state("NONE", None);
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mkey = format!("{TEST_API_ID}/{RES_ID}/GET");
+            if let Some(m) = st.methods.get_mut(&mkey) {
+                m.request_validator_id = Some("val1".to_string());
+                // No requestModels registered
+            }
+        }
+        install_validator_and_model(&state, "val1", false, true);
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(
+            BACKEND_ARN,
+            serde_json::json!({"statusCode": 200, "body": "ok"}),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let mut req = make_request(HeaderMap::new());
+        req.body = bytes::Bytes::from(r#"{}"#);
+        let resp = handle(&service, &req)
+            .await
+            .expect("missing model skips validation");
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 1);
+    }
+
+    #[tokio::test]
+    async fn blank_required_query_parameter_returns_400() {
+        let state = build_state("NONE", None);
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mkey = format!("{TEST_API_ID}/{RES_ID}/GET");
+            if let Some(m) = st.methods.get_mut(&mkey) {
+                m.request_validator_id = Some("val1".to_string());
+                m.request_parameters
+                    .insert("method.request.querystring.name".to_string(), true);
+            }
+        }
+        install_validator_and_model(&state, "val1", true, false);
+        let lambda = Arc::new(StubLambda::new());
+        let service = build_service(state, lambda.clone(), None);
+        let mut req = make_request(HeaderMap::new());
+        req.query_params.insert("name".to_string(), "".to_string());
+        let err = match handle(&service, &req).await {
+            Err(e) => e,
+            Ok(_) => panic!("blank query param must 400"),
+        };
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.message().contains("Missing required request parameter"));
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+    }
+
+    #[tokio::test]
+    async fn blank_required_header_returns_400() {
+        let state = build_state("NONE", None);
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mkey = format!("{TEST_API_ID}/{RES_ID}/GET");
+            if let Some(m) = st.methods.get_mut(&mkey) {
+                m.request_validator_id = Some("val1".to_string());
+                m.request_parameters
+                    .insert("method.request.header.X-Required".to_string(), true);
+            }
+        }
+        install_validator_and_model(&state, "val1", true, false);
+        let lambda = Arc::new(StubLambda::new());
+        let service = build_service(state, lambda.clone(), None);
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Required", "".parse().unwrap());
+        let err = match handle(&service, &make_request(headers)).await {
+            Err(e) => e,
+            Ok(_) => panic!("blank header must 400"),
+        };
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.message().contains("Missing required request parameter"));
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+    }
+
+    #[tokio::test]
+    async fn default_model_used_when_no_exact_match() {
+        let state = build_state("NONE", None);
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mkey = format!("{TEST_API_ID}/{RES_ID}/GET");
+            if let Some(m) = st.methods.get_mut(&mkey) {
+                m.request_validator_id = Some("val1".to_string());
+                m.request_models
+                    .insert("$default".to_string(), "ItemModel".to_string());
+            }
+        }
+        install_validator_and_model(&state, "val1", false, true);
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(
+            BACKEND_ARN,
+            serde_json::json!({"statusCode": 200, "body": "ok"}),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let mut req = make_request(HeaderMap::new());
+        req.body = bytes::Bytes::from(r#"{"name": "hello", "count": 42}"#);
+        let resp = handle(&service, &req)
+            .await
+            .expect("$default model should validate");
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 1);
     }
 }
