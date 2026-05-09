@@ -1481,15 +1481,15 @@ impl ApiGatewayV2Service {
         if let Some(settings) = body.get("accessLogSettings") {
             if settings.is_null() {
                 stage.access_log_settings = None;
-            } else {
-                let destination_arn = settings["destinationArn"].as_str().map(String::from);
+            } else if let Some(arn) = settings["destinationArn"].as_str() {
                 let format = settings["format"].as_str().map(String::from);
-                stage.access_log_settings =
-                    destination_arn.map(|arn| crate::state::AccessLogSettings {
-                        destination_arn: arn,
-                        format,
-                    });
+                stage.access_log_settings = Some(crate::state::AccessLogSettings {
+                    destination_arn: arn.to_string(),
+                    format,
+                });
             }
+            // If accessLogSettings is present but destinationArn is missing,
+            // preserve the existing settings (Cubic finding).
         }
 
         stage.last_updated_date = Some(chrono::Utc::now());
@@ -1998,6 +1998,7 @@ impl ApiGatewayV2Service {
         let mut api_id = String::new();
         let mut stage_name = String::new();
         let mut resource_path = String::new();
+        let mut matched_route_key = String::new();
 
         let result: Result<AwsResponse, AwsServiceError> = async {
             // Try custom domain resolution first.
@@ -2109,6 +2110,8 @@ impl ApiGatewayV2Service {
                         format!("No route matches: {} {}", req.method, resource_path),
                     )
                 })?;
+
+            matched_route_key = route_match.route.route_key.clone();
 
             // Authorizer enforcement
             let authorizer_info = self
@@ -2233,7 +2236,7 @@ impl ApiGatewayV2Service {
 
         self.record_request(&req, &api_id, &stage_name, &resource_path, status_code);
 
-        self.emit_access_log(&req, &api_id, &stage_name, &resource_path, status_code);
+        self.emit_access_log(&req, &api_id, &stage_name, &matched_route_key, status_code);
 
         result
     }
@@ -2653,7 +2656,7 @@ impl ApiGatewayV2Service {
         req: &AwsRequest,
         api_id: &str,
         stage: &str,
-        path: &str,
+        route_key: &str,
         status_code: u16,
     ) {
         let Some(delivery) = self.delivery.as_ref() else {
@@ -2706,17 +2709,38 @@ impl ApiGatewayV2Service {
             r#"{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","routeKey":"$context.routeKey","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength"}"#,
         );
 
-        let log_line = format
-            .replace("$context.requestId", &req.request_id)
-            .replace("$context.apiId", api_id)
-            .replace("$context.stage", stage)
-            .replace("$context.identity.sourceIp", &source_ip)
-            .replace("$context.requestTime", &request_time)
-            .replace("$context.httpMethod", req.method.as_str())
-            .replace("$context.routeKey", path)
-            .replace("$context.status", &status_code.to_string())
-            .replace("$context.protocol", "HTTP/1.1")
-            .replace("$context.responseLength", "0");
+        // Token-aware single-pass substitution to avoid overlapping corruption.
+        let mut log_line = String::new();
+        let mut rest = format;
+        while let Some(pos) = rest.find("$context.") {
+            log_line.push_str(&rest[..pos]);
+            rest = &rest[pos..];
+            let end = rest[9..]
+                .find(|c: char| !c.is_alphanumeric() && c != '.' && c != '_')
+                .map(|i| i + 9)
+                .unwrap_or(rest.len());
+            let token = &rest[..end];
+            let value = match token {
+                "$context.requestId" => req.request_id.as_str(),
+                "$context.apiId" => api_id,
+                "$context.stage" => stage,
+                "$context.identity.sourceIp" => &source_ip,
+                "$context.requestTime" => &request_time,
+                "$context.httpMethod" => req.method.as_str(),
+                "$context.routeKey" => route_key,
+                "$context.status" => {
+                    log_line.push_str(&status_code.to_string());
+                    rest = &rest[end..];
+                    continue;
+                }
+                "$context.protocol" => "HTTP/1.1",
+                "$context.responseLength" => "0",
+                _ => token,
+            };
+            log_line.push_str(value);
+            rest = &rest[end..];
+        }
+        log_line.push_str(rest);
 
         let timestamp = chrono::Utc::now().timestamp_millis();
         let log_stream_name = format!("{}/{}", api_id, stage);
