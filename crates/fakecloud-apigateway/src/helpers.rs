@@ -299,6 +299,14 @@ pub(crate) fn apply_rest_api_patch(api: &mut RestApi, op: &str, path: &str, valu
                 api.api_key_source = s.to_string();
             }
         }
+        "/binaryMediaTypes" => {
+            if let Some(arr) = value.as_array() {
+                api.binary_media_types = arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+            }
+        }
         _ => {}
     }
 }
