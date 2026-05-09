@@ -24,8 +24,9 @@ pub fn construct_event(
     resource_path: &str,
     path_parameters: BTreeMap<String, String>,
     stage_variables: BTreeMap<String, String>,
+    binary_media_types: &[String],
 ) -> serde_json::Value {
-    let (is_base64, body) = encode_body(req);
+    let (is_base64, body) = encode_body(req, binary_media_types);
 
     // Headers as both single-value and multi-value maps. AWS sends both
     // shapes; agents that only check one or the other should still work.
@@ -119,22 +120,15 @@ pub fn construct_event(
     })
 }
 
-fn encode_body(req: &AwsRequest) -> (bool, Option<String>) {
+fn encode_body(req: &AwsRequest, binary_media_types: &[String]) -> (bool, Option<String>) {
     if req.body.is_empty() {
         return (false, None);
     }
-    let is_binary = req
+    let ct = req
         .headers
         .get("content-type")
-        .and_then(|ct| ct.to_str().ok())
-        .map(|ct| {
-            let ct = ct.to_lowercase();
-            ct.contains("octet-stream")
-                || ct.contains("image/")
-                || ct.contains("video/")
-                || ct.contains("audio/")
-        })
-        .unwrap_or(false);
+        .and_then(|ct| ct.to_str().ok());
+    let is_binary = ct.is_some_and(|ct| is_binary_media_type(ct, binary_media_types));
     if is_binary {
         (true, Some(BASE64_STANDARD.encode(&req.body)))
     } else {
@@ -143,6 +137,26 @@ fn encode_body(req: &AwsRequest) -> (bool, Option<String>) {
             Err(_) => (true, Some(BASE64_STANDARD.encode(&req.body))),
         }
     }
+}
+
+/// Return true when `content_type` matches one of the configured binary
+/// media types. AWS supports suffix wildcards (`image/*`) and exact
+/// matches (`application/octet-stream`).
+fn is_binary_media_type(content_type: &str, binary_media_types: &[String]) -> bool {
+    let ct = content_type.to_lowercase();
+    for pattern in binary_media_types {
+        let p = pattern.to_lowercase();
+        if p == ct || p == "*/*" {
+            return true;
+        }
+        if p.ends_with("/*") {
+            let prefix = &p[..p.len() - 1];
+            if ct.starts_with(prefix) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub async fn invoke_lambda(
@@ -318,6 +332,7 @@ mod tests {
             "/pets",
             BTreeMap::new(),
             BTreeMap::new(),
+            &[],
         );
         assert_eq!(event["resource"], "/pets");
         assert_eq!(event["httpMethod"], "POST");
@@ -348,5 +363,59 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(r.body.expect_bytes(), b"binary".as_slice());
+    }
+
+    #[test]
+    fn encode_body_respects_binary_media_types() {
+        let mut req = req();
+        req.headers
+            .insert("content-type", "image/png".parse().unwrap());
+        let (is_base64, body) = encode_body(
+            &req,
+            &[
+                "image/png".to_string(),
+                "application/octet-stream".to_string(),
+            ],
+        );
+        assert!(is_base64);
+        assert_eq!(body, Some(BASE64_STANDARD.encode(&req.body)));
+    }
+
+    #[test]
+    fn encode_body_wildcard_match() {
+        let mut req = req();
+        req.headers
+            .insert("content-type", "image/jpeg".parse().unwrap());
+        let (is_base64, body) = encode_body(&req, &["image/*".to_string()]);
+        assert!(is_base64);
+        assert_eq!(body, Some(BASE64_STANDARD.encode(&req.body)));
+    }
+
+    #[test]
+    fn encode_body_no_match_is_text() {
+        let mut req = req();
+        req.headers
+            .insert("content-type", "application/json".parse().unwrap());
+        let (is_base64, body) = encode_body(&req, &["image/*".to_string()]);
+        assert!(!is_base64);
+        assert_eq!(body, Some(r#"{"name":"Fluffy"}"#.to_string()));
+    }
+
+    #[test]
+    fn construct_event_with_binary_media_types() {
+        let mut req = req();
+        req.headers
+            .insert("content-type", "image/png".parse().unwrap());
+        let event = construct_event(
+            &req,
+            "abc123",
+            "prod",
+            "/pets",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            &["image/png".to_string()],
+        );
+        assert_eq!(event["isBase64Encoded"], true);
+        assert_eq!(event["body"], BASE64_STANDARD.encode(&req.body));
     }
 }

@@ -347,6 +347,16 @@ impl ApiGatewayService {
     pub(super) fn import_rest_api(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let id = make_id();
         let root_id = make_id();
+        let body = serde_json::from_slice::<serde_json::Value>(&req.body).unwrap_or(Value::Null);
+        let binary_media_types = body
+            .get("binaryMediaTypes")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
         let api = RestApi {
             id: id.clone(),
             name: format!("imported-{id}"),
@@ -356,7 +366,7 @@ impl ApiGatewayService {
             api_key_source: "HEADER".to_string(),
             endpoint_configuration: json!({"types": ["EDGE"]}),
             policy: None,
-            binary_media_types: Vec::new(),
+            binary_media_types,
             minimum_compression_size: None,
             disable_execute_api_endpoint: false,
             root_resource_id: root_id.clone(),

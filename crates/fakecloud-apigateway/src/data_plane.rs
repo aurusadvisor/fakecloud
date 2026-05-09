@@ -59,6 +59,10 @@ struct DataPlaneMatch {
     /// because the stage may not exist (data plane handles miss
     /// elsewhere).
     stage_web_acl_arn: Option<String>,
+    /// Binary media types configured on the matched `RestApi`.
+    /// Used by Lambda proxy `encode_body` and the HTTP backend
+    /// response path to decide whether a payload is binary.
+    binary_media_types: Vec<String>,
 }
 
 /// Outcome of authorizer evaluation. `claims`/`context` are merged into
@@ -96,6 +100,7 @@ pub async fn handle(
         request_validator_id,
         api_key_required,
         stage_web_acl_arn,
+        binary_media_types,
     } = {
         let accounts = service.state_handle().read();
         let state = match accounts.get(&req.account_id) {
@@ -178,6 +183,11 @@ pub async fn handle(
                         let stage_web_acl_arn = api_stages
                             .get(&stage_name)
                             .and_then(|s| s.web_acl_arn.clone());
+                        let binary_media_types = state
+                            .apis
+                            .get(api_id)
+                            .map(|api| api.binary_media_types.clone())
+                            .unwrap_or_default();
                         found = Some(DataPlaneMatch {
                             api_id: api_id.clone(),
                             integration,
@@ -191,6 +201,7 @@ pub async fn handle(
                             request_validator_id,
                             api_key_required,
                             stage_web_acl_arn,
+                            binary_media_types,
                         });
                         break;
                     }
@@ -348,6 +359,7 @@ pub async fn handle(
                 &resource_path,
                 path_params,
                 stage_vars,
+                &binary_media_types,
             );
             if let Some(out) = &auth_outcome {
                 inject_authorizer_into_event(&mut event, out);

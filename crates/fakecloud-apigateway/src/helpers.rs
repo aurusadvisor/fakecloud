@@ -277,7 +277,9 @@ pub(crate) fn apply_patch_operations(req: &AwsRequest, mut on: impl FnMut(&str, 
 }
 
 pub(crate) fn apply_rest_api_patch(api: &mut RestApi, op: &str, path: &str, value: &Value) {
-    if op != "replace" && op != "add" {
+    let is_binary_media_path =
+        path == "/binaryMediaTypes" || path.starts_with("/binaryMediaTypes/");
+    if op != "replace" && op != "add" && !(op == "remove" && is_binary_media_path) {
         return;
     }
     match path {
@@ -299,7 +301,28 @@ pub(crate) fn apply_rest_api_patch(api: &mut RestApi, op: &str, path: &str, valu
                 api.api_key_source = s.to_string();
             }
         }
-        _ => {}
+        "/binaryMediaTypes" => {
+            if op == "remove" {
+                api.binary_media_types.clear();
+            } else if let Some(arr) = value.as_array() {
+                api.binary_media_types = arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+            }
+        }
+        _ => {
+            if let Some(suffix) = path.strip_prefix("/binaryMediaTypes/") {
+                let mt = suffix.replace("~1", "/").replace("~0", "~");
+                if op == "add" || op == "replace" {
+                    if !api.binary_media_types.contains(&mt) {
+                        api.binary_media_types.push(mt);
+                    }
+                } else if op == "remove" {
+                    api.binary_media_types.retain(|m| m != &mt);
+                }
+            }
+        }
     }
 }
 
