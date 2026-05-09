@@ -15,13 +15,14 @@
 //! preflights.
 
 use http::{Method, StatusCode};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::lambda_proxy;
+use crate::service::helpers::response_key;
 use crate::service::ApiGatewayService;
 use crate::state::{AuthEffect, Authorizer, CachedAuthorizerResult, Integration};
 
@@ -332,6 +333,15 @@ pub async fn handle(
         }
     }
 
+    let mut vtl_ctx = crate::vtl::build_context(
+        req,
+        &api_id,
+        &stage_name,
+        &resource_path,
+        &path_params,
+        &stage_vars,
+    );
+
     let result: Result<AwsResponse, AwsServiceError> = match integration.integration_type.as_str() {
         "AWS_PROXY" => {
             let function_arn = match integration.uri.as_deref() {
@@ -359,8 +369,42 @@ pub async fn handle(
                 .ok_or_else(|| bad_gateway("Lambda delivery not configured"))?;
             lambda_proxy::invoke_lambda(delivery, &function_arn, event).await
         }
-        "HTTP_PROXY" | "HTTP" => http_proxy(req, &integration).await,
-        "MOCK" => Ok(AwsResponse::ok_json(json!({}))),
+        "HTTP_PROXY" => http_proxy(req, &integration, None).await,
+        "HTTP" => {
+            if integration.connection_type.as_deref() == Some("VPC_LINK") {
+                vpc_link_proxy(req, &integration, service).await
+            } else {
+                // Apply request template before sending to backend.
+                let transformed_body = apply_request_template(req, &integration, &mut vtl_ctx);
+                let backend_resp = http_proxy(req, &integration, transformed_body).await?;
+                // Apply response template after receiving from backend.
+                apply_response_template(
+                    backend_resp,
+                    &integration,
+                    req,
+                    &mut vtl_ctx,
+                    &api_id,
+                    &resource_path,
+                    &stage_name,
+                    &path_params,
+                    &stage_vars,
+                    service,
+                )
+                .await
+            }
+        }
+        "MOCK" => {
+            mock_response(
+                req,
+                &integration,
+                &mut vtl_ctx,
+                &api_id,
+                &resource_path,
+                &stage_name,
+                service,
+            )
+            .await
+        }
         "AWS" => {
             let uri = integration
                 .uri
@@ -984,6 +1028,7 @@ fn extract_lambda_arn(uri: &str) -> Option<String> {
 async fn http_proxy(
     req: &AwsRequest,
     integration: &Integration,
+    body_override: Option<bytes::Bytes>,
 ) -> Result<AwsResponse, AwsServiceError> {
     let url = integration
         .uri
@@ -1006,8 +1051,9 @@ async fn http_proxy(
             builder = builder.header(k.as_str(), s);
         }
     }
-    if !req.body.is_empty() {
-        builder = builder.body(req.body.clone().to_vec());
+    let body = body_override.as_ref().unwrap_or(&req.body);
+    if !body.is_empty() {
+        builder = builder.body(body.clone().to_vec());
     }
     let resp = builder
         .send()
@@ -1039,6 +1085,221 @@ async fn http_proxy(
         content_type,
         headers,
         body: bytes::Bytes::from(body.to_vec()).into(),
+    })
+}
+
+/// Resolve a VPC_LINK integration by looking up the VpcLink's
+/// `targetArns`, finding the first NLB/ALB that has a bound port in
+/// the ELBv2 dataplane, and forwarding the request there.
+async fn vpc_link_proxy(
+    req: &AwsRequest,
+    integration: &Integration,
+    service: &ApiGatewayService,
+) -> Result<AwsResponse, AwsServiceError> {
+    let connection_id = integration
+        .connection_id
+        .as_deref()
+        .ok_or_else(|| bad_gateway("VPC_LINK integration missing connectionId"))?;
+
+    let target_arns: Vec<String> = {
+        let accounts = service.state_handle().read();
+        let state = accounts
+            .get(&req.account_id)
+            .ok_or_else(|| bad_gateway("VPC_LINK: account not found in API Gateway state"))?;
+        let vpc_link = state
+            .vpc_links
+            .get(connection_id)
+            .ok_or_else(|| bad_gateway(format!("VPC_LINK not found: {connection_id}")))?;
+        let target_arns = vpc_link
+            .get("targetArns")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| bad_gateway("VPC_LINK missing targetArns"))?;
+        if target_arns.is_empty() {
+            return Err(bad_gateway("VPC_LINK targetArns is empty"));
+        }
+        target_arns
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect()
+    };
+
+    let elbv2 = service
+        .elbv2_state
+        .as_ref()
+        .ok_or_else(|| bad_gateway("VPC_LINK not available: ELBv2 state not wired"))?;
+    let port = {
+        let elbv2_read = elbv2.read();
+        let elbv2_account = elbv2_read
+            .get(&req.account_id)
+            .ok_or_else(|| bad_gateway("VPC_LINK: account not found in ELBv2 state"))?;
+        let mut bound_port = None;
+        for arn in &target_arns {
+            if let Some(lb) = elbv2_account.load_balancers.get(arn) {
+                if let Some(port) = lb.bound_port {
+                    bound_port = Some(port);
+                    break;
+                }
+            }
+        }
+        bound_port.ok_or_else(|| {
+            bad_gateway("VPC_LINK: none of the target NLBs/ALBs have an active dataplane port")
+        })?
+    };
+
+    // Build the backend URL from the integration URI, replacing the
+    // host with the local ELBv2 dataplane endpoint.
+    let original_url = integration.uri.as_deref().unwrap_or("http://localhost/");
+    let path_and_query = http::Uri::try_from(original_url)
+        .ok()
+        .and_then(|u| u.path_and_query().map(|p| p.as_str().to_string()))
+        .unwrap_or_else(|| req.raw_path.clone());
+    let backend_url = format!("http://127.0.0.1:{port}{path_and_query}");
+
+    let mut proxy_integration = integration.clone();
+    proxy_integration.uri = Some(backend_url);
+    http_proxy(req, &proxy_integration, None).await
+}
+
+/// Apply the integration's `requestTemplates` to the request body.
+/// Returns `Some(transformed_body)` when a template matched the request
+/// content type, or `None` to leave the body unchanged.
+fn apply_request_template(
+    req: &AwsRequest,
+    integration: &Integration,
+    vtl_ctx: &mut crate::vtl::Context,
+) -> Option<bytes::Bytes> {
+    let content_type = req
+        .headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json");
+    let normalized = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim();
+    let template = integration.request_templates.get(normalized)?;
+    let rendered = crate::vtl::render(template, vtl_ctx);
+    Some(bytes::Bytes::from(rendered))
+}
+
+/// Apply the integration response's `responseTemplates` to the backend
+/// response body. Returns a new `AwsResponse` with the rendered template.
+#[allow(clippy::too_many_arguments)]
+async fn apply_response_template(
+    backend_resp: AwsResponse,
+    integration: &Integration,
+    req: &AwsRequest,
+    vtl_ctx: &mut crate::vtl::Context,
+    api_id: &str,
+    resource_path: &str,
+    _stage_name: &str,
+    _path_params: &BTreeMap<String, String>,
+    _stage_vars: &BTreeMap<String, String>,
+    service: &ApiGatewayService,
+) -> Result<AwsResponse, AwsServiceError> {
+    let status_code = backend_resp.status.as_u16().to_string();
+    let key = response_key(
+        api_id,
+        resource_path,
+        &integration.http_method,
+        &status_code,
+    );
+    let accounts = service.state_handle().read();
+    let state = accounts.get(&req.account_id);
+    let resp_template = state.and_then(|st| {
+        st.integration_responses
+            .get(&key)
+            .and_then(|v| v.get("responseTemplates"))
+            .and_then(|t| t.as_object())
+    });
+    let content_type = backend_resp
+        .content_type
+        .as_str()
+        .split(';')
+        .next()
+        .unwrap_or(&backend_resp.content_type)
+        .trim();
+    let template = resp_template
+        .and_then(|t| t.get(content_type))
+        .and_then(|v| v.as_str());
+    let body = if let Some(template) = template {
+        // Inject $input with the backend response body so the template
+        // can reference it.
+        let body_str = String::from_utf8_lossy(backend_resp.body.expect_bytes()).to_string();
+        let body_json: Value = serde_json::from_str(&body_str).unwrap_or(Value::Null);
+        vtl_ctx.set("input", json!({"body": body_str, "json": body_json}));
+        crate::vtl::render(template, vtl_ctx).into_bytes()
+    } else {
+        backend_resp.body.expect_bytes().to_vec()
+    };
+    Ok(AwsResponse {
+        status: backend_resp.status,
+        content_type: backend_resp.content_type,
+        headers: backend_resp.headers,
+        body: bytes::Bytes::from(body).into(),
+    })
+}
+
+/// Build a MOCK integration response by looking up the integration
+/// response for the method and rendering its `responseTemplates`.
+#[allow(clippy::too_many_arguments)]
+async fn mock_response(
+    req: &AwsRequest,
+    integration: &Integration,
+    vtl_ctx: &mut crate::vtl::Context,
+    api_id: &str,
+    resource_path: &str,
+    _stage_name: &str,
+    service: &ApiGatewayService,
+) -> Result<AwsResponse, AwsServiceError> {
+    let method = integration.http_method.as_str();
+    // Default to 200 when no explicit status code is configured.
+    let default_status = "200";
+    let key = response_key(api_id, resource_path, method, default_status);
+    let accounts = service.state_handle().read();
+    let state = accounts.get(&req.account_id);
+    // Try the 200 response first; if absent scan for any integration
+    // response registered for this method and use its configured status.
+    let resp_record = state.and_then(|st| {
+        st.integration_responses.get(&key).or_else(|| {
+            let prefix = format!("{api_id}/{resource_path}/{method}/");
+            st.integration_responses
+                .iter()
+                .find(|(k, _)| k.starts_with(&prefix))
+                .map(|(_, v)| v)
+        })
+    });
+    let (status, resp_templates) = if let Some(record) = resp_record {
+        let status = record
+            .get("statusCode")
+            .and_then(|v| v.as_str())
+            .unwrap_or(default_status);
+        let templates = record.get("responseTemplates").and_then(|v| v.as_object());
+        (status, templates)
+    } else {
+        (default_status, None)
+    };
+    let status = status
+        .parse::<u16>()
+        .ok()
+        .and_then(|n| StatusCode::from_u16(n).ok())
+        .unwrap_or(StatusCode::OK);
+    let content_type = "application/json";
+    let body = if let Some(templates) = resp_templates {
+        templates
+            .get(content_type)
+            .and_then(|v| v.as_str())
+            .map(|t| crate::vtl::render(t, vtl_ctx))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    Ok(AwsResponse {
+        status,
+        content_type: content_type.to_string(),
+        headers: http::HeaderMap::new(),
+        body: bytes::Bytes::from(body).into(),
     })
 }
 
@@ -2981,6 +3242,91 @@ mod tests {
             .expect("$default model should validate");
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(lambda.invocation_count(BACKEND_ARN), 1);
+    }
+
+    #[tokio::test]
+    async fn vpc_link_proxy_resolves_target_nlb_and_attempts_connection() {
+        // Seed API Gateway state with a VpcLink pointing at an NLB ARN.
+        let mut state = ApiGatewayState::new(TEST_ACCOUNT, TEST_REGION);
+        let vpc_link_id = "vpclink001";
+        state.vpc_links.insert(
+            vpc_link_id.to_string(),
+            serde_json::json!({
+                "id": vpc_link_id,
+                "name": "link",
+                "targetArns": ["arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/my-nlb/50dc6c495c0c9188"],
+                "status": "AVAILABLE"
+            }),
+        );
+        let apigw_state: SharedApiGatewayState = {
+            let mut mas =
+                MultiAccountState::new(TEST_ACCOUNT, TEST_REGION, "http://localhost:4566");
+            *mas.get_or_create(TEST_ACCOUNT) = state;
+            Arc::new(parking_lot::RwLock::new(mas))
+        };
+
+        // Seed ELBv2 state with a load balancer that has a bound port.
+        let mut elbv2_accounts = fakecloud_elbv2::state::Elbv2Accounts::new();
+        let elbv2_state = elbv2_accounts.get_or_create(TEST_ACCOUNT);
+        let lb_arn = "arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/my-nlb/50dc6c495c0c9188";
+        let mut lb: fakecloud_elbv2::state::LoadBalancer =
+            serde_json::from_value(serde_json::json!({
+                "arn": lb_arn,
+                "name": "my-nlb",
+                "dns_name": "my-nlb-123.elb.us-east-1.amazonaws.com",
+                "canonical_hosted_zone_id": "Z35SXDOTRQ7X7K",
+                "created_time": "2024-01-01T00:00:00Z",
+                "scheme": "internal",
+                "vpc_id": "vpc-123",
+                "state_code": "active",
+                "lb_type": "application",
+                "availability_zones": [],
+                "security_groups": [],
+                "ip_address_type": "ipv4",
+                "tags": [],
+                "attributes": {}
+            }))
+            .unwrap();
+        lb.bound_port = Some(54321);
+        elbv2_state.load_balancers.insert(lb_arn.to_string(), lb);
+        let shared_elbv2 = Arc::new(parking_lot::RwLock::new(elbv2_accounts));
+
+        let service = ApiGatewayService::new(apigw_state).with_elbv2(shared_elbv2);
+
+        let integration = Integration {
+            rest_api_id: "api1".to_string(),
+            resource_id: "res1".to_string(),
+            http_method: "GET".to_string(),
+            integration_type: "HTTP".to_string(),
+            integration_http_method: Some("GET".to_string()),
+            uri: Some("http://backend.internal/items".to_string()),
+            credentials: None,
+            request_parameters: BTreeMap::new(),
+            request_templates: BTreeMap::new(),
+            passthrough_behavior: "WHEN_NO_MATCH".to_string(),
+            timeout_in_millis: None,
+            cache_namespace: None,
+            cache_key_parameters: vec![],
+            content_handling: None,
+            connection_type: Some("VPC_LINK".to_string()),
+            connection_id: Some(vpc_link_id.to_string()),
+            tls_config: None,
+        };
+
+        let req = make_request(HeaderMap::new());
+        let result = vpc_link_proxy(&req, &integration, &service).await;
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("VPC_LINK to port 54321 with no server must fail"),
+        };
+        // No actual HTTP server is listening on port 54321, so the
+        // proxy step must fail with a backend HTTP error.
+        assert_eq!(err.status(), StatusCode::BAD_GATEWAY);
+        let msg = err.message();
+        assert!(
+            msg.contains("backend HTTP failure") || msg.contains("connection refused"),
+            "expected backend connection error, got: {msg}"
+        );
     }
 
     // ── AWS direct integration tests ──

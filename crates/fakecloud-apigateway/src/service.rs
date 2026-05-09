@@ -166,6 +166,8 @@ pub struct ApiGatewayService {
     /// by `"<acl-arn>|<rule-name>"`; exposed via the admin endpoint
     /// for tests and future metrics scraping.
     pub(crate) waf_count_metrics: Arc<parking_lot::Mutex<BTreeMap<String, u64>>>,
+    /// ELBv2 state for resolving VPC_LINK target NLB/ALB bound ports.
+    pub(crate) elbv2_state: Option<fakecloud_elbv2::SharedElbv2State>,
     /// Deferred-fill handle to the central [`ServiceRegistry`]. Populated
     /// after all services have been registered so AWS direct integrations
     /// can dispatch to other fakecloud service handlers.
@@ -186,6 +188,7 @@ impl ApiGatewayService {
             waf_state: None,
             waf_rate_limiter: None,
             waf_count_metrics: Arc::new(parking_lot::Mutex::new(BTreeMap::new())),
+            elbv2_state: None,
             registry: None,
         }
     }
@@ -220,6 +223,11 @@ impl ApiGatewayService {
     /// inspection is disabled or no Count rules have fired.
     pub fn waf_count_metrics_snapshot(&self) -> BTreeMap<String, u64> {
         self.waf_count_metrics.lock().clone()
+    }
+
+    pub fn with_elbv2(mut self, state: fakecloud_elbv2::SharedElbv2State) -> Self {
+        self.elbv2_state = Some(state);
+        self
     }
 
     pub fn with_registry(
@@ -372,5 +380,5 @@ mod service_vpc_links_etc;
 mod service_extras;
 
 #[path = "helpers.rs"]
-mod helpers;
+pub(crate) mod helpers;
 pub(crate) use helpers::*;

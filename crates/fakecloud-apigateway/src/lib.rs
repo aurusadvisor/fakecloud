@@ -17,6 +17,7 @@ pub mod lambda_proxy;
 pub mod model_validation;
 pub(crate) mod service;
 pub mod state;
+pub mod vtl;
 
 pub use facade::ApiGatewayFacade;
 pub use state::{
