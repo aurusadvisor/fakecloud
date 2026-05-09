@@ -2234,7 +2234,9 @@ impl ApiGatewayV2Service {
             Err(err) => err.status().as_u16(),
         };
 
-        self.record_request(&req, &api_id, &stage_name, &resource_path, status_code);
+        if !api_id.is_empty() {
+            self.record_request(&req, &api_id, &stage_name, &resource_path, status_code);
+        }
 
         self.emit_access_log(&req, &api_id, &stage_name, &matched_route_key, status_code);
 
