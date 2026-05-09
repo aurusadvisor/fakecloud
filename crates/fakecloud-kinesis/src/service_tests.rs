@@ -1508,13 +1508,13 @@ fn get_records_skips_records_past_retention() {
         let shard = &mut stream.shards[0];
         let stale_ts = chrono::Utc::now() - chrono::Duration::hours(48);
         shard.records.push(KinesisRecord {
-            sequence_number: "1".to_string(),
+            sequence_number: format!("{:056}", 1),
             partition_key: "p".to_string(),
             data: b"stale".to_vec(),
             approximate_arrival_timestamp: stale_ts,
         });
         shard.records.push(KinesisRecord {
-            sequence_number: "2".to_string(),
+            sequence_number: format!("{:056}", 2),
             partition_key: "p".to_string(),
             data: b"fresh".to_vec(),
             approximate_arrival_timestamp: chrono::Utc::now(),
