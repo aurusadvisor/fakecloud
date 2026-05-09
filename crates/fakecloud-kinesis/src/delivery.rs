@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use base64::Engine;
-use chrono::Utc;
 use fakecloud_core::delivery::KinesisDelivery;
 
-use crate::state::{KinesisRecord, SharedKinesisState};
+use crate::service::append_record;
+use crate::state::SharedKinesisState;
 
 /// Kinesis delivery implementation for cross-service integrations.
 pub struct KinesisDeliveryImpl {
@@ -48,21 +48,10 @@ impl KinesisDelivery for KinesisDeliveryImpl {
             };
 
             if let Some(shard) = stream.shards.get_mut(shard_idx as usize) {
-                let now = Utc::now();
-                let sequence_number = now.timestamp_nanos_opt().unwrap_or(0).to_string();
-
-                // Data is base64-encoded; decode to raw bytes for storage.
-                // GetRecords will base64-encode when returning, matching AWS behavior.
                 let data_bytes = base64::engine::general_purpose::STANDARD
                     .decode(data)
                     .unwrap_or_else(|_| data.as_bytes().to_vec());
-
-                shard.records.push(KinesisRecord {
-                    sequence_number: sequence_number.clone(),
-                    partition_key: partition_key.to_string(),
-                    data: data_bytes,
-                    approximate_arrival_timestamp: now,
-                });
+                let sequence_number = append_record(shard, partition_key, data_bytes);
 
                 tracing::debug!(
                     stream_name = %stream_name,
@@ -85,6 +74,7 @@ impl KinesisDelivery for KinesisDeliveryImpl {
 mod tests {
     use super::*;
     use crate::state::{KinesisShard, KinesisState, KinesisStream, SharedKinesisState};
+    use chrono::Utc;
     use fakecloud_aws::arn::Arn;
     use parking_lot::RwLock;
     use std::collections::BTreeMap;
