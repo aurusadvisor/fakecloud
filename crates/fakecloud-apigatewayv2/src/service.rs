@@ -2320,7 +2320,10 @@ impl ApiGatewayV2Service {
         // When configured, every listed source must be present.
         if let Some(sources) = &authorizer.identity_source {
             for source in sources {
-                if extract_identity_source_value(req, source).is_none() {
+                if extract_identity_source_value(req, source)
+                    .map(|v| v.is_empty())
+                    .unwrap_or(true)
+                {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::UNAUTHORIZED,
                         "UnauthorizedException",

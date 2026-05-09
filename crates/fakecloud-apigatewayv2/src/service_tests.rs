@@ -1849,6 +1849,70 @@ async fn execute_api_lambda_authorizer_partial_identity_source_returns_401() {
 }
 
 #[tokio::test]
+async fn execute_api_lambda_authorizer_empty_identity_source_returns_401() {
+    // Identity source header present but empty -> 401.
+    let svc = make_svc_with_lambda(Ok(serde_json::json!({"isAuthorized": true})
+        .to_string()
+        .into_bytes()));
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "name": "lambda-auth",
+        "authorizerType": "REQUEST",
+        "identitySource": ["$request.header.Authorization"],
+        "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:authorizer/invocations"
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/authorizers"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let auth_id = body_json(&resp)["authorizerId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({"integrationType": "MOCK"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+        "authorizerId": auth_id
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Authorization header present but empty -> 401.
+    let mut req = make_request(Method::GET, "/prod/pets", "");
+    req.headers.insert("Authorization", "".parse().unwrap());
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn execute_api_lambda_authorizer_malformed_policy_no_resource() {
     // Policy statement missing Resource field should default to Deny.
     let svc = make_svc_with_lambda(Ok(serde_json::json!({
