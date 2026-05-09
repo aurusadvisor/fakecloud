@@ -569,7 +569,10 @@ fn eval_method(name: &str, args: &[Value], receiver: &Value, _ctx: &mut Context)
             }
         }
         "escapeJavaScript" => {
-            let src = args.first().map(json_to_string).unwrap_or_else(|| json_to_string(receiver));
+            let src = args
+                .first()
+                .map(json_to_string)
+                .unwrap_or_else(|| json_to_string(receiver));
             let json = serde_json::to_string(&src).unwrap_or_default();
             // Strip the JSON wrapping quotes; AWS returns only the escaped
             // content so templates can embed it inside their own quotes.

@@ -1104,7 +1104,12 @@ async fn apply_response_template(
     service: &ApiGatewayService,
 ) -> Result<AwsResponse, AwsServiceError> {
     let status_code = backend_resp.status.as_u16().to_string();
-    let key = response_key(api_id, resource_path, &integration.http_method, &status_code);
+    let key = response_key(
+        api_id,
+        resource_path,
+        &integration.http_method,
+        &status_code,
+    );
     let accounts = service.state_handle().read();
     let state = accounts.get(&req.account_id);
     let resp_template = state.and_then(|st| {
