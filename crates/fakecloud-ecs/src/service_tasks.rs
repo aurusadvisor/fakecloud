@@ -268,6 +268,7 @@ impl EcsService {
                 captured_logs: String::new(),
                 protection: None,
                 enable_execute_command,
+                attachments: Vec::new(),
             };
             state.tasks.insert(task_id.clone(), task.clone());
             if let Some(cluster) = state.clusters.get_mut(&cluster_name) {
@@ -653,6 +654,7 @@ mod multi_container_tests {
             captured_logs: String::new(),
             protection: None,
             enable_execute_command: false,
+            attachments: Vec::new(),
         };
         for name in ["app", "sidecar"] {
             task.containers.push(Container {
@@ -825,6 +827,24 @@ mod port_mapping_tests {
     }
 
     #[test]
+    fn awsvpc_network_mode_includes_network_flag() {
+        let plan = plan_with_ports(Vec::new(), Some("awsvpc"));
+        let argv = argv_string(&plan);
+        let network_idx = argv.iter().position(|s| s == "--network");
+        assert!(
+            network_idx.is_some(),
+            "awsvpc must emit --network: {argv:?}"
+        );
+        let network_name = argv.get(network_idx.unwrap() + 1);
+        assert!(
+            network_name
+                .map(|n| n.starts_with("fakecloud-ecs-"))
+                .unwrap_or(false),
+            "awsvpc must reference fakecloud-ecs network: {argv:?}"
+        );
+    }
+
+    #[test]
     fn network_bindings_populated_on_task() {
         // Build a task in state, run mark_running_multi with a started
         // container that has network_bindings populated, and verify
@@ -891,6 +911,7 @@ mod port_mapping_tests {
             captured_logs: String::new(),
             protection: None,
             enable_execute_command: false,
+            attachments: Vec::new(),
         };
         task.last_status = "PENDING".into();
         acct.tasks.insert("abc".into(), task);

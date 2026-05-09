@@ -430,6 +430,26 @@ pub struct Task {
     /// directly on RunTask). Gated when `ExecuteCommand` is invoked.
     #[serde(default)]
     pub enable_execute_command: bool,
+    /// Network attachments (ENI, elastic-inference, etc.) populated when
+    /// the task uses `awsvpc` network mode. Synthetic for fakecloud.
+    #[serde(default)]
+    pub attachments: Vec<TaskAttachment>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskAttachment {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub attachment_type: String,
+    pub status: String,
+    #[serde(default)]
+    pub details: Vec<AttachmentDetail>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AttachmentDetail {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

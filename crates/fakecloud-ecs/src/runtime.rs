@@ -287,6 +287,110 @@ impl EcsRuntime {
         }
         mark_pull_stopped(state, account_id, task_id);
 
+        // For awsvpc network mode, create a per-task docker network so
+        // containers share an isolated bridge. Clean it up when the task
+        // stops. Network creation is best-effort: on failure we fall back
+        // to the default bridge and continue.
+        let awsvpc_network = resolved_plans
+            .iter()
+            .any(|rp| rp.plan.network_mode.as_deref() == Some("awsvpc"));
+        let network_name = format!("fakecloud-ecs-{}", task_id);
+        let network_created = if awsvpc_network {
+            let create = Command::new(&self.cli)
+                .args([
+                    "network",
+                    "create",
+                    "--driver",
+                    "bridge",
+                    "--label",
+                    &format!("fakecloud-ecs-task={}", task_id),
+                    &network_name,
+                ])
+                .output()
+                .await;
+            match create {
+                Ok(out) if out.status.success() => {
+                    tracing::info!(
+                        task = %task_id,
+                        network = %network_name,
+                        "created awsvpc docker network"
+                    );
+                    true
+                }
+                Ok(out) => {
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    tracing::warn!(
+                        task = %task_id,
+                        network = %network_name,
+                        error = %err,
+                        "awsvpc network creation failed; falling back to default bridge"
+                    );
+                    false
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task = %task_id,
+                        network = %network_name,
+                        error = %e,
+                        "awsvpc network creation failed; falling back to default bridge"
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        if network_created {
+            let eni_id = format!(
+                "eni-{}",
+                uuid::Uuid::new_v4()
+                    .to_string()
+                    .replace('-', "")
+                    .get(..17)
+                    .unwrap_or("")
+            );
+            let mac = format!(
+                "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                rand::random::<u8>(),
+                rand::random::<u8>(),
+                rand::random::<u8>(),
+                rand::random::<u8>(),
+                rand::random::<u8>()
+            );
+            let ip = format!("10.0.{}.{}", rand::random::<u8>(), rand::random::<u8>());
+            let mut accounts = state.write();
+            if let Some(st) = accounts.get_mut(account_id) {
+                if let Some(task) = st.tasks.get_mut(task_id) {
+                    task.attachments.push(crate::state::TaskAttachment {
+                        id: eni_id.clone(),
+                        attachment_type: "eni".into(),
+                        status: "ATTACHED".into(),
+                        details: vec![
+                            crate::state::AttachmentDetail {
+                                name: "subnetId".into(),
+                                value: "subnet-fakecloud".into(),
+                            },
+                            crate::state::AttachmentDetail {
+                                name: "privateIPv4Address".into(),
+                                value: ip.clone(),
+                            },
+                            crate::state::AttachmentDetail {
+                                name: "macAddress".into(),
+                                value: mac.clone(),
+                            },
+                        ],
+                    });
+                }
+            }
+            tracing::info!(
+                task = %task_id,
+                eni = %eni_id,
+                ip = %ip,
+                "populated awsvpc ENI attachment"
+            );
+        }
+
         // Launch every container detached, in topological order. Before
         // each `docker run` we honour the dependent's `dependsOn[]` by
         // polling docker until each upstream container reaches the
@@ -445,6 +549,13 @@ impl EcsRuntime {
         for rc in &started {
             let _ = Command::new(&self.cli)
                 .args(["rm", "-f", &rc.container_id])
+                .output()
+                .await;
+        }
+        // Clean up the per-task docker network for awsvpc.
+        if network_created {
+            let _ = Command::new(&self.cli)
+                .args(["network", "rm", &network_name])
                 .output()
                 .await;
         }
@@ -1942,6 +2053,10 @@ pub(crate) fn build_run_argv(
     argv.push(format!("fakecloud-ecs-container={}", plan.container_name));
     argv.push("--add-host".into());
     argv.push(format!("host.docker.internal:{}", host_ip));
+    if plan.network_mode.as_deref() == Some("awsvpc") {
+        argv.push("--network".into());
+        argv.push(format!("fakecloud-ecs-{}", task_id));
+    }
     // `awsvpc` puts the container on a per-task ENI; emulating that on a
     // local docker host means *not* publishing to the host port table.
     // Bridge / host / default network modes still get `--publish`.
@@ -2415,6 +2530,7 @@ mod tests {
             captured_logs: String::new(),
             protection: None,
             enable_execute_command: false,
+            attachments: Vec::new(),
         }
     }
 

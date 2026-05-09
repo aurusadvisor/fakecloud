@@ -474,7 +474,35 @@ pub(crate) fn task_to_json(task: &Task) -> Value {
     // Always-present fields AWS returns. SDKs deserialize these
     // unconditionally; without them, terraform/cdk plan diffs and
     // observability hooks see missing keys.
-    map.insert("attachments".into(), json!([]));
+    map.insert(
+        "attachments".into(),
+        Value::Array(
+            task.attachments
+                .iter()
+                .map(|a| {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("id".into(), json!(a.id));
+                    obj.insert("type".into(), json!(a.attachment_type));
+                    obj.insert("status".into(), json!(a.status));
+                    obj.insert(
+                        "details".into(),
+                        Value::Array(
+                            a.details
+                                .iter()
+                                .map(|d| {
+                                    serde_json::json!({
+                                        "name": d.name,
+                                        "value": d.value,
+                                    })
+                                })
+                                .collect(),
+                        ),
+                    );
+                    Value::Object(obj)
+                })
+                .collect(),
+        ),
+    );
     map.insert("attributes".into(), json!([]));
     map.insert("availabilityZone".into(), json!("us-east-1a"));
     map.insert(
@@ -776,6 +804,7 @@ pub(crate) fn spawn_service_tasks(
             captured_logs: String::new(),
             protection: None,
             enable_execute_command: service_exec,
+            attachments: Vec::new(),
         };
         state.tasks.insert(task_id.clone(), task);
         if let Some(cluster) = state.clusters.get_mut(&cluster_name) {
