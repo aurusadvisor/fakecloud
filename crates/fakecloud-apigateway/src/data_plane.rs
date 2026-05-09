@@ -15,13 +15,14 @@
 //! preflights.
 
 use http::{Method, StatusCode};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::lambda_proxy;
+use crate::service::helpers::response_key;
 use crate::service::ApiGatewayService;
 use crate::state::{AuthEffect, Authorizer, CachedAuthorizerResult, Integration};
 
@@ -321,6 +322,15 @@ pub async fn handle(
         }
     }
 
+    let mut vtl_ctx = crate::vtl::build_context(
+        req,
+        &api_id,
+        &stage_name,
+        &resource_path,
+        &path_params,
+        &stage_vars,
+    );
+
     let result: Result<AwsResponse, AwsServiceError> = match integration.integration_type.as_str() {
         "AWS_PROXY" => {
             let function_arn = match integration.uri.as_deref() {
@@ -347,8 +357,38 @@ pub async fn handle(
                 .ok_or_else(|| bad_gateway("Lambda delivery not configured"))?;
             lambda_proxy::invoke_lambda(delivery, &function_arn, event).await
         }
-        "HTTP_PROXY" | "HTTP" => http_proxy(req, &integration).await,
-        "MOCK" => Ok(AwsResponse::ok_json(json!({}))),
+        "HTTP_PROXY" => http_proxy(req, &integration, None).await,
+        "HTTP" => {
+            // Apply request template before sending to backend.
+            let transformed_body = apply_request_template(req, &integration, &mut vtl_ctx);
+            let backend_resp = http_proxy(req, &integration, transformed_body).await?;
+            // Apply response template after receiving from backend.
+            apply_response_template(
+                backend_resp,
+                &integration,
+                req,
+                &mut vtl_ctx,
+                &api_id,
+                &resource_path,
+                &stage_name,
+                &path_params,
+                &stage_vars,
+                service,
+            )
+            .await
+        }
+        "MOCK" => {
+            mock_response(
+                req,
+                &integration,
+                &mut vtl_ctx,
+                &api_id,
+                &resource_path,
+                &stage_name,
+                service,
+            )
+            .await
+        }
         other => Err(bad_gateway(format!(
             "Integration type '{other}' not supported in fakecloud's data plane",
         ))),
@@ -965,6 +1005,7 @@ fn extract_lambda_arn(uri: &str) -> Option<String> {
 async fn http_proxy(
     req: &AwsRequest,
     integration: &Integration,
+    body_override: Option<bytes::Bytes>,
 ) -> Result<AwsResponse, AwsServiceError> {
     let url = integration
         .uri
@@ -987,8 +1028,9 @@ async fn http_proxy(
             builder = builder.header(k.as_str(), s);
         }
     }
-    if !req.body.is_empty() {
-        builder = builder.body(req.body.clone().to_vec());
+    let body = body_override.as_ref().unwrap_or(&req.body);
+    if !body.is_empty() {
+        builder = builder.body(body.clone().to_vec());
     }
     let resp = builder
         .send()
@@ -1021,6 +1063,138 @@ async fn http_proxy(
         headers,
         body: bytes::Bytes::from(body.to_vec()).into(),
     })
+}
+
+/// Apply the integration's `requestTemplates` to the request body.
+/// Returns `Some(transformed_body)` when a template matched the request
+/// content type, or `None` to leave the body unchanged.
+fn apply_request_template(
+    req: &AwsRequest,
+    integration: &Integration,
+    vtl_ctx: &mut crate::vtl::Context,
+) -> Option<bytes::Bytes> {
+    let content_type = req
+        .headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json");
+    let normalized = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim();
+    let template = integration.request_templates.get(normalized)?;
+    let rendered = crate::vtl::render(template, vtl_ctx);
+    Some(bytes::Bytes::from(rendered))
+}
+
+/// Apply the integration response's `responseTemplates` to the backend
+/// response body. Returns a new `AwsResponse` with the rendered template.
+#[allow(clippy::too_many_arguments)]
+async fn apply_response_template(
+    backend_resp: AwsResponse,
+    _integration: &Integration,
+    req: &AwsRequest,
+    vtl_ctx: &mut crate::vtl::Context,
+    api_id: &str,
+    resource_path: &str,
+    _stage_name: &str,
+    _path_params: &BTreeMap<String, String>,
+    _stage_vars: &BTreeMap<String, String>,
+    service: &ApiGatewayService,
+) -> Result<AwsResponse, AwsServiceError> {
+    let status_code = backend_resp.status.as_u16().to_string();
+    let key = response_key(api_id, resource_path, req.method.as_str(), &status_code);
+    let accounts = service.state_handle().read();
+    let state = accounts.get(&req.account_id);
+    let resp_template = state.and_then(|st| {
+        st.integration_responses
+            .get(&key)
+            .and_then(|v| v.get("responseTemplates"))
+            .and_then(|t| t.as_object())
+    });
+    let content_type = backend_resp
+        .content_type
+        .as_str()
+        .split(';')
+        .next()
+        .unwrap_or(&backend_resp.content_type)
+        .trim();
+    let template = resp_template
+        .and_then(|t| t.get(content_type))
+        .and_then(|v| v.as_str());
+    let body = if let Some(template) = template {
+        // Inject $input with the backend response body so the template
+        // can reference it.
+        let body_str = String::from_utf8_lossy(backend_resp.body.expect_bytes()).to_string();
+        let body_json: Value = serde_json::from_str(&body_str).unwrap_or(Value::Null);
+        vtl_ctx.set("input", json!({"body": body_str, "json": body_json}));
+        crate::vtl::render(template, vtl_ctx)
+    } else {
+        body_str(&backend_resp)
+    };
+    Ok(AwsResponse {
+        status: backend_resp.status,
+        content_type: backend_resp.content_type,
+        headers: backend_resp.headers,
+        body: bytes::Bytes::from(body).into(),
+    })
+}
+
+/// Build a MOCK integration response by looking up the integration
+/// response for the method and rendering its `responseTemplates`.
+#[allow(clippy::too_many_arguments)]
+async fn mock_response(
+    req: &AwsRequest,
+    _integration: &Integration,
+    vtl_ctx: &mut crate::vtl::Context,
+    api_id: &str,
+    resource_path: &str,
+    _stage_name: &str,
+    service: &ApiGatewayService,
+) -> Result<AwsResponse, AwsServiceError> {
+    let method = req.method.as_str();
+    // Default to 200 when no explicit status code is configured.
+    let status_code = "200";
+    let key = response_key(api_id, resource_path, method, status_code);
+    let accounts = service.state_handle().read();
+    let state = accounts.get(&req.account_id);
+    let resp_record = state.and_then(|st| st.integration_responses.get(&key));
+    let (status, resp_templates) = if let Some(record) = resp_record {
+        let status = record
+            .get("statusCode")
+            .and_then(|v| v.as_str())
+            .unwrap_or(status_code);
+        let templates = record.get("responseTemplates").and_then(|v| v.as_object());
+        (status, templates)
+    } else {
+        (status_code, None)
+    };
+    let status = status
+        .parse::<u16>()
+        .ok()
+        .and_then(|n| StatusCode::from_u16(n).ok())
+        .unwrap_or(StatusCode::OK);
+    let content_type = "application/json";
+    let body = if let Some(templates) = resp_templates {
+        templates
+            .get(content_type)
+            .and_then(|v| v.as_str())
+            .map(|t| crate::vtl::render(t, vtl_ctx))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    Ok(AwsResponse {
+        status,
+        content_type: content_type.to_string(),
+        headers: http::HeaderMap::new(),
+        body: bytes::Bytes::from(body).into(),
+    })
+}
+
+fn body_str(resp: &AwsResponse) -> String {
+    String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
 }
 
 // ── Usage plan throttle + quota ──
