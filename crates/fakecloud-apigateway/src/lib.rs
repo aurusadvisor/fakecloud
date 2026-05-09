@@ -14,6 +14,7 @@ pub mod data_plane;
 pub mod dispatch;
 pub mod facade;
 pub mod lambda_proxy;
+pub mod model_validation;
 pub(crate) mod service;
 pub mod state;
 
