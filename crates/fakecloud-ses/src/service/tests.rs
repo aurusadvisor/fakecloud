@@ -4326,3 +4326,70 @@ async fn send_email_v2_skips_suppressed_recipient() {
     assert_eq!(results[1]["Status"], "MESSAGE_REJECTED");
     assert_eq!(results[1]["Error"], "Address is on the suppression list");
 }
+
+#[tokio::test]
+async fn test_event_destination_kinesis_firehose_cloudwatch() {
+    let state = make_state();
+    let svc = SesV2Service::new(state);
+
+    // Create config set first
+    let req = make_request(
+        Method::POST,
+        "/v2/email/configuration-sets",
+        r#"{"ConfigurationSetName": "my-config"}"#,
+    );
+    svc.handle(req).await.unwrap();
+
+    // Create event destination with Kinesis, Firehose, and CloudWatch
+    let req = make_request(
+        Method::POST,
+        "/v2/email/configuration-sets/my-config/event-destinations",
+        r#"{
+            "EventDestinationName": "multi-dest",
+            "EventDestination": {
+                "Enabled": true,
+                "MatchingEventTypes": ["SEND", "DELIVERY"],
+                "KinesisFirehoseDestination": {
+                    "DeliveryStreamARN": "arn:aws:firehose:us-east-1:123456789012:deliverystream/my-stream",
+                    "StreamARN": "arn:aws:kinesis:us-east-1:123456789012:stream/my-kinesis"
+                },
+                "CloudWatchDestination": {
+                    "DimensionConfigurations": [
+                        {
+                            "DimensionName": "EventType",
+                            "DimensionValueSource": "MESSAGE_TAG",
+                            "DefaultDimensionValue": "Send"
+                        }
+                    ]
+                }
+            }
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+
+    // Get event destinations and verify all fields round-trip
+    let req = make_request(
+        Method::GET,
+        "/v2/email/configuration-sets/my-config/event-destinations",
+        "",
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let dests = body["EventDestinations"].as_array().unwrap();
+    assert_eq!(dests.len(), 1);
+    assert_eq!(dests[0]["Name"], "multi-dest");
+    assert_eq!(
+        dests[0]["KinesisFirehoseDestination"]["DeliveryStreamARN"],
+        "arn:aws:firehose:us-east-1:123456789012:deliverystream/my-stream"
+    );
+    assert_eq!(
+        dests[0]["KinesisFirehoseDestination"]["StreamARN"],
+        "arn:aws:kinesis:us-east-1:123456789012:stream/my-kinesis"
+    );
+    assert_eq!(
+        dests[0]["CloudWatchDestination"]["DimensionConfigurations"][0]["DimensionName"],
+        "EventType"
+    );
+}
