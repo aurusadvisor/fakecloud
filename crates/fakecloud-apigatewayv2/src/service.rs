@@ -2173,12 +2173,23 @@ impl ApiGatewayV2Service {
         };
 
         let Some(authorizer) = authorizer else {
-            return Ok(None);
+            return Err(AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                format!("Authorizer not found: {}", authorizer_id),
+            ));
         };
 
         match authorizer.authorizer_type.as_str() {
             "JWT" => self.enforce_jwt_authorizer(req, &authorizer).await,
-            _ => Ok(None),
+            _ => Err(AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                format!(
+                    "Unsupported authorizer type: {}",
+                    authorizer.authorizer_type
+                ),
+            )),
         }
     }
 
