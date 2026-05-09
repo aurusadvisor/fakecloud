@@ -168,6 +168,11 @@ pub struct ApiGatewayService {
     pub(crate) waf_count_metrics: Arc<parking_lot::Mutex<BTreeMap<String, u64>>>,
     /// ELBv2 state for resolving VPC_LINK target NLB/ALB bound ports.
     pub(crate) elbv2_state: Option<fakecloud_elbv2::SharedElbv2State>,
+    /// Deferred-fill handle to the central [`ServiceRegistry`]. Populated
+    /// after all services have been registered so AWS direct integrations
+    /// can dispatch to other fakecloud service handlers.
+    pub(crate) registry:
+        Option<Arc<std::sync::OnceLock<Arc<fakecloud_core::registry::ServiceRegistry>>>>,
 }
 
 impl ApiGatewayService {
@@ -184,6 +189,7 @@ impl ApiGatewayService {
             waf_rate_limiter: None,
             waf_count_metrics: Arc::new(parking_lot::Mutex::new(BTreeMap::new())),
             elbv2_state: None,
+            registry: None,
         }
     }
 
@@ -224,8 +230,22 @@ impl ApiGatewayService {
         self
     }
 
+    pub fn with_registry(
+        mut self,
+        registry: Arc<std::sync::OnceLock<Arc<fakecloud_core::registry::ServiceRegistry>>>,
+    ) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
     pub(crate) fn delivery(&self) -> Option<&Arc<DeliveryBus>> {
         self.delivery.as_ref()
+    }
+
+    pub(crate) fn registry(
+        &self,
+    ) -> Option<&Arc<std::sync::OnceLock<Arc<fakecloud_core::registry::ServiceRegistry>>>> {
+        self.registry.as_ref()
     }
 
     pub fn state_handle(&self) -> &SharedApiGatewayState {
