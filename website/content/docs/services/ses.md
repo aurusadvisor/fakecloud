@@ -40,6 +40,15 @@ fakecloud implements **110 of 110** SES v2 operations at 100% Smithy conformance
 
 SES v2 uses REST. SES v1 inbound uses Query protocol.
 
+## SMTP submission
+
+fakecloud also exposes a minimal SMTP submission listener that mirrors `email-smtp.<region>.amazonaws.com:587`. It is **off by default** — set `FAKECLOUD_SES_SMTP_PORT=2525` (or any free port) before starting the server to enable it.
+
+- Authenticate with credentials produced by IAM `CreateServiceSpecificCredential` for `ServiceName=ses.amazonaws.com` (the `ServiceUserName` / `ServicePassword` pair from the response).
+- Both `AUTH PLAIN` and `AUTH LOGIN` mechanisms are supported.
+- After `MAIL FROM` / `RCPT TO` / `DATA`, the message is recorded in the SES `sent_emails` ledger as a `SentEmail` with `raw_data` populated, mirroring `SendRawEmail`. It then surfaces on `GET /_fakecloud/ses/emails` like any other accepted message.
+- STARTTLS is not implemented — keep the listener bound to localhost in tests.
+
 ## Introspection
 
 - `GET /_fakecloud/ses/emails` — list all sent emails with full body, synthesized headers (DKIM-Signature first when signing was active), attachments

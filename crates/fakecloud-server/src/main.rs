@@ -21,6 +21,7 @@ mod kinesis_lambda_poller;
 mod lambda_delivery;
 mod reaper;
 mod reset;
+mod ses_smtp;
 mod sqs_lambda_poller;
 mod stepfunctions_delivery;
 use cli::Cli;
@@ -1692,6 +1693,7 @@ async fn main() {
         ses_service = ses_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(ses_service));
+    ses_smtp::maybe_spawn(iam_state.clone(), ses_state.clone());
     let delivery_for_cognito = {
         let mut bus = DeliveryBus::new();
         if let Some(ref ld) = lambda_delivery {
