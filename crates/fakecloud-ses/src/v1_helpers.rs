@@ -1287,6 +1287,8 @@ pub(crate) fn send_email(
         dkim_signature: None,
         headers: Vec::new(),
         timestamp: Utc::now(),
+        email_tags: Vec::new(),
+        delivery_insights: Vec::new(),
     };
     let sent = sign_sent_email(state, &req.account_id, &req.region, sent);
 
@@ -1365,6 +1367,8 @@ pub(crate) fn send_raw_email(
         dkim_signature: None,
         headers: Vec::new(),
         timestamp: Utc::now(),
+        email_tags: Vec::new(),
+        delivery_insights: Vec::new(),
     };
     let sent = sign_sent_email(state, &req.account_id, &req.region, sent);
 
@@ -1456,6 +1460,8 @@ pub(crate) fn send_templated_email(
         dkim_signature: None,
         headers: Vec::new(),
         timestamp: Utc::now(),
+        email_tags: Vec::new(),
+        delivery_insights: Vec::new(),
     };
     let sent = sign_sent_email(state, &req.account_id, &req.region, sent);
 
@@ -1619,6 +1625,8 @@ pub(crate) fn send_bulk_destination(
         dkim_signature: None,
         headers: Vec::new(),
         timestamp: Utc::now(),
+        email_tags: Vec::new(),
+        delivery_insights: Vec::new(),
     };
     let sent = sign_sent_email(state, account_id, "", sent);
 

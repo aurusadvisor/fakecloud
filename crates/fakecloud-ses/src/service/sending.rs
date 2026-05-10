@@ -344,6 +344,19 @@ impl SesV2Service {
                 (None, None, None, None, None, None)
             };
 
+        let email_tags = body["EmailTags"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| {
+                        let name = t["Name"].as_str()?;
+                        let value = t["Value"].as_str()?;
+                        Some((name.to_string(), value.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let message_id = uuid::Uuid::new_v4().to_string();
 
         let sent = SentEmail {
@@ -361,10 +374,12 @@ impl SesV2Service {
             dkim_signature: None,
             headers: Vec::new(),
             timestamp: Utc::now(),
+            email_tags,
+            delivery_insights: Vec::new(),
         };
 
         let signed = self.compute_dkim_signature(&req.account_id, &sent);
-        let sent = match signed {
+        let mut sent = match signed {
             Some((sig, hdrs)) => SentEmail {
                 dkim_signature: Some(sig),
                 headers: hdrs,
@@ -375,7 +390,7 @@ impl SesV2Service {
 
         // Event fanout: check suppression list, generate events, deliver to destinations
         if let Some(ref ctx) = self.delivery_ctx {
-            crate::fanout::process_send_events(ctx, &sent, config_set_name.as_deref());
+            crate::fanout::process_send_events(ctx, &mut sent, config_set_name.as_deref());
         }
 
         self.state
@@ -508,9 +523,11 @@ impl SesV2Service {
                 dkim_signature: None,
                 headers: Vec::new(),
                 timestamp: Utc::now(),
+                email_tags: Vec::new(),
+                delivery_insights: Vec::new(),
             };
             let signed = self.compute_dkim_signature(&req.account_id, &sent);
-            let sent = match signed {
+            let mut sent = match signed {
                 Some((sig, hdrs)) => SentEmail {
                     dkim_signature: Some(sig),
                     headers: hdrs,
@@ -521,7 +538,7 @@ impl SesV2Service {
 
             // Event fanout for each bulk entry
             if let Some(ref ctx) = self.delivery_ctx {
-                crate::fanout::process_send_events(ctx, &sent, config_set_name.as_deref());
+                crate::fanout::process_send_events(ctx, &mut sent, config_set_name.as_deref());
             }
 
             self.state

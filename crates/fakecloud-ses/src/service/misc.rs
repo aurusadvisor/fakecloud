@@ -453,6 +453,8 @@ impl SesV2Service {
             dkim_signature: None,
             headers: Vec::new(),
             timestamp: Utc::now(),
+            email_tags: Vec::new(),
+            delivery_insights: Vec::new(),
         };
 
         self.state
@@ -2058,12 +2060,73 @@ impl SesV2Service {
             .iter()
             .find(|e| e.message_id == message_id);
         if let Some(email) = sent {
+            let email_tags: Vec<serde_json::Value> = email
+                .email_tags
+                .iter()
+                .map(|(name, value)| json!({"Name": name, "Value": value}))
+                .collect();
+            let insights: Vec<serde_json::Value> = email
+                .delivery_insights
+                .iter()
+                .map(|ins| {
+                    let events: Vec<serde_json::Value> = ins
+                        .events
+                        .iter()
+                        .map(|ev| {
+                            let mut detail = serde_json::Map::new();
+                            if ev.event_type == "BOUNCE" {
+                                let mut bounce = serde_json::Map::new();
+                                if let Some(ref bt) = ev.bounce_type {
+                                    bounce.insert("BounceType".to_string(), json!(bt));
+                                }
+                                if let Some(ref bs) = ev.bounce_sub_type {
+                                    bounce.insert("BounceSubType".to_string(), json!(bs));
+                                }
+                                if let Some(ref dc) = ev.diagnostic_code {
+                                    bounce.insert("DiagnosticCode".to_string(), json!(dc));
+                                }
+                                if !bounce.is_empty() {
+                                    detail.insert("Bounce".to_string(), json!(bounce));
+                                }
+                            }
+                            if ev.event_type == "COMPLAINT" {
+                                let mut complaint = serde_json::Map::new();
+                                if let Some(ref cst) = ev.complaint_sub_type {
+                                    complaint.insert("ComplaintSubType".to_string(), json!(cst));
+                                }
+                                if let Some(ref cft) = ev.complaint_feedback_type {
+                                    complaint
+                                        .insert("ComplaintFeedbackType".to_string(), json!(cft));
+                                }
+                                if !complaint.is_empty() {
+                                    detail.insert("Complaint".to_string(), json!(complaint));
+                                }
+                            }
+                            let mut event = serde_json::Map::new();
+                            event.insert(
+                                "Timestamp".to_string(),
+                                json!(ev.timestamp.timestamp() as f64),
+                            );
+                            event.insert("Type".to_string(), json!(ev.event_type));
+                            if !detail.is_empty() {
+                                event.insert("Details".to_string(), json!(detail));
+                            }
+                            json!(event)
+                        })
+                        .collect();
+                    json!({
+                        "Destination": ins.destination,
+                        "Isp": ins.isp,
+                        "Events": events,
+                    })
+                })
+                .collect();
             let body = json!({
                 "MessageId": email.message_id,
                 "FromEmailAddress": email.from,
                 "Subject": email.subject,
-                "EmailTags": [],
-                "Insights": [],
+                "EmailTags": email_tags,
+                "Insights": insights,
             });
             Ok(AwsResponse::json(StatusCode::OK, body.to_string()))
         } else {

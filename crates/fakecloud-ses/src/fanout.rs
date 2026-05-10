@@ -8,7 +8,10 @@ use std::sync::Arc;
 
 use fakecloud_core::delivery::DeliveryBus;
 
-use crate::state::{EventDestination, SentEmail, SharedSesState, SuppressedDestination};
+use crate::state::{
+    DeliveryInsightEvent, EmailRecipientInsight, EventDestination, SentEmail, SharedSesState,
+    SuppressedDestination,
+};
 
 /// Shared references needed for cross-service event delivery.
 #[derive(Clone)]
@@ -337,6 +340,58 @@ fn deliver_event(
     }
 }
 
+/// Infer ISP name from an email address domain.
+pub fn infer_isp(email: &str) -> String {
+    let domain = email.split('@').nth(1).unwrap_or("").to_ascii_lowercase();
+    match domain.as_str() {
+        "gmail.com" => "Gmail",
+        "yahoo.com" | "ymail.com" => "Yahoo",
+        "hotmail.com" | "outlook.com" | "live.com" => "Outlook",
+        "aol.com" => "AOL",
+        "icloud.com" | "me.com" | "mac.com" => "Apple",
+        "protonmail.com" => "ProtonMail",
+        "zoho.com" => "Zoho",
+        _ => "Other",
+    }
+    .to_string()
+}
+
+/// Build per-recipient delivery insights from the generated event types.
+fn build_delivery_insights(
+    email: &SentEmail,
+    event_types: &[SesEventType],
+) -> Vec<EmailRecipientInsight> {
+    let mut insights = Vec::new();
+    for dest in &email.to {
+        let mut events = Vec::new();
+        for et in event_types {
+            let mut ev = DeliveryInsightEvent {
+                timestamp: Utc::now(),
+                event_type: et.as_str().to_string(),
+                ..Default::default()
+            };
+            match et {
+                SesEventType::Bounce => {
+                    ev.bounce_type = Some("Permanent".to_string());
+                    ev.bounce_sub_type = Some("General".to_string());
+                    ev.diagnostic_code = Some("smtp; 550 5.1.1 user unknown".to_string());
+                }
+                SesEventType::Complaint => {
+                    ev.complaint_feedback_type = Some("abuse".to_string());
+                }
+                _ => {}
+            }
+            events.push(ev);
+        }
+        insights.push(EmailRecipientInsight {
+            destination: dest.clone(),
+            isp: infer_isp(dest),
+            events,
+        });
+    }
+    insights
+}
+
 /// Process event fanout for a sent email.
 ///
 /// This is the main entry point called from SendEmail / SendBulkEmail.
@@ -345,37 +400,39 @@ fn deliver_event(
 /// 2. Classifies recipients for mailbox simulator behavior
 /// 3. Generates appropriate events
 /// 4. Fans out to configured destinations
+/// 5. Stores per-recipient delivery insights on the SentEmail
 ///
 /// Returns `true` if the email was suppressed (caller should handle accordingly).
 pub fn process_send_events(
     ctx: &SesDeliveryContext,
-    email: &SentEmail,
+    email: &mut SentEmail,
     config_set_name: Option<&str>,
 ) -> bool {
-    let config_set = match resolve_config_set(&ctx.ses_state, config_set_name, &email.from) {
-        Some(cs) => cs,
-        None => return false, // No config set, no event destinations to fan out to
-    };
+    let config_set = resolve_config_set(&ctx.ses_state, config_set_name, &email.from);
 
-    // Check suppression list with the effective reasons filter
-    if let Some(suppressed_addr) =
-        check_suppression_list(&ctx.ses_state, &email.to, Some(config_set.as_str()))
-    {
-        tracing::info!(
-            address = %suppressed_addr,
-            config_set = %config_set,
-            "SES: recipient is on suppression list, generating bounce"
-        );
-        // Increment the suppression-drop counter so introspection /
-        // /_fakecloud/ses/metrics callers can observe the gate firing.
+    // Check suppression list with the effective reasons filter when a config set exists
+    if let Some(ref cs) = config_set {
+        if let Some(suppressed_addr) =
+            check_suppression_list(&ctx.ses_state, &email.to, Some(cs.as_str()))
         {
-            let mut mas = ctx.ses_state.write();
-            let state = mas.default_mut();
-            state.suppressed_drops_total = state.suppressed_drops_total.saturating_add(1);
+            tracing::info!(
+                address = %suppressed_addr,
+                config_set = %cs,
+                "SES: recipient is on suppression list, generating bounce"
+            );
+            // Increment the suppression-drop counter so introspection /
+            // /_fakecloud/ses/metrics callers can observe the gate firing.
+            {
+                let mut mas = ctx.ses_state.write();
+                let state = mas.default_mut();
+                state.suppressed_drops_total = state.suppressed_drops_total.saturating_add(1);
+            }
+            let bounce_event = build_ses_event(SesEventType::Bounce, email);
+            deliver_event(ctx, &bounce_event, SesEventType::Bounce, cs);
+            // Store insights: one BOUNCE event per recipient
+            email.delivery_insights = build_delivery_insights(email, &[SesEventType::Bounce]);
+            return true;
         }
-        let bounce_event = build_ses_event(SesEventType::Bounce, email);
-        deliver_event(ctx, &bounce_event, SesEventType::Bounce, &config_set);
-        return true;
     }
 
     // Classify recipients for simulator behavior
@@ -399,11 +456,16 @@ pub fn process_send_events(
         }
     }
 
-    // Generate and deliver events
-    for event_type in event_types {
-        let event = build_ses_event(event_type, email);
-        deliver_event(ctx, &event, event_type, &config_set);
+    // Generate and deliver events to configured destinations
+    if let Some(ref cs) = config_set {
+        for event_type in &event_types {
+            let event = build_ses_event(*event_type, email);
+            deliver_event(ctx, &event, *event_type, cs);
+        }
     }
+
+    // Store per-recipient delivery insights regardless of config set
+    email.delivery_insights = build_delivery_insights(email, &event_types);
 
     false
 }
@@ -475,6 +537,8 @@ mod tests {
             dkim_signature: None,
             headers: Vec::new(),
             timestamp: Utc::now(),
+            email_tags: Vec::new(),
+            delivery_insights: Vec::new(),
         };
         let event = build_ses_event(SesEventType::Send, &email);
         assert_eq!(event["eventType"], "Send");
@@ -500,6 +564,8 @@ mod tests {
             dkim_signature: None,
             headers: Vec::new(),
             timestamp: Utc::now(),
+            email_tags: Vec::new(),
+            delivery_insights: Vec::new(),
         };
         let event = build_ses_event(SesEventType::Bounce, &email);
         assert_eq!(event["eventType"], "Bounce");
@@ -524,6 +590,8 @@ mod tests {
             dkim_signature: None,
             headers: Vec::new(),
             timestamp: Utc::now(),
+            email_tags: Vec::new(),
+            delivery_insights: Vec::new(),
         };
         let event = build_ses_event(SesEventType::Delivery, &email);
         assert_eq!(event["eventType"], "Delivery");
@@ -548,6 +616,8 @@ mod tests {
             dkim_signature: None,
             headers: Vec::new(),
             timestamp: Utc::now(),
+            email_tags: Vec::new(),
+            delivery_insights: Vec::new(),
         };
         let event = build_ses_event(SesEventType::Complaint, &email);
         assert_eq!(event["eventType"], "Complaint");
@@ -850,6 +920,8 @@ mod tests {
                 dkim_signature: None,
                 headers: Vec::new(),
                 timestamp: Utc::now(),
+                email_tags: Vec::new(),
+                delivery_insights: Vec::new(),
             },
         );
         // No senders wired — must not panic.
