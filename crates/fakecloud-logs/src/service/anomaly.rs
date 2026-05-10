@@ -7,7 +7,7 @@ use fakecloud_core::validation::*;
 use super::LogsService;
 use chrono::Utc;
 
-use crate::state::AnomalyDetector;
+use crate::state::{AnomalyDetector, LogAnomaly};
 
 impl LogsService {
     // ---- Anomaly Detectors ----
@@ -287,10 +287,43 @@ impl LogsService {
             &body["suppressionState"],
             &["SUPPRESSED", "UNSUPPRESSED"],
         )?;
-        // Stub: return empty anomalies list
+        let detector_filter = body["anomalyDetectorArn"].as_str();
+        let suppression = body["suppressionState"].as_str();
+
+        let accounts = self.state.read();
+        let empty = crate::state::LogsState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let anomalies: Vec<Value> = state
+            .anomalies
+            .values()
+            .filter(|a| {
+                detector_filter.is_none_or(|d| a.anomaly_detector_arn == d)
+                    && suppression.is_none_or(|s| match s {
+                        "SUPPRESSED" => a.suppressed,
+                        "UNSUPPRESSED" => !a.suppressed,
+                        _ => true,
+                    })
+            })
+            .map(|a| {
+                json!({
+                    "anomalyId": a.anomaly_id,
+                    "anomalyDetectorArn": a.anomaly_detector_arn,
+                    "logGroupArnList": a.log_group_arn_list,
+                    "patternId": a.pattern_id,
+                    "patternString": a.pattern_string,
+                    "firstSeen": a.first_seen,
+                    "lastSeen": a.last_seen,
+                    "priority": a.priority,
+                    "state": a.state,
+                    "active": !a.suppressed,
+                    "suppressed": a.suppressed,
+                })
+            })
+            .collect();
+
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({ "anomalies": [] })).unwrap(),
+            serde_json::to_string(&json!({ "anomalies": anomalies })).unwrap(),
         ))
     }
 
@@ -310,11 +343,54 @@ impl LogsService {
             &body["suppressionType"],
             &["LIMITED", "INFINITE"],
         )?;
-        // No-op stub
+        let anomaly_id = body["anomalyId"].as_str();
+        let suppress = !body["suppressionType"].is_null();
+        if let Some(id) = anomaly_id {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            if let Some(a) = state.anomalies.get_mut(id) {
+                a.suppressed = suppress;
+            }
+        }
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
 
     // -- Import tasks --
+
+    /// Admin: inject a synthetic anomaly so tests can exercise
+    /// ListAnomalies / UpdateAnomaly without running real detection.
+    /// Called from the `/_fakecloud/logs/anomalies/inject` endpoint.
+    pub fn inject_anomaly(
+        &self,
+        account_id: &str,
+        _region: &str,
+        anomaly_detector_arn: String,
+        log_group_arns: Vec<String>,
+        pattern_string: String,
+        priority: Option<String>,
+    ) -> String {
+        let now = Utc::now().timestamp_millis();
+        let anomaly_id = uuid::Uuid::new_v4().to_string();
+        let pattern_id = format!("{:032x}", uuid::Uuid::new_v4().as_u128());
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(account_id);
+        state.anomalies.insert(
+            anomaly_id.clone(),
+            LogAnomaly {
+                anomaly_id: anomaly_id.clone(),
+                anomaly_detector_arn,
+                log_group_arn_list: log_group_arns,
+                pattern_id,
+                pattern_string,
+                first_seen: now,
+                last_seen: now,
+                priority: priority.unwrap_or_else(|| "MEDIUM".to_string()),
+                state: "ACTIVE".to_string(),
+                suppressed: false,
+            },
+        );
+        anomaly_id
+    }
 }
 
 #[cfg(test)]
@@ -363,5 +439,42 @@ mod tests {
             json!({ "anomalyDetectorArn": &arn }),
         );
         svc.delete_log_anomaly_detector(&req).unwrap();
+    }
+
+    #[test]
+    fn list_anomalies_returns_injected_entries() {
+        let svc = make_service();
+        let id = svc.inject_anomaly(
+            "123456789012",
+            "us-east-1",
+            "arn:aws:logs:us-east-1:123456789012:anomaly-detector:abc".to_string(),
+            vec!["arn:aws:logs:us-east-1:123456789012:log-group:test".to_string()],
+            "ERROR pattern".to_string(),
+            None,
+        );
+
+        let req = make_request("ListAnomalies", json!({}));
+        let resp = svc.list_anomalies(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arr = body["anomalies"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["anomalyId"], id);
+        assert_eq!(arr[0]["patternString"], "ERROR pattern");
+        assert_eq!(arr[0]["suppressed"], false);
+
+        let req = make_request(
+            "UpdateAnomaly",
+            json!({
+                "anomalyDetectorArn": "arn:aws:logs:us-east-1:123456789012:anomaly-detector:abc",
+                "anomalyId": id,
+                "suppressionType": "INFINITE",
+            }),
+        );
+        svc.update_anomaly(&req).unwrap();
+
+        let req = make_request("ListAnomalies", json!({"suppressionState": "SUPPRESSED"}));
+        let resp = svc.list_anomalies(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["anomalies"].as_array().unwrap().len(), 1);
     }
 }

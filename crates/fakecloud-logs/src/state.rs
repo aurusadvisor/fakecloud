@@ -75,6 +75,25 @@ pub struct LogsState {
     /// Internal export storage: keyed by "bucket/prefix/..." path, value is exported data.
     /// Used by CreateExportTask and delivery pipeline when direct S3 access is unavailable.
     pub export_storage: BTreeMap<String, Vec<u8>>,
+    /// Detected log anomalies keyed by anomaly id. Populated via the
+    /// `/_fakecloud/logs/anomalies/inject` admin endpoint and surfaced
+    /// through ListAnomalies / UpdateAnomaly.
+    #[serde(default)]
+    pub anomalies: BTreeMap<String, LogAnomaly>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct LogAnomaly {
+    pub anomaly_id: String,
+    pub anomaly_detector_arn: String,
+    pub log_group_arn_list: Vec<String>,
+    pub pattern_id: String,
+    pub pattern_string: String,
+    pub first_seen: i64,
+    pub last_seen: i64,
+    pub priority: String,
+    pub state: String,
+    pub suppressed: bool,
 }
 
 impl LogsState {
@@ -101,6 +120,7 @@ impl LogsState {
             s3_table_sources: BTreeMap::new(),
             bearer_token_auth: BTreeMap::new(),
             export_storage: BTreeMap::new(),
+            anomalies: BTreeMap::new(),
         }
     }
 
@@ -124,6 +144,7 @@ impl LogsState {
         self.s3_table_sources.clear();
         self.bearer_token_auth.clear();
         self.export_storage.clear();
+        self.anomalies.clear();
     }
 }
 

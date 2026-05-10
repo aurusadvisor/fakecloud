@@ -7,7 +7,7 @@ pub mod transformer;
 
 pub use service::LogsService;
 pub use state::{
-    Delivery, DeliveryDestination, DeliverySource, Destination, LogEvent, LogGroup, LogStream,
-    LogsSnapshot, LogsState, MetricFilter, MetricTransformation, QueryDefinition, ResourcePolicy,
-    SharedLogsState, SubscriptionFilter, LOGS_SNAPSHOT_SCHEMA_VERSION,
+    Delivery, DeliveryDestination, DeliverySource, Destination, LogAnomaly, LogEvent, LogGroup,
+    LogStream, LogsSnapshot, LogsState, MetricFilter, MetricTransformation, QueryDefinition,
+    ResourcePolicy, SharedLogsState, SubscriptionFilter, LOGS_SNAPSHOT_SCHEMA_VERSION,
 };
