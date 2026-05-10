@@ -674,8 +674,7 @@ impl LogsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 4096)?;
-        // Validate that logGroupIdentifiers is provided
-        let _log_group_ids = body["logGroupIdentifiers"].as_array().ok_or_else(|| {
+        let log_group_ids = body["logGroupIdentifiers"].as_array().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterException",
@@ -683,10 +682,42 @@ impl LogsService {
             )
         })?;
 
-        // Stub: return empty list
+        let accounts = self.state.read();
+        let empty = crate::state::LogsState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let mut field_indexes = Vec::new();
+
+        for id_val in log_group_ids {
+            let id = id_val.as_str().unwrap_or("");
+            let group_name = if id.starts_with("arn:") {
+                extract_log_group_from_arn(id).unwrap_or_default()
+            } else {
+                id.to_string()
+            };
+            let Some(group) = state.log_groups.get(&group_name) else {
+                continue;
+            };
+            for p in &group.index_policies {
+                let parsed: Value = serde_json::from_str(&p.policy_document).unwrap_or(Value::Null);
+                if let Some(fields) = parsed.get("Fields").and_then(|v| v.as_array()) {
+                    for f in fields {
+                        if let Some(name) = f.as_str() {
+                            field_indexes.push(json!({
+                                "logGroupIdentifier": group.arn,
+                                "fieldIndexName": name,
+                                "lastScanTime": p.last_updated_time,
+                                "firstEventTime": p.last_updated_time,
+                                "lastEventTime": p.last_updated_time,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({ "fieldIndexes": [] })).unwrap(),
+            serde_json::to_string(&json!({ "fieldIndexes": field_indexes })).unwrap(),
         ))
     }
 
@@ -1210,6 +1241,36 @@ mod tests {
         );
         let resp = svc.describe_field_indexes(&req).unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-        assert!(body["fieldIndexes"].is_array());
+        assert!(body["fieldIndexes"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn describe_field_indexes_returns_parsed_fields_from_index_policy() {
+        let svc = make_service();
+        create_group(&svc, "g");
+        let req = make_request(
+            "PutIndexPolicy",
+            json!({
+                "logGroupIdentifier": "g",
+                "policyDocument": "{\"Fields\":[\"@timestamp\",\"userId\",\"requestId\"]}"
+            }),
+        );
+        svc.put_index_policy(&req).unwrap();
+
+        let req = make_request(
+            "DescribeFieldIndexes",
+            json!({"logGroupIdentifiers": ["g"]}),
+        );
+        let resp = svc.describe_field_indexes(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arr = body["fieldIndexes"].as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        let names: Vec<&str> = arr
+            .iter()
+            .map(|v| v["fieldIndexName"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"@timestamp"));
+        assert!(names.contains(&"userId"));
+        assert!(names.contains(&"requestId"));
     }
 }
