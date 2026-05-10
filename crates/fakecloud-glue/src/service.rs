@@ -614,13 +614,27 @@ impl GlueService {
         let table_name = body["TableName"]
             .as_str()
             .ok_or_else(|| missing("TableName"))?;
+        let expression = body["Expression"].as_str().unwrap_or("");
         let accounts = self.state.read();
         let parts: Vec<Value> = accounts
             .get(&req.account_id)
             .and_then(|s| s.dbs_in(&req.region))
             .and_then(|dbs| dbs.get(db_name))
             .and_then(|db| db.tables.get(table_name))
-            .map(|table| table.partitions.values().map(partition_json).collect())
+            .map(|table| {
+                table
+                    .partitions
+                    .values()
+                    .filter(|p| {
+                        crate::partition_filter::matches(
+                            expression,
+                            &table.partition_keys,
+                            &p.values,
+                        )
+                    })
+                    .map(partition_json)
+                    .collect()
+            })
             .unwrap_or_default();
         Ok(AwsResponse::ok_json(json!({"Partitions": parts})))
     }
