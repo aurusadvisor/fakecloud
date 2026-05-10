@@ -742,6 +742,9 @@ pub struct Daemon {
     /// Revision history of deployment ARNs in chronological order.
     #[serde(default)]
     pub deployment_history: Vec<String>,
+    /// Active task IDs spawned by this daemon.
+    #[serde(default)]
+    pub task_arns: Vec<String>,
 }
 
 /// Single deployment record. Created on every CreateDaemon /

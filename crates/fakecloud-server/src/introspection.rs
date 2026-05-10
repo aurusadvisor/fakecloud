@@ -115,6 +115,7 @@ pub(crate) fn ecs_task_response(task: &fakecloud_ecs::Task) -> types::EcsTask {
         stopped_at: task.stopped_at.map(|t| t.to_rfc3339()),
         stop_code: task.stop_code.clone(),
         stopped_reason: task.stopped_reason.clone(),
+        group: task.group.clone(),
         captured_log_bytes: task.captured_logs.len(),
         containers: task
             .containers

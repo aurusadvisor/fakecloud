@@ -1021,6 +1021,7 @@ pub struct EcsTask {
     pub stopped_at: Option<String>,
     pub stop_code: Option<String>,
     pub stopped_reason: Option<String>,
+    pub group: Option<String>,
     pub containers: Vec<EcsTaskContainer>,
     pub captured_log_bytes: usize,
 }

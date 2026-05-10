@@ -328,3 +328,143 @@ async fn update_service_scale_in_skips_protected_tasks() {
         task.desired_status()
     );
 }
+
+// ── Daemon task spawn (O10) ──────────────────────────────────────────────
+
+async fn daemon_tasks_for_cluster(server: &TestServer, cluster: &str) -> Vec<serde_json::Value> {
+    let url = format!(
+        "{}/_fakecloud/ecs/tasks?cluster={}",
+        server.endpoint(),
+        cluster
+    );
+    let resp = reqwest::get(&url).await.unwrap();
+    let text = resp.text().await.unwrap();
+    let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+    body.get("tasks")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn daemon_spawns_one_task_per_capacity_provider() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+
+    client
+        .create_cluster()
+        .cluster_name("default")
+        .send()
+        .await
+        .unwrap();
+
+    let td_arn = client
+        .register_daemon_task_definition()
+        .family("d-td")
+        .container_definitions(
+            aws_sdk_ecs::types::DaemonContainerDefinition::builder()
+                .name("agent")
+                .image("nginx:latest")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .daemon_task_definition_arn()
+        .unwrap()
+        .to_string();
+
+    let daemon_arn = client
+        .create_daemon()
+        .daemon_name("d1")
+        .daemon_task_definition_arn(&td_arn)
+        .capacity_provider_arns("FARGATE")
+        .send()
+        .await
+        .unwrap()
+        .daemon_arn()
+        .unwrap()
+        .to_string();
+
+    let url = format!("{}/_fakecloud/ecs/tasks?cluster=default", server.endpoint());
+    let resp = reqwest::get(&url).await.unwrap();
+    let text = resp.text().await.unwrap();
+    eprintln!("TASKS AFTER CREATE: {}", text);
+
+    let tasks = daemon_tasks_for_cluster(&server, "default").await;
+    let daemon_tasks: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.get("group").and_then(|v| v.as_str()) == Some("daemon:d1"))
+        .collect();
+    assert_eq!(
+        daemon_tasks.len(),
+        1,
+        "daemon with one capacity provider should spawn exactly one task; got {daemon_tasks:?}"
+    );
+
+    // Update to two capacity providers.
+    let new_td = client
+        .register_daemon_task_definition()
+        .family("d-td2")
+        .container_definitions(
+            aws_sdk_ecs::types::DaemonContainerDefinition::builder()
+                .name("agent")
+                .image("nginx:latest")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .daemon_task_definition_arn()
+        .unwrap()
+        .to_string();
+
+    client
+        .update_daemon()
+        .daemon_arn(&daemon_arn)
+        .daemon_task_definition_arn(&new_td)
+        .capacity_provider_arns("FARGATE")
+        .capacity_provider_arns("FARGATE_SPOT")
+        .send()
+        .await
+        .unwrap();
+
+    let tasks_after = daemon_tasks_for_cluster(&server, "default").await;
+    let new_daemon_tasks: Vec<_> = tasks_after
+        .iter()
+        .filter(|t| {
+            t.get("group").and_then(|v| v.as_str()) == Some("daemon:d1")
+                && t.get("taskDefinitionArn")
+                    .and_then(|v| v.as_str())
+                    .map(|arn| arn.contains("d-td2"))
+                    .unwrap_or(false)
+        })
+        .collect();
+    assert_eq!(
+        new_daemon_tasks.len(),
+        2,
+        "updated daemon with two providers should spawn exactly two tasks; got {new_daemon_tasks:?}"
+    );
+
+    // Delete daemon should stop all its tasks.
+    client
+        .delete_daemon()
+        .daemon_arn(&daemon_arn)
+        .send()
+        .await
+        .unwrap();
+
+    let tasks_after_del = daemon_tasks_for_cluster(&server, "default").await;
+    let del_daemon_tasks: Vec<_> = tasks_after_del
+        .iter()
+        .filter(|t| t.get("group").and_then(|v| v.as_str()) == Some("daemon:d1"))
+        .collect();
+    assert!(
+        del_daemon_tasks
+            .iter()
+            .all(|t| { t.get("desiredStatus").and_then(|v| v.as_str()) == Some("STOPPED") }),
+        "all daemon tasks should be STOPPED after delete_daemon; got {del_daemon_tasks:?}"
+    );
+}
