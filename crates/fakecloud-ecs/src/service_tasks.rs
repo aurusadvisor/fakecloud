@@ -454,7 +454,7 @@ impl EcsService {
         let cluster_ref = opt_str(&body, "cluster");
         let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
         let family = opt_str(&body, "family");
-        let status_filter = opt_str(&body, "desiredStatus");
+        let status_filter = opt_str(&body, "desiredStatus").or(Some("RUNNING"));
         let started_by = opt_str(&body, "startedBy");
         let max_results = body
             .get("maxResults")

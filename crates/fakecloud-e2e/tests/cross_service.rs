@@ -2,6 +2,27 @@ mod helpers;
 
 use std::io::Write;
 
+fn docker_available() -> bool {
+    std::process::Command::new("docker")
+        .arg("info")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn require_docker_or_skip(test: &str) -> bool {
+    if docker_available() {
+        return true;
+    }
+    if std::env::var("CI").is_ok() {
+        panic!("docker is required for {test} in CI");
+    }
+    eprintln!("skipping {test}: docker is not available");
+    false
+}
+
 use aws_sdk_dynamodb::types::{
     AttributeDefinition, AttributeValue, BillingMode, KeySchemaElement, KeyType,
     ScalarAttributeType,
@@ -1241,6 +1262,9 @@ async fn dynamodb_export_import_roundtrip() {
 /// SecretsManager rotation invokes the configured Lambda function with the correct payload.
 #[tokio::test]
 async fn secretsmanager_rotation_invokes_lambda() {
+    if !require_docker_or_skip("secretsmanager_rotation_invokes_lambda") {
+        return;
+    }
     let server = TestServer::start().await;
     let sm = server.secretsmanager_client().await;
     let lambda = server.lambda_client().await;

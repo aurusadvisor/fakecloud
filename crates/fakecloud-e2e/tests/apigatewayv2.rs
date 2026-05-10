@@ -1,6 +1,27 @@
 mod helpers;
 use helpers::TestServer;
 
+fn docker_available() -> bool {
+    std::process::Command::new("docker")
+        .arg("info")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn require_docker_or_skip(test: &str) -> bool {
+    if docker_available() {
+        return true;
+    }
+    if std::env::var("CI").is_ok() {
+        panic!("docker is required for {test} in CI");
+    }
+    eprintln!("skipping {test}: docker is not available");
+    false
+}
+
 #[tokio::test]
 async fn test_create_api() {
     let server = TestServer::start().await;
@@ -895,6 +916,9 @@ async fn test_deployment_with_stage() {
 
 #[tokio::test]
 async fn test_lambda_proxy_integration() {
+    if !require_docker_or_skip("test_lambda_proxy_integration") {
+        return;
+    }
     use aws_sdk_lambda::primitives::Blob;
     use std::io::Write;
 
