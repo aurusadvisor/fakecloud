@@ -319,7 +319,11 @@ impl EcsService {
                 for id in &spawned_tasks {
                     if let Some(t) = state.tasks.get_mut(id) {
                         t.last_status = "STOPPED".into();
-                        t.desired_status = "STOPPED".into();
+                        // desired_status stays RUNNING: the task was requested
+                        // to run but failed to start. AWS keeps desired_status
+                        // as RUNNING for failed standalone RunTask until the
+                        // caller explicitly stops it. This also ensures
+                        // list_tasks (default filter=RUNNING) finds it.
                         t.stop_code = Some("TaskFailedToStart".into());
                         t.stopped_reason = Some(
                             "No container runtime available (docker/podman not installed)".into(),
