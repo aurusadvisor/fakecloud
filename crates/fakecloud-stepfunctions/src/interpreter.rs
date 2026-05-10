@@ -1127,6 +1127,21 @@ async fn invoke_resource(
         return invoke_dynamodb_update_item(input, dynamodb_state);
     }
 
+    // Nested Step Functions execution:
+    //   arn:aws:states:::states:startExecution[.sync|.waitForTaskToken]
+    // Routes through the same registry path as the generic aws-sdk
+    // integration so the inner execution sees a real `StartExecution`
+    // call. `.sync` polls `DescribeExecution` until the inner execution
+    // reaches a terminal state, mirroring AWS' behavior of bubbling the
+    // inner Output back to the parent.
+    if let Some(tail) = resource.strip_prefix("arn:aws:states:::") {
+        if tail.starts_with("states:startExecution") {
+            let account_id = account_from_execution_arn(execution_arn);
+            return invoke_aws_sdk_integration(tail, input, registry, &account_id, timeout_seconds)
+                .await;
+        }
+    }
+
     // Generic AWS SDK integration: arn:aws:states:::aws-sdk:<service>:<action>[.<wait>]
     // Routes the call to the registered service via the central
     // ServiceRegistry, passing the Task's `Parameters` block as the
@@ -1500,6 +1515,9 @@ async fn sync_wait(
         ("athena", "StartQueryExecution") => {
             sync_wait_athena_query(registry, initial, account_id, timeout_seconds).await
         }
+        ("states", "StartExecution") => {
+            sync_wait_states_start_execution(registry, initial, account_id, timeout_seconds).await
+        }
         ("glue", "StartJobRun") => {
             // Glue has no real job runner in fakecloud; treat the run as
             // immediately SUCCEEDED so `.sync` callers see a terminal
@@ -1528,7 +1546,7 @@ async fn sync_wait(
             "States.TaskFailed".to_string(),
             format!(
                 "`.sync` is not supported for {service_name}:{action_pascal} yet — \
-                 supported: ecs:RunTask, athena:StartQueryExecution, glue:StartJobRun"
+                 supported: ecs:RunTask, athena:StartQueryExecution, glue:StartJobRun, states:StartExecution"
             ),
         )),
     }
@@ -1697,6 +1715,70 @@ async fn sync_wait_athena_query(
                 "States.Timeout".to_string(),
                 format!(
                     "athena:StartQueryExecution.sync timed out after {}s for query {qid}",
+                    sync_timeout_secs(timeout_seconds)
+                ),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(SYNC_POLL_INTERVAL_MS)).await;
+    }
+}
+
+/// Wait for a nested Step Functions execution to reach a terminal
+/// state, then return the bubbled `Output` like AWS does for
+/// `arn:aws:states:::states:startExecution.sync`. The initial
+/// `StartExecution` response carries `executionArn`; we poll
+/// `DescribeExecution` until status leaves `RUNNING`.
+async fn sync_wait_states_start_execution(
+    registry: &Arc<fakecloud_core::registry::ServiceRegistry>,
+    initial: &Value,
+    account_id: &str,
+    timeout_seconds: Option<u64>,
+) -> Result<Value, (String, String)> {
+    let exec_arn = initial
+        .get("executionArn")
+        .or_else(|| initial.get("ExecutionArn"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            (
+                "States.TaskFailed".to_string(),
+                "states:startExecution.sync: response missing executionArn".to_string(),
+            )
+        })?
+        .to_string();
+
+    let deadline = sync_deadline(timeout_seconds);
+    loop {
+        let described = call_sdk_action(
+            registry,
+            "states",
+            "DescribeExecution",
+            &json!({ "executionArn": exec_arn }),
+            account_id,
+        )
+        .await?;
+        let status = described
+            .get("status")
+            .or_else(|| described.get("Status"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        match status {
+            "SUCCEEDED" => return Ok(described),
+            "FAILED" | "TIMED_OUT" | "ABORTED" => {
+                let cause = described
+                    .get("cause")
+                    .or_else(|| described.get("Cause"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("Nested execution reached terminal failure state")
+                    .to_string();
+                return Err(("States.TaskFailed".to_string(), cause));
+            }
+            _ => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err((
+                "States.Timeout".to_string(),
+                format!(
+                    "states:startExecution.sync timed out after {}s for {exec_arn}",
                     sync_timeout_secs(timeout_seconds)
                 ),
             ));
