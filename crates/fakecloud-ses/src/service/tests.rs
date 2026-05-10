@@ -4096,6 +4096,78 @@ async fn test_get_message_insights_unknown() {
 }
 
 #[tokio::test]
+async fn test_get_message_insights_real() {
+    use crate::state::{DeliveryInsightEvent, EmailRecipientInsight};
+
+    let state = make_state();
+    enable_production_access(&state);
+
+    // Seed a verified identity
+    seed_identity(&state, "sender@example.com");
+
+    // Pre-populate a sent email with insights
+    {
+        let mut accounts = state.write();
+        let st = accounts.get_or_create("123456789012");
+        st.sent_emails.push(crate::state::SentEmail {
+            message_id: "msg-123".to_string(),
+            from: "sender@example.com".to_string(),
+            to: vec!["recipient@gmail.com".to_string()],
+            cc: vec![],
+            bcc: vec![],
+            subject: Some("Hello".to_string()),
+            html_body: None,
+            text_body: None,
+            raw_data: None,
+            template_name: None,
+            template_data: None,
+            dkim_signature: None,
+            headers: Vec::new(),
+            timestamp: chrono::Utc::now(),
+            email_tags: vec![("campaign".to_string(), "test".to_string())],
+            delivery_insights: vec![EmailRecipientInsight {
+                destination: "recipient@gmail.com".to_string(),
+                isp: "Gmail".to_string(),
+                events: vec![
+                    DeliveryInsightEvent {
+                        timestamp: chrono::Utc::now(),
+                        event_type: "SEND".to_string(),
+                        ..Default::default()
+                    },
+                    DeliveryInsightEvent {
+                        timestamp: chrono::Utc::now(),
+                        event_type: "DELIVERY".to_string(),
+                        ..Default::default()
+                    },
+                ],
+            }],
+        });
+    }
+
+    let svc = SesV2Service::new(state);
+    let req = make_request(Method::GET, "/v2/email/insights/msg-123", "");
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["MessageId"], "msg-123");
+    assert_eq!(body["FromEmailAddress"], "sender@example.com");
+    assert_eq!(body["Subject"], "Hello");
+    let tags = body["EmailTags"].as_array().unwrap();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0]["Name"], "campaign");
+    assert_eq!(tags[0]["Value"], "test");
+    let insights = body["Insights"].as_array().unwrap();
+    assert_eq!(insights.len(), 1);
+    assert_eq!(insights[0]["Destination"], "recipient@gmail.com");
+    assert_eq!(insights[0]["Isp"], "Gmail");
+    let events = insights[0]["Events"].as_array().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["Type"], "SEND");
+    assert!(!events[0]["Timestamp"].is_null());
+    assert_eq!(events[1]["Type"], "DELIVERY");
+}
+
+#[tokio::test]
 async fn test_list_recommendations_seeds_default() {
     let state = make_state();
     let svc = SesV2Service::new(state);

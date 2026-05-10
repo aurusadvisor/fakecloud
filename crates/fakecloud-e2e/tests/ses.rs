@@ -5,7 +5,7 @@ use aws_sdk_sesv2::types::{
     DkimSigningAttributes, DkimSigningAttributesOrigin, EmailContent, EmailTemplateContent,
     EventBridgeDestination, EventDestinationDefinition, EventType, ExportDataSource,
     ExportDestination, ExportMetric, FeatureStatus, HttpsPolicy, ImportDataSource,
-    ImportDestination, MailType, Message, Metric, MetricDimensionName, MetricNamespace,
+    ImportDestination, MailType, Message, MessageTag, Metric, MetricDimensionName, MetricNamespace,
     MetricsDataSource, RawMessage, ReputationEntityType, RouteDetails, ScalingMode, SendingStatus,
     SnsDestination, SubscriptionStatus, SuppressionListDestination, SuppressionListImportAction,
     SuppressionListReason, Tag, Template, TlsPolicy, Topic, TopicPreference, VdmAttributes,
@@ -233,6 +233,89 @@ async fn ses_send_email_simple() {
 
     let message_id = resp.message_id().unwrap();
     assert!(!message_id.is_empty());
+}
+
+#[tokio::test]
+async fn ses_get_message_insights_real() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    client
+        .create_email_identity()
+        .email_identity("sender@example.com")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_email_identity()
+        .email_identity("recipient@gmail.com")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .send_email()
+        .from_email_address("sender@example.com")
+        .destination(
+            Destination::builder()
+                .to_addresses("recipient@gmail.com")
+                .build(),
+        )
+        .content(
+            EmailContent::builder()
+                .simple(
+                    Message::builder()
+                        .subject(Content::builder().data("Test Subject").build().unwrap())
+                        .body(
+                            Body::builder()
+                                .text(Content::builder().data("Hello world").build().unwrap())
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .email_tags(
+            MessageTag::builder()
+                .name("campaign")
+                .value("test")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let message_id = resp.message_id().unwrap();
+    let insights = client
+        .get_message_insights()
+        .message_id(message_id)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(insights.message_id().unwrap(), message_id);
+    assert_eq!(insights.from_email_address().unwrap(), "sender@example.com");
+    assert_eq!(insights.subject().unwrap(), "Test Subject");
+    assert_eq!(insights.email_tags().len(), 1);
+    assert_eq!(insights.email_tags()[0].name(), "campaign");
+    assert_eq!(insights.email_tags()[0].value(), "test");
+
+    let recipient_insights = insights.insights();
+    assert_eq!(recipient_insights.len(), 1);
+    assert_eq!(
+        recipient_insights[0].destination().unwrap(),
+        "recipient@gmail.com"
+    );
+    assert_eq!(recipient_insights[0].isp().unwrap(), "Gmail");
+
+    let events = recipient_insights[0].events();
+    assert!(!events.is_empty());
+    assert_eq!(events[0].r#type().unwrap().as_str(), "SEND");
+    assert_eq!(
+        events.last().unwrap().r#type().unwrap().as_str(),
+        "DELIVERY"
+    );
 }
 
 #[tokio::test]

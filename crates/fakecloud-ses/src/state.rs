@@ -102,6 +102,37 @@ pub struct SentEmail {
     #[serde(default)]
     pub headers: Vec<(String, String)>,
     pub timestamp: DateTime<Utc>,
+    /// Tags applied to the email at send time (EmailTags from v2 SendEmail).
+    #[serde(default)]
+    pub email_tags: Vec<(String, String)>,
+    /// Per-destination delivery insights populated by the event fanout.
+    #[serde(default)]
+    pub delivery_insights: Vec<EmailRecipientInsight>,
+}
+
+/// Per-recipient delivery insights for MessageInsights.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailRecipientInsight {
+    pub destination: String,
+    pub isp: String,
+    pub events: Vec<DeliveryInsightEvent>,
+}
+
+/// A single event within an EmailRecipientInsight.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DeliveryInsightEvent {
+    pub timestamp: DateTime<Utc>,
+    pub event_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bounce_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bounce_sub_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub complaint_sub_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub complaint_feedback_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

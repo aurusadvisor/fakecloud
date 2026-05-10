@@ -3298,6 +3298,8 @@ async fn main() {
                                     dkim_signature: None,
                                     headers: Vec::new(),
                                     timestamp: chrono::Utc::now(),
+                                    email_tags: Vec::new(),
+                                    delivery_insights: Vec::new(),
                                 };
                                 {
                                     let mut mas = ses_state_for_inbound_actions.write();
@@ -6634,6 +6636,8 @@ impl fakecloud_core::delivery::EmailDispatcher for SesEmailDispatcher {
             dkim_signature: None,
             headers: Vec::new(),
             timestamp: chrono::Utc::now(),
+            email_tags: Vec::new(),
+            delivery_insights: Vec::new(),
         });
     }
 }
@@ -6681,6 +6685,8 @@ impl fakecloud_core::delivery::SesSendEmailDispatcher for SesSendEmailDispatcher
             dkim_signature: None,
             headers: Vec::new(),
             timestamp: chrono::Utc::now(),
+            email_tags: Vec::new(),
+            delivery_insights: Vec::new(),
         });
         Ok(())
     }
