@@ -410,18 +410,23 @@ async fn handle_invoke_agent(
         });
     }
 
-    // InvokeAgent returns an event stream. For stub, return a single-event JSON body.
-    let response = json!({
-        "completion": {
-            "chunk": {
-                "bytes": base64_encode(&output)
-            }
-        },
-        "contentType": "application/json",
-        "sessionId": session_id,
-    });
-
-    Ok(AwsResponse::ok_json(response))
+    // InvokeAgent returns `application/vnd.amazon.eventstream`-framed
+    // bytes. We emit a single `chunk` event carrying the canned
+    // response. AWS SDK clients deserialize this exactly the same way
+    // they do real Bedrock — base64-decoding the `bytes` field of each
+    // chunk event back into model output.
+    let frame = crate::eventstream::chunk_frame(&output);
+    let mut headers = http::HeaderMap::new();
+    if let Ok(value) = http::HeaderValue::from_str(&session_id) {
+        headers.insert("x-amz-bedrock-agent-session-id", value);
+    }
+    let _ = json!(null); // keep the macro import alive for other handlers in this module
+    Ok(fakecloud_core::service::AwsResponse {
+        status: StatusCode::OK,
+        content_type: "application/vnd.amazon.eventstream".to_string(),
+        body: fakecloud_core::service::ResponseBody::Bytes(frame.into()),
+        headers,
+    })
 }
 
 async fn handle_invoke_flow(
@@ -458,19 +463,18 @@ async fn handle_invoke_flow(
         );
     }
 
-    let response = json!({
-        "responseStream": {
-            "flowOutputEvent": {
-                "content": {
-                    "document": format!("Flow output for input: {}", input)
-                },
-                "nodeName": "StartNode"
-            }
-        },
-        "executionId": execution_id,
-    });
-
-    Ok(AwsResponse::ok_json(response))
+    let document = format!("Flow output for input: {}", input);
+    let frame = crate::eventstream::flow_output_frame("StartNode", &document);
+    let mut headers = http::HeaderMap::new();
+    if let Ok(value) = http::HeaderValue::from_str(&execution_id) {
+        headers.insert("x-amz-bedrock-flow-execution-id", value);
+    }
+    Ok(fakecloud_core::service::AwsResponse {
+        status: StatusCode::OK,
+        content_type: "application/vnd.amazon.eventstream".to_string(),
+        body: fakecloud_core::service::ResponseBody::Bytes(frame.into()),
+        headers,
+    })
 }
 
 async fn handle_invoke_inline_agent(
@@ -480,18 +484,17 @@ async fn handle_invoke_inline_agent(
 ) -> Result<AwsResponse, AwsServiceError> {
     let session_id = req_str(body, "sessionId").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let input_text = req_str(body, "inputText").unwrap_or_default();
-
-    let response = json!({
-        "completion": {
-            "chunk": {
-                "bytes": base64_encode(format!("Inline agent says: {}", input_text))
-            }
-        },
-        "contentType": "application/json",
-        "sessionId": session_id,
-    });
-
-    Ok(AwsResponse::ok_json(response))
+    let frame = crate::eventstream::chunk_frame(&format!("Inline agent says: {}", input_text));
+    let mut headers = http::HeaderMap::new();
+    if let Ok(value) = http::HeaderValue::from_str(&session_id) {
+        headers.insert("x-amz-bedrock-agent-session-id", value);
+    }
+    Ok(fakecloud_core::service::AwsResponse {
+        status: StatusCode::OK,
+        content_type: "application/vnd.amazon.eventstream".to_string(),
+        body: fakecloud_core::service::ResponseBody::Bytes(frame.into()),
+        headers,
+    })
 }
 
 async fn handle_optimize_prompt(
@@ -1194,10 +1197,4 @@ async fn handle_list_tags_for_resource(
 
     let response = json!({ "tags": {} });
     Ok(AwsResponse::ok_json(response))
-}
-
-// base64 helper using workspace base64 crate
-fn base64_encode(input: impl AsRef<[u8]>) -> String {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    STANDARD.encode(input.as_ref())
 }
