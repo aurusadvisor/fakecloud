@@ -1,5 +1,5 @@
 {
-  "variants_passed": 46145,
+  "variants_passed": 46098,
   "total_variants": 86666,
   "per_service": {
     "cloudformation": {
@@ -51,7 +51,7 @@
       "total": 448
     },
     "ssm": {
-      "passed": 5025,
+      "passed": 5024,
       "total": 5309
     },
     "elasticloadbalancing": {
@@ -103,7 +103,7 @@
       "total": 2867
     },
     "cognito-idp": {
-      "passed": 4448,
+      "passed": 4417,
       "total": 4484
     },
     "cloudfront": {
@@ -111,7 +111,7 @@
       "total": 4115
     },
     "kms": {
-      "passed": 2046,
+      "passed": 2031,
       "total": 2231
     },
     "route53": {
