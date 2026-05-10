@@ -13,4 +13,4 @@ mod xml_util;
 
 pub use delivery::S3DeliveryImpl;
 pub use service::S3Service;
-pub use state::{memory_body, S3Bucket, S3Object, S3State, SharedS3State};
+pub use state::{memory_body, S3AccessPoint, S3Bucket, S3Object, S3State, SharedS3State};

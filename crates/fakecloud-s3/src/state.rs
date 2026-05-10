@@ -213,6 +213,18 @@ pub struct ObjectLambdaResponse {
     pub kms_key_id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct S3AccessPoint {
+    pub name: String,
+    pub bucket: String,
+    pub account_id: String,
+    pub network_origin: String,
+    pub vpc_configuration: Option<String>,
+    pub creation_date: DateTime<Utc>,
+    pub public_access_block: Option<String>,
+    pub bucket_account_id: Option<String>,
+}
+
 pub struct S3State {
     pub account_id: String,
     pub region: String,
@@ -221,6 +233,7 @@ pub struct S3State {
     pub body_cache: Option<Arc<BodyCache>>,
     /// Object Lambda responses keyed by request token.
     pub object_lambda_responses: BTreeMap<String, ObjectLambdaResponse>,
+    pub access_points: BTreeMap<String, S3AccessPoint>,
 }
 
 impl S3State {
@@ -232,6 +245,7 @@ impl S3State {
             notification_events: Vec::new(),
             body_cache: None,
             object_lambda_responses: BTreeMap::new(),
+            access_points: BTreeMap::new(),
         }
     }
 
