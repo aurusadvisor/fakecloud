@@ -1,3 +1,4 @@
+pub(crate) mod placement;
 pub mod runtime;
 pub(crate) mod service;
 pub(crate) mod state;

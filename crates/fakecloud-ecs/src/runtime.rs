@@ -2448,6 +2448,18 @@ pub(crate) fn mark_running_multi(
                 cluster.pending_tasks_count -= 1;
             }
         }
+        if let Some(ref ci_arn) = task.container_instance_arn {
+            if let Some(ci) = s
+                .container_instances
+                .values_mut()
+                .find(|ci| ci.container_instance_arn == *ci_arn)
+            {
+                ci.running_tasks_count += 1;
+                if ci.pending_tasks_count > 0 {
+                    ci.pending_tasks_count -= 1;
+                }
+            }
+        }
         (task.task_arn.clone(), task.cluster_arn.clone())
     };
     s.push_event(LifecycleEvent {
@@ -2501,6 +2513,17 @@ fn finalize_stopped_multi(
                 cluster.running_tasks_count -= 1;
             }
         }
+        if let Some(ref ci_arn) = task.container_instance_arn {
+            if let Some(ci) = s
+                .container_instances
+                .values_mut()
+                .find(|ci| ci.container_instance_arn == *ci_arn)
+            {
+                if ci.running_tasks_count > 0 {
+                    ci.running_tasks_count -= 1;
+                }
+            }
+        }
         (task.task_arn.clone(), task.cluster_arn.clone())
     };
     s.push_event(LifecycleEvent {
@@ -2551,6 +2574,21 @@ fn finalize_failure(state: &SharedEcsState, account_id: &str, task_id: &str, rea
                 }
             } else if cluster.pending_tasks_count > 0 {
                 cluster.pending_tasks_count -= 1;
+            }
+        }
+        if let Some(ref ci_arn) = task.container_instance_arn {
+            if let Some(ci) = s
+                .container_instances
+                .values_mut()
+                .find(|ci| ci.container_instance_arn == *ci_arn)
+            {
+                if was_running {
+                    if ci.running_tasks_count > 0 {
+                        ci.running_tasks_count -= 1;
+                    }
+                } else if ci.pending_tasks_count > 0 {
+                    ci.pending_tasks_count -= 1;
+                }
             }
         }
         (task.task_arn.clone(), task.cluster_arn.clone())
@@ -2613,6 +2651,7 @@ mod tests {
             task_definition_arn: "arn:aws:ecs:us-east-1:000000000000:task-definition/app:1".into(),
             family: "app".into(),
             revision: 1,
+            container_instance_arn: None,
             capacity_provider_name: None,
             last_status: "PENDING".into(),
             desired_status: "RUNNING".into(),

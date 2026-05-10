@@ -376,6 +376,10 @@ pub struct Task {
     pub task_definition_arn: String,
     pub family: String,
     pub revision: i32,
+    /// Container instance this task was placed on. Populated for EC2 /
+    /// EXTERNAL launch types after placement evaluation.
+    #[serde(default)]
+    pub container_instance_arn: Option<String>,
     /// Capacity provider this task was placed on. Set when the launch
     /// went through a `capacityProviderStrategy`; absent for direct
     /// `launchType=EC2/FARGATE` calls. AWS's Task model emits this at

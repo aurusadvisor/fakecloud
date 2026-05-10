@@ -510,7 +510,9 @@ pub(crate) fn task_to_json(task: &Task) -> Value {
     map.insert("availabilityZone".into(), json!("us-east-1a"));
     map.insert(
         "containerInstanceArn".into(),
-        if task.launch_type == "EC2" || task.launch_type == "EXTERNAL" {
+        if let Some(ref arn) = task.container_instance_arn {
+            json!(arn)
+        } else if task.launch_type == "EC2" || task.launch_type == "EXTERNAL" {
             json!(format!(
                 "{}/container-instance/i-fakecloud-1",
                 task.cluster_arn
@@ -777,7 +779,7 @@ pub(crate) fn spawn_service_tasks(
                 container_name: name,
             })
         });
-        let task = Task {
+        let mut task = Task {
             task_arn: task_arn.clone(),
             task_id: task_id.clone(),
             cluster_arn: cluster_arn.clone(),
@@ -785,6 +787,7 @@ pub(crate) fn spawn_service_tasks(
             task_definition_arn: td_arn.clone(),
             family: family.clone(),
             revision,
+            container_instance_arn: None,
             capacity_provider_name: None,
             last_status: "PENDING".into(),
             desired_status: "RUNNING".into(),
@@ -818,6 +821,26 @@ pub(crate) fn spawn_service_tasks(
             volume_configurations: Vec::new(),
             task_set_arn: task_set_arn.clone(),
         };
+        if launch_type != "FARGATE" {
+            if let Some(arn) = crate::placement::select_container_instance(
+                state,
+                &cluster_name,
+                &service.placement_constraints,
+                &service.placement_strategy,
+                task.group.as_deref(),
+                &td_arn,
+                launch_type,
+            ) {
+                task.container_instance_arn = Some(arn.clone());
+                if let Some(ci) = state
+                    .container_instances
+                    .values_mut()
+                    .find(|ci| ci.container_instance_arn == arn)
+                {
+                    ci.pending_tasks_count += 1;
+                }
+            }
+        }
         state.tasks.insert(task_id.clone(), task);
         if let Some(cluster) = state.clusters.get_mut(&cluster_name) {
             cluster.pending_tasks_count += 1;
@@ -952,6 +975,7 @@ pub(crate) fn spawn_daemon_tasks(
             task_definition_arn: td_arn.clone(),
             family: family.clone(),
             revision,
+            container_instance_arn: None,
             capacity_provider_name: Some(cap_name),
             last_status: "PENDING".into(),
             desired_status: "RUNNING".into(),
