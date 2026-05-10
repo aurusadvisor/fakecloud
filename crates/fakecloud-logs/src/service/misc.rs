@@ -1064,16 +1064,20 @@ mod tests {
     }
 
     #[test]
-    fn get_log_record_returns_empty_stub() {
+    fn get_log_record_rejects_non_fakecloud_pointer() {
+        // GetLogRecord pointers are now validated as fakecloud-issued
+        // (base64 of `<group>|<stream>|<index>`). Non-conforming pointers
+        // are rejected with InvalidParameterException, matching how real
+        // CWL would reject a pointer it didn't issue.
         let svc = make_service();
-
         let req = make_request(
             "GetLogRecord",
             json!({ "logRecordPointer": "some-pointer" }),
         );
-        let resp = svc.get_log_record(&req).unwrap();
-        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-        assert!(body["logRecord"].is_object());
+        match svc.get_log_record(&req) {
+            Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
+            Ok(_) => panic!("expected InvalidParameterException for non-fakecloud pointer"),
+        }
     }
 
     #[test]
@@ -1563,14 +1567,19 @@ mod tests {
     // ---- GetLogRecord ----
 
     #[test]
-    fn get_log_record_returns_object() {
+    fn get_log_record_rejects_arbitrary_pointer() {
+        // Pointers must be fakecloud-issued — see streams.rs::get_log_record
+        // for the encoding. This previously returned an empty stub; the
+        // strict-validation behavior matches what real CWL does for an
+        // un-minted pointer.
         let svc = make_service();
         let req = make_request(
             "GetLogRecord",
             json!({ "logRecordPointer": "any-pointer-value" }),
         );
-        let resp = svc.get_log_record(&req).unwrap();
-        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-        assert!(body["logRecord"].is_object());
+        match svc.get_log_record(&req) {
+            Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
+            Ok(_) => panic!("expected InvalidParameterException for non-fakecloud pointer"),
+        }
     }
 }
