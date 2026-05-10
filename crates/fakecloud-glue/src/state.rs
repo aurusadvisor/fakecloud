@@ -34,6 +34,41 @@ pub struct GlueState {
     pub region: String,
     /// region -> database_name -> Database
     pub databases: BTreeMap<String, BTreeMap<String, Database>>,
+    #[serde(default)]
+    pub jobs: BTreeMap<String, Job>,
+    #[serde(default)]
+    pub job_runs: BTreeMap<String, JobRun>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Job {
+    pub name: String,
+    pub description: Option<String>,
+    pub role: String,
+    pub created_on: DateTime<Utc>,
+    pub last_modified_on: DateTime<Utc>,
+    pub command: serde_json::Value,
+    pub default_arguments: BTreeMap<String, String>,
+    pub max_retries: i64,
+    pub timeout: Option<i64>,
+    pub glue_version: Option<String>,
+    pub max_capacity: Option<f64>,
+    pub worker_type: Option<String>,
+    pub number_of_workers: Option<i64>,
+    pub execution_class: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobRun {
+    pub id: String,
+    pub job_name: String,
+    pub started_on: DateTime<Utc>,
+    pub completed_on: Option<DateTime<Utc>>,
+    pub state: String,
+    pub arguments: BTreeMap<String, String>,
+    pub error_message: Option<String>,
+    pub execution_time: i64,
+    pub attempt: i64,
 }
 
 impl GlueState {
@@ -42,6 +77,8 @@ impl GlueState {
             account_id: account_id.to_string(),
             region: region.to_string(),
             databases: BTreeMap::new(),
+            jobs: BTreeMap::new(),
+            job_runs: BTreeMap::new(),
         }
     }
 

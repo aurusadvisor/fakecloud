@@ -31,10 +31,19 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "DeletePartition",
     "BatchGetPartition",
     "BatchCreatePartition",
+    "CreateJob",
+    "GetJob",
+    "GetJobs",
+    "ListJobs",
+    "UpdateJob",
+    "DeleteJob",
+    "StartJobRun",
+    "GetJobRun",
+    "GetJobRuns",
 ];
 
 pub struct GlueService {
-    state: SharedGlueState,
+    pub(crate) state: SharedGlueState,
 }
 
 impl GlueService {
@@ -82,6 +91,15 @@ impl AwsService for GlueService {
             "DeletePartition" => self.delete_partition(&req),
             "BatchGetPartition" => self.batch_get_partition(&req),
             "BatchCreatePartition" => self.batch_create_partition(&req),
+            "CreateJob" => self.create_job(&req),
+            "GetJob" => self.get_job(&req),
+            "GetJobs" => self.get_jobs(&req),
+            "ListJobs" => self.list_jobs(&req),
+            "UpdateJob" => self.update_job(&req),
+            "DeleteJob" => self.delete_job(&req),
+            "StartJobRun" => self.start_job_run(&req),
+            "GetJobRun" => self.get_job_run(&req),
+            "GetJobRuns" => self.get_job_runs(&req),
             other => Err(AwsServiceError::action_not_implemented("glue", other)),
         }
     }
