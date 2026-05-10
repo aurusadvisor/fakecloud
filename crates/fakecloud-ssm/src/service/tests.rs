@@ -3203,6 +3203,47 @@ fn put_parameter_secure_string() {
 }
 
 #[test]
+fn put_parameter_secure_string_hard_fails_when_kms_rejects() {
+    use fakecloud_core::delivery::KmsHook;
+    use std::collections::HashMap;
+
+    struct AlwaysFailKms;
+    impl KmsHook for AlwaysFailKms {
+        fn encrypt(
+            &self,
+            _account_id: &str,
+            _region: &str,
+            _key_id: &str,
+            _plaintext: &[u8],
+            _service_principal: &str,
+            _ec: HashMap<String, String>,
+        ) -> Result<String, String> {
+            Err("KMS unavailable".into())
+        }
+        fn decrypt(
+            &self,
+            _account_id: &str,
+            _ciphertext_b64: &str,
+            _service_principal: &str,
+            _ec: HashMap<String, String>,
+        ) -> Result<Vec<u8>, String> {
+            Err("KMS unavailable".into())
+        }
+    }
+
+    let svc = make_service().with_kms_hook(Arc::new(AlwaysFailKms));
+    let req = make_request(
+        "PutParameter",
+        json!({"Name": "/secure-fail", "Value": "secret", "Type": "SecureString"}),
+    );
+    let err = match svc.put_parameter(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("expected KMSAccessDeniedException"),
+    };
+    assert_eq!(err.code(), "KMSAccessDeniedException");
+}
+
+#[test]
 fn put_parameter_string_list() {
     let svc = make_service();
     let req = make_request(
