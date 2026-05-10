@@ -55,3 +55,39 @@ fakecloud implements **33 AWS services** with **2,422 operations**. Every operat
 fakecloud validates every implemented operation against AWS's own Smithy models using a generated test suite with **59,000+ variants**. This guarantees that field names, types, required/optional flags, error codes, and HTTP signatures are identical to AWS. It does *not* guarantee that every operation behaves exactly like AWS in all edge cases — that is what the **Data plane** and **Known limitations** columns describe.
 
 If you need a service that is not listed above, the issue tracker and [roadmap](https://github.com/faiscadev/fakecloud#roadmap) are the best places to request it.
+
+## What fakecloud will never implement
+
+A small set of features depend on real AWS infrastructure, vendor-internal data, or external networks that a local emulator fundamentally cannot replicate. fakecloud is committed to *not* faking these — we surface a clearly synthesized stand-in instead so tests are not silently wrong.
+
+| Area | Why we cannot implement it |
+| --- | --- |
+| **Bedrock real model inference** (`InvokeModel`, `Converse`, `ConverseStream`) | Foundation model weights are vendor-proprietary and require real GPU + provider credentials. fakecloud Runtime returns an echo / configurable response with real token counting and fault injection. |
+| **Bedrock Agent semantic responses** (`InvokeAgent`, `RetrieveAndGenerate`) | Same — depends on real foundation models. Agents return shape-correct synthetic chunks. |
+| **ACM real certificate authority** | Browser-trusted certificates can only be issued by CAs in the OS trust store. fakecloud certificates are self-signed or imported PEM. Trust them locally for testing only. |
+| **WAFv2 AWS Managed Rule Group content** | The actual rules inside `AWSManagedRulesCommonRuleSet`, `AWSManagedRulesAnonymousIpList`, etc. are proprietary AWS data. fakecloud accepts the rule-group references and runs structural evaluation, but the rule bodies themselves are not the real AWS content. |
+| **Real public DNS resolution** (Route 53) | Authoritative public DNS requires global anycast network presence. fakecloud's `TestDNSAnswer` resolves against local state. A real DNS server on UDP/TCP 53 can be opted into for self-contained tests but it is not Internet-facing. |
+| **CloudFront edge network** | The CDN is the product. Distributions in fakecloud round-trip configuration; there is no global edge serving traffic. Use `TestFunction` to exercise CloudFront Functions. |
+| **Real outbound email and SMS** (SES, SNS) | Local emulators must not actually send email to inboxes or SMS to phone numbers — that crosses into spam / abuse territory. SES and SNS deliver messages into fakecloud's introspection ledger; an opt-in SMTP submission listener (`FAKECLOUD_SES_SMTP_PORT`) accepts inbound connections but does not relay outbound to the public Internet. |
+| **EBS / EFS block storage** | Kernel-level storage emulation is out of scope. EFS volumes attached to ECS tasks are mounted as docker volumes with the same logical lifecycle, not real NFS. |
+| **CloudFront streaming distributions (RTMP)** | Service was deprecated by AWS in 2020 and is no longer accepted by their API for new distributions. fakecloud round-trips configuration only and treats RTMP as wontfix. |
+
+If a feature in this list blocks your use case, please open an issue describing what you are trying to test — there is often a smaller, targetable surface that fakecloud can implement instead.
+
+## Significant projects on the roadmap
+
+These are gaps that fakecloud *can* implement but represent significant engineering projects rather than incremental fixes. They are tracked in the public roadmap and are good places to contribute.
+
+| Project | Scope |
+| --- | --- |
+| **Athena full SQL engine** | DataFusion-backed parser + executor for `SELECT` with `WHERE`, `GROUP BY`, aggregates, joins, subqueries, window functions, plus Parquet and JSON SerDes against S3 sources. |
+| **WAFv2 ManagedRuleGroup framework** | Rule expansion engine + bundled OWASP-style stand-in rules + per-rule evaluation against real request headers/bodies. The framework that runs the rules is in scope; the exact AWS rule contents are not (see above). |
+| **Cognito WebAuthn full attestation verification** | CTAP CBOR parser plus signature verification chains for the four common attestation formats (`packed`, `fido-u2f`, `android-key`, `tpm`). The `packed` format alone is a smaller targetable batch. |
+| **ECR cross-registry image replication** | Real OCI v2 distribution copy + cross-account auth + region routing when replication rules fire on `PutImage`. |
+| **Glue full Job runner** | Spark-style execution with partition-aware reads + JDBC connectors. The Glue Job control plane (`CreateJob`, `GetJob`, etc.) ships independently. |
+| **API Gateway v1 full VTL evaluator** | `$util.*` functions, loops, conditionals, escape helpers, full Velocity Template Language coverage in integration request/response templates. |
+| **CloudFront full edge function pipeline** | Origin shield, cache key transforms, Lambda@Edge integration. The edge network itself is out of scope; the function pipeline is on the roadmap. |
+| **CloudWatch Metrics persistence layer** | Snapshot store integration so metrics, alarms, and dashboards survive server restarts. |
+| **Bedrock Knowledge Base ingestion lifecycle** | Document chunking + retrieval pipeline. The embedding model itself is out of scope; the framework around it is on the roadmap. |
+
+If you want to take one of these on, please open an issue first so we can scope it together.
