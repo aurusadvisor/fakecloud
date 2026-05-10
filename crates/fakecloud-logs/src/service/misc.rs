@@ -561,7 +561,7 @@ impl LogsService {
         }
     }
 
-    // -- Misc stubs --
+    // -- Live tail / log object / log fields --
 
     pub(crate) fn start_live_tail(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
@@ -590,15 +590,80 @@ impl LogsService {
             })?;
             identifiers.push(s.to_string());
         }
+        let stream_filter = body["logStreamNames"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let pattern = body["logEventFilterPattern"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+
+        // Real CWL StartLiveTail returns vnd.amazon.eventstream over HTTP/2.
+        // fakecloud emulates the same logical session by returning a single
+        // JSON envelope containing a sessionStart followed by a sessionUpdate
+        // populated with the most recent ~500 events from the targeted log
+        // groups that match the filter pattern. SDKs treating the response as
+        // a complete envelope can read both, mirroring what `aws logs
+        // start-live-tail --start-time=now-30s` would surface.
         let session_id = uuid::Uuid::new_v4().to_string();
+        let mut session_results: Vec<Value> = Vec::new();
+        let accounts = self.state.read();
+        if let Some(state) = accounts.get(&req.account_id) {
+            for ident in &identifiers {
+                let group_name = log_group_name_from_identifier(ident);
+                let Some(group) = state.log_groups.get(&group_name) else {
+                    continue;
+                };
+                for (stream_name, stream) in &group.log_streams {
+                    if !stream_filter.is_empty() && !stream_filter.iter().any(|s| s == stream_name)
+                    {
+                        continue;
+                    }
+                    for ev in stream
+                        .events
+                        .iter()
+                        .rev()
+                        .take(500)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                    {
+                        if let Some(p) = &pattern {
+                            if !ev.message.contains(p) {
+                                continue;
+                            }
+                        }
+                        session_results.push(json!({
+                            "logGroupIdentifier": group.arn,
+                            "logStreamName": stream_name,
+                            "message": ev.message,
+                            "timestamp": ev.timestamp,
+                            "ingestionTime": ev.ingestion_time,
+                        }));
+                    }
+                }
+            }
+        }
         Ok(AwsResponse::json(
             StatusCode::OK,
             serde_json::to_string(&json!({
                 "responseStream": {
                     "sessionStart": {
                         "sessionId": session_id,
+                        "requestId": req.request_id,
                         "logGroupIdentifiers": identifiers,
-                    }
+                        "logEventFilterPattern": pattern,
+                        "logStreamNames": stream_filter,
+                    },
+                    "sessionUpdate": {
+                        "sessionResults": session_results,
+                        "sessionMetadata": {"sampled": false},
+                    },
                 }
             }))
             .unwrap(),
@@ -637,18 +702,116 @@ impl LogsService {
             1,
             512,
         )?;
-        // Stub: return empty (fieldStream is streaming, represented as empty object)
-        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+        // fakecloud-issued log object pointers are base64 of
+        // `<group>|<stream>|<event_index>`. Real CWL pointers are opaque
+        // tokens too, so callers cannot legitimately construct one
+        // without first observing it; we only need to round-trip what
+        // `Live tail` / `FilterLogEvents` produced.
+        let pointer = body["logObjectPointer"].as_str().unwrap_or("");
+        let (group_name, stream_name, idx) =
+            parse_log_object_pointer(pointer).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "logObjectPointer is not a fakecloud-issued pointer",
+                )
+            })?;
+        let accounts = self.state.read();
+        let state = accounts.get(&req.account_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                "log object not found",
+            )
+        })?;
+        let group = state.log_groups.get(&group_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("log group '{group_name}' not found"),
+            )
+        })?;
+        let stream = group.log_streams.get(&stream_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("log stream '{stream_name}' not found"),
+            )
+        })?;
+        let ev = stream.events.get(idx).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                "log event index out of range",
+            )
+        })?;
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({
+                "fieldStream": {
+                    "fields": {
+                        "@timestamp": ev.timestamp.to_string(),
+                        "@ingestionTime": ev.ingestion_time.to_string(),
+                        "@logStream": stream_name,
+                        "@logGroup": group_name,
+                        "@message": ev.message,
+                    }
+                }
+            }))
+            .unwrap(),
+        ))
     }
 
     pub(crate) fn get_log_fields(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         validate_required("dataSourceName", &body["dataSourceName"])?;
         validate_required("dataSourceType", &body["dataSourceType"])?;
-        // Stub: return empty log fields
+        let source_name = body["dataSourceName"].as_str().unwrap_or("");
+        let source_type = body["dataSourceType"].as_str().unwrap_or("");
+        if source_type != "LogGroup" {
+            // Other source types (S3 source, integration) are not modeled.
+            return Ok(AwsResponse::json(
+                StatusCode::OK,
+                serde_json::to_string(&json!({ "logFields": [] })).unwrap(),
+            ));
+        }
+        let group_name = log_group_name_from_identifier(source_name);
+        let accounts = self.state.read();
+        let mut fields: std::collections::BTreeMap<String, &'static str> =
+            std::collections::BTreeMap::new();
+        // Always-present synthetic fields modeled by every log event.
+        for (k, t) in [
+            ("@timestamp", "long"),
+            ("@ingestionTime", "long"),
+            ("@logStream", "string"),
+            ("@logGroup", "string"),
+            ("@message", "string"),
+        ] {
+            fields.insert(k.to_string(), t);
+        }
+        if let Some(state) = accounts.get(&req.account_id) {
+            if let Some(group) = state.log_groups.get(&group_name) {
+                for stream in group.log_streams.values() {
+                    for ev in &stream.events {
+                        if let Ok(parsed) =
+                            serde_json::from_str::<serde_json::Map<String, Value>>(&ev.message)
+                        {
+                            for (key, value) in parsed {
+                                let kind = json_value_kind(&value);
+                                fields.entry(key).or_insert(kind);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let log_fields: Vec<Value> = fields
+            .into_iter()
+            .map(|(name, ty)| json!({ "name": name, "type": ty }))
+            .collect();
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({ "logFields": [] })).unwrap(),
+            serde_json::to_string(&json!({ "logFields": log_fields })).unwrap(),
         ))
     }
 
@@ -719,6 +882,56 @@ impl LogsService {
         validate_string_length("identifier", identifier, 1, 2048)?;
         // No-op stub (we don't track detailed enough to remove specific sources)
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+}
+
+/// Extract a log-group name from either a bare name or a CWL log-group ARN.
+/// `arn:aws:logs:us-east-1:000000000000:log-group:foo:*` -> `foo`.
+fn log_group_name_from_identifier(ident: &str) -> String {
+    if let Some(rest) = ident.strip_prefix("arn:") {
+        // arn:aws:logs:<region>:<account>:log-group:<name>[:*]
+        let parts: Vec<&str> = rest.splitn(7, ':').collect();
+        if parts.len() >= 7 && parts[4] == "log-group" {
+            let tail = parts[5];
+            return tail.split(':').next().unwrap_or(tail).to_string();
+        }
+    }
+    ident.to_string()
+}
+
+/// Pointer format: base64(`<group>|<stream>|<index>`). Pointers are
+/// only ever round-tripped through fakecloud — no external client
+/// generates them — so the encoding is private but stable.
+#[cfg(test)]
+pub(crate) fn encode_log_object_pointer(group: &str, stream: &str, idx: usize) -> String {
+    use base64::Engine;
+    let raw = format!("{group}|{stream}|{idx}");
+    base64::engine::general_purpose::STANDARD.encode(raw.as_bytes())
+}
+
+fn parse_log_object_pointer(pointer: &str) -> Option<(String, String, usize)> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(pointer)
+        .ok()?;
+    let raw = String::from_utf8(bytes).ok()?;
+    let parts: Vec<&str> = raw.splitn(3, '|').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let idx = parts[2].parse::<usize>().ok()?;
+    Some((parts[0].to_string(), parts[1].to_string(), idx))
+}
+
+fn json_value_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "string",
+        Value::Bool(_) => "boolean",
+        Value::Number(n) if n.is_i64() || n.is_u64() => "long",
+        Value::Number(_) => "double",
+        Value::String(_) => "string",
+        Value::Array(_) => "list",
+        Value::Object(_) => "map",
     }
 }
 
@@ -1133,27 +1346,85 @@ mod tests {
     }
 
     #[test]
-    fn get_log_object_returns_stub() {
+    fn get_log_object_rejects_garbage_pointer() {
         let svc = make_service();
-        let req = make_request(
-            "GetLogObject",
-            json!({ "logObjectPointer": "some-pointer" }),
-        );
-        let resp = svc.get_log_object(&req).unwrap();
-        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-        assert!(body.is_object());
+        let req = make_request("GetLogObject", json!({ "logObjectPointer": "not-base64" }));
+        match svc.get_log_object(&req) {
+            Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
+            Ok(_) => panic!("expected InvalidParameterException"),
+        }
     }
 
     #[test]
-    fn get_log_fields_returns_stub() {
+    fn get_log_object_returns_event_for_valid_pointer() {
         let svc = make_service();
+        create_group(&svc, "/test/getobj");
+        // Seed a stream + event.
+        let req = make_request(
+            "CreateLogStream",
+            json!({ "logGroupName": "/test/getobj", "logStreamName": "s1" }),
+        );
+        svc.create_log_stream(&req).unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        let req = make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "/test/getobj",
+                "logStreamName": "s1",
+                "logEvents": [{ "timestamp": now, "message": "hello" }]
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
+
+        let pointer = super::encode_log_object_pointer("/test/getobj", "s1", 0);
+        let req = make_request("GetLogObject", json!({ "logObjectPointer": pointer }));
+        let resp = svc.get_log_object(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["fieldStream"]["fields"]["@message"], "hello");
+        assert_eq!(body["fieldStream"]["fields"]["@logStream"], "s1");
+    }
+
+    #[test]
+    fn get_log_fields_extracts_keys_from_json_messages() {
+        let svc = make_service();
+        create_group(&svc, "/test/fields");
+        let req = make_request(
+            "CreateLogStream",
+            json!({ "logGroupName": "/test/fields", "logStreamName": "s1" }),
+        );
+        svc.create_log_stream(&req).unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        let req = make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "/test/fields",
+                "logStreamName": "s1",
+                "logEvents": [
+                    { "timestamp": now, "message": "{\"level\":\"info\",\"latency_ms\":42}" },
+                    { "timestamp": now, "message": "{\"level\":\"warn\",\"path\":\"/x\"}" }
+                ]
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
+
         let req = make_request(
             "GetLogFields",
-            json!({ "dataSourceName": "test", "dataSourceType": "CW_LOG" }),
+            json!({ "dataSourceName": "/test/fields", "dataSourceType": "LogGroup" }),
         );
         let resp = svc.get_log_fields(&req).unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-        assert!(body["logFields"].as_array().unwrap().is_empty());
+        let names: Vec<&str> = body["logFields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        for expected in ["@message", "@timestamp", "level", "latency_ms", "path"] {
+            assert!(
+                names.contains(&expected),
+                "missing field {expected}: {names:?}"
+            );
+        }
     }
 
     #[test]
