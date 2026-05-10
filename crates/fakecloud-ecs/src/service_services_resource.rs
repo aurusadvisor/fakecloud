@@ -222,7 +222,6 @@ impl EcsService {
                 for id in &spawn_task_ids {
                     if let Some(t) = state.tasks.get_mut(id) {
                         t.last_status = "STOPPED".into();
-                        t.desired_status = "STOPPED".into();
                         t.stop_code = Some("TaskFailedToStart".into());
                         t.stopped_reason = Some(
                             "No container runtime available (docker/podman not installed)".into(),
@@ -526,7 +525,6 @@ impl EcsService {
                 for id in &spawn_ids {
                     if let Some(t) = state.tasks.get_mut(id) {
                         t.last_status = "STOPPED".into();
-                        t.desired_status = "STOPPED".into();
                         t.stop_code = Some("TaskFailedToStart".into());
                         t.stopped_reason = Some(
                             "No container runtime available (docker/podman not installed)".into(),
