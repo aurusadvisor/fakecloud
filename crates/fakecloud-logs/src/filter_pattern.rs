@@ -13,8 +13,14 @@
 //! extraction for `MetricValue = $.field`, which the older helper
 //! doesn't expose.
 //!
-//! Array-style patterns (`[a, b, c]`) and `IS NULL` are out of scope and
-//! fail closed.
+//! Array-style patterns (`[a, b, c]`) match positionally against
+//! whitespace-separated tokens in the message. Each comma-separated
+//! field is either a bare name (always matches that slot), a quoted
+//! string, a literal value for equality, or a comparison `=v`,
+//! `!=v`, `>=v`, `<=v`, `>v`, `<v`. `...` is a wildcard that skips any
+//! number of tokens.
+//!
+//! `IS NULL` and free-form regex are out of scope and fail closed.
 
 use serde_json::Value;
 
@@ -29,8 +35,9 @@ pub fn matches(pattern: &str, message: &str) -> bool {
         return matches_json(pattern, message);
     }
 
-    // Array-style filters not implemented; fail closed so a bad pattern
-    // doesn't silently extract metrics.
+    if pattern.starts_with('[') && pattern.ends_with(']') {
+        return matches_array(pattern, message);
+    }
     if pattern.starts_with('[') {
         return false;
     }
@@ -239,6 +246,104 @@ fn eval_atom(condition: &str, json: &Value) -> bool {
     false
 }
 
+fn matches_array(pattern: &str, message: &str) -> bool {
+    let inner = pattern
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or("")
+        .trim();
+    if inner.is_empty() {
+        return true;
+    }
+    let fields: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+    let tokens: Vec<&str> = message.split_whitespace().collect();
+    array_match(&fields, &tokens)
+}
+
+fn array_match(fields: &[&str], tokens: &[&str]) -> bool {
+    if fields.is_empty() {
+        return tokens.is_empty();
+    }
+    let head = fields[0];
+    if head == "..." {
+        let rest = &fields[1..];
+        if rest.is_empty() {
+            return true;
+        }
+        for i in 0..=tokens.len() {
+            if array_match(rest, &tokens[i..]) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if tokens.is_empty() {
+        return false;
+    }
+    if !array_field_matches(head, tokens[0]) {
+        return false;
+    }
+    array_match(&fields[1..], &tokens[1..])
+}
+
+fn array_field_matches(field: &str, token: &str) -> bool {
+    let f = field.trim();
+    if f == "*" || f.is_empty() {
+        return true;
+    }
+    // Quoted literal -> equality.
+    if f.starts_with('"') && f.ends_with('"') && f.len() >= 2 {
+        return token == &f[1..f.len() - 1];
+    }
+    // Comparison ops with no LHS (`=200`, `>=400`, etc.) compare against the token.
+    for op in ["!=", ">=", "<=", "=", ">", "<"] {
+        if let Some(rhs) = f.strip_prefix(op) {
+            return cmp_field(op, token, rhs.trim());
+        }
+    }
+    // `name=value` style (used in named-array patterns).
+    for op in ["!=", ">=", "<=", "=", ">", "<"] {
+        if let Some(idx) = f.find(op) {
+            let rhs = &f[idx + op.len()..].trim();
+            return cmp_field(op, token, rhs);
+        }
+    }
+    // Bare identifier -> name placeholder, matches anything.
+    if f.chars()
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+    {
+        return true;
+    }
+    // Fallback: treat as literal.
+    token == f
+}
+
+fn cmp_field(op: &str, token: &str, rhs: &str) -> bool {
+    let rhs = rhs.trim();
+    let rhs = if rhs.starts_with('"') && rhs.ends_with('"') && rhs.len() >= 2 {
+        &rhs[1..rhs.len() - 1]
+    } else {
+        rhs
+    };
+    if let (Ok(a), Ok(b)) = (token.parse::<f64>(), rhs.parse::<f64>()) {
+        return match op {
+            "=" => (a - b).abs() < f64::EPSILON,
+            "!=" => (a - b).abs() >= f64::EPSILON,
+            ">" => a > b,
+            "<" => a < b,
+            ">=" => a >= b,
+            "<=" => a <= b,
+            _ => false,
+        };
+    }
+    match op {
+        "=" => token == rhs,
+        "!=" => token != rhs,
+        _ => false,
+    }
+}
+
 fn resolve_path<'a>(json: &'a Value, path: &str) -> Option<&'a Value> {
     let mut current = json;
     for part in path.split('.') {
@@ -371,8 +476,43 @@ mod tests {
     }
 
     #[test]
-    fn array_pattern_fails_closed() {
-        assert!(!matches("[a, b]", "a b"));
+    fn array_pattern_positional_match() {
+        assert!(matches("[a, b]", "a b"));
+        assert!(matches("[host, status]", "192.168.1.1 200"));
+        assert!(!matches("[a, b, c]", "a b"));
+    }
+
+    #[test]
+    fn array_pattern_comparison_ops() {
+        assert!(matches("[ip, =200]", "1.2.3.4 200"));
+        assert!(!matches("[ip, =200]", "1.2.3.4 500"));
+        assert!(matches("[ip, >=400]", "1.2.3.4 500"));
+        assert!(!matches("[ip, >=400]", "1.2.3.4 200"));
+        assert!(matches("[ip, !=200]", "1.2.3.4 500"));
+    }
+
+    #[test]
+    fn array_pattern_named_field_with_predicate() {
+        assert!(matches("[ip, status=200]", "1.2.3.4 200"));
+        assert!(!matches("[ip, status=200]", "1.2.3.4 404"));
+    }
+
+    #[test]
+    fn array_pattern_ellipsis_skips_tokens() {
+        assert!(matches("[ip, ..., status]", "1.2.3.4 a b c 200"));
+        assert!(matches("[..., =200]", "any tokens 200"));
+        assert!(!matches("[..., =500]", "any tokens 200"));
+    }
+
+    #[test]
+    fn array_pattern_quoted_literal() {
+        assert!(matches("[\"GET\", path]", "GET /index.html"));
+        assert!(!matches("[\"POST\", path]", "GET /index.html"));
+    }
+
+    #[test]
+    fn array_pattern_unbalanced_fails_closed() {
+        assert!(!matches("[a, b", "a b"));
     }
 
     #[test]
