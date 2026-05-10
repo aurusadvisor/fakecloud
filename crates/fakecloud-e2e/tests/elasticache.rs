@@ -12,10 +12,25 @@ fn docker_available() -> bool {
         .unwrap_or(false)
 }
 
+fn require_docker_or_skip(test: &str) -> bool {
+    if docker_available() {
+        return true;
+    }
+    if std::env::var("CI").is_ok() {
+        panic!("docker is required for {test} in CI");
+    }
+    eprintln!("Skipping {test}: docker not available");
+    false
+}
+
 // CacheCluster tests
 
 #[tokio::test]
 async fn elasticache_create_cache_cluster_and_describe() {
+    if !require_docker_or_skip("elasticache_create_cache_cluster_and_describe") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -70,6 +85,10 @@ async fn elasticache_create_cache_cluster_and_describe() {
 
 #[tokio::test]
 async fn elasticache_describe_cache_clusters_paginates() {
+    if !require_docker_or_skip("elasticache_describe_cache_clusters_paginates") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -137,6 +156,10 @@ async fn elasticache_describe_cache_clusters_paginates() {
 
 #[tokio::test]
 async fn elasticache_delete_cache_cluster_and_verify_gone() {
+    if !require_docker_or_skip("elasticache_delete_cache_cluster_and_verify_gone") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -170,6 +193,10 @@ async fn elasticache_delete_cache_cluster_and_verify_gone() {
 
 #[tokio::test]
 async fn elasticache_describe_reserved_cache_nodes_is_empty() {
+    if !require_docker_or_skip("elasticache_describe_reserved_cache_nodes_is_empty") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -181,6 +208,12 @@ async fn elasticache_describe_reserved_cache_nodes_is_empty() {
 
 #[tokio::test]
 async fn elasticache_describe_reserved_cache_nodes_offerings_filters_and_paginates() {
+    if !require_docker_or_skip(
+        "elasticache_describe_reserved_cache_nodes_offerings_filters_and_paginates",
+    ) {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -220,6 +253,10 @@ async fn elasticache_describe_reserved_cache_nodes_offerings_filters_and_paginat
 
 #[tokio::test]
 async fn elasticache_create_subnet_group_and_describe() {
+    if !require_docker_or_skip("elasticache_create_subnet_group_and_describe") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -255,6 +292,10 @@ async fn elasticache_create_subnet_group_and_describe() {
 
 #[tokio::test]
 async fn elasticache_describe_subnet_groups_with_name_filter() {
+    if !require_docker_or_skip("elasticache_describe_subnet_groups_with_name_filter") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -281,6 +322,10 @@ async fn elasticache_describe_subnet_groups_with_name_filter() {
 
 #[tokio::test]
 async fn elasticache_modify_subnet_group_description() {
+    if !require_docker_or_skip("elasticache_modify_subnet_group_description") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -325,6 +370,10 @@ async fn elasticache_modify_subnet_group_description() {
 
 #[tokio::test]
 async fn elasticache_delete_subnet_group_and_verify_gone() {
+    if !require_docker_or_skip("elasticache_delete_subnet_group_and_verify_gone") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -356,6 +405,10 @@ async fn elasticache_delete_subnet_group_and_verify_gone() {
 
 #[tokio::test]
 async fn elasticache_create_duplicate_subnet_group_errors() {
+    if !require_docker_or_skip("elasticache_create_duplicate_subnet_group_errors") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -381,6 +434,10 @@ async fn elasticache_create_duplicate_subnet_group_errors() {
 
 #[tokio::test]
 async fn elasticache_delete_nonexistent_subnet_group_errors() {
+    if !require_docker_or_skip("elasticache_delete_nonexistent_subnet_group_errors") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -397,6 +454,10 @@ async fn elasticache_delete_nonexistent_subnet_group_errors() {
 
 #[tokio::test]
 async fn elasticache_add_and_list_tags_on_subnet_group() {
+    if !require_docker_or_skip("elasticache_add_and_list_tags_on_subnet_group") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -455,6 +516,10 @@ async fn elasticache_add_and_list_tags_on_subnet_group() {
 
 #[tokio::test]
 async fn elasticache_remove_tags_from_subnet_group() {
+    if !require_docker_or_skip("elasticache_remove_tags_from_subnet_group") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -516,6 +581,10 @@ async fn elasticache_remove_tags_from_subnet_group() {
 
 #[tokio::test]
 async fn elasticache_tag_update_existing_key() {
+    if !require_docker_or_skip("elasticache_tag_update_existing_key") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -576,6 +645,10 @@ async fn elasticache_tag_update_existing_key() {
 
 #[tokio::test]
 async fn elasticache_tags_on_unknown_arn_errors() {
+    if !require_docker_or_skip("elasticache_tags_on_unknown_arn_errors") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -592,6 +665,10 @@ async fn elasticache_tags_on_unknown_arn_errors() {
 
 #[tokio::test]
 async fn elasticache_create_replication_group_and_describe() {
+    if !require_docker_or_skip("elasticache_create_replication_group_and_describe") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -638,6 +715,10 @@ async fn elasticache_create_replication_group_and_describe() {
 
 #[tokio::test]
 async fn elasticache_delete_replication_group_and_verify_gone() {
+    if !require_docker_or_skip("elasticache_delete_replication_group_and_verify_gone") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -668,6 +749,10 @@ async fn elasticache_delete_replication_group_and_verify_gone() {
 
 #[tokio::test]
 async fn elasticache_create_duplicate_replication_group_errors() {
+    if !require_docker_or_skip("elasticache_create_duplicate_replication_group_errors") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -691,6 +776,10 @@ async fn elasticache_create_duplicate_replication_group_errors() {
 
 #[tokio::test]
 async fn elasticache_delete_nonexistent_replication_group_errors() {
+    if !require_docker_or_skip("elasticache_delete_nonexistent_replication_group_errors") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -705,6 +794,10 @@ async fn elasticache_delete_nonexistent_replication_group_errors() {
 
 #[tokio::test]
 async fn elasticache_create_replication_group_round_trips_extended_fields() {
+    if !require_docker_or_skip("elasticache_create_replication_group_round_trips_extended_fields") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -799,6 +892,10 @@ async fn elasticache_create_replication_group_round_trips_extended_fields() {
 
 #[tokio::test]
 async fn elasticache_create_replication_group_round_trips_log_delivery() {
+    if !require_docker_or_skip("elasticache_create_replication_group_round_trips_log_delivery") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -857,6 +954,10 @@ async fn elasticache_create_replication_group_round_trips_log_delivery() {
 
 #[tokio::test]
 async fn elasticache_global_replication_group_lifecycle() {
+    if !require_docker_or_skip("elasticache_global_replication_group_lifecycle") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1011,6 +1112,10 @@ async fn elasticache_global_replication_group_lifecycle() {
 
 #[tokio::test]
 async fn elasticache_create_user_and_verify_in_describe() {
+    if !require_docker_or_skip("elasticache_create_user_and_verify_in_describe") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1045,6 +1150,10 @@ async fn elasticache_create_user_and_verify_in_describe() {
 
 #[tokio::test]
 async fn elasticache_delete_user_and_verify_gone() {
+    if !require_docker_or_skip("elasticache_delete_user_and_verify_gone") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1074,6 +1183,10 @@ async fn elasticache_delete_user_and_verify_gone() {
 
 #[tokio::test]
 async fn elasticache_cannot_delete_default_user() {
+    if !require_docker_or_skip("elasticache_cannot_delete_default_user") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1086,6 +1199,10 @@ async fn elasticache_cannot_delete_default_user() {
 
 #[tokio::test]
 async fn elasticache_create_user_group_with_user_references() {
+    if !require_docker_or_skip("elasticache_create_user_group_with_user_references") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1121,6 +1238,10 @@ async fn elasticache_create_user_group_with_user_references() {
 
 #[tokio::test]
 async fn elasticache_describe_user_groups() {
+    if !require_docker_or_skip("elasticache_describe_user_groups") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1147,6 +1268,10 @@ async fn elasticache_describe_user_groups() {
 
 #[tokio::test]
 async fn elasticache_delete_user_group() {
+    if !require_docker_or_skip("elasticache_delete_user_group") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1181,6 +1306,10 @@ async fn elasticache_delete_user_group() {
 
 #[tokio::test]
 async fn elasticache_describe_cache_engine_versions_all() {
+    if !require_docker_or_skip("elasticache_describe_cache_engine_versions_all") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1204,6 +1333,10 @@ async fn elasticache_describe_cache_engine_versions_all() {
 
 #[tokio::test]
 async fn elasticache_describe_cache_engine_versions_filter_by_engine() {
+    if !require_docker_or_skip("elasticache_describe_cache_engine_versions_filter_by_engine") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1223,6 +1356,10 @@ async fn elasticache_describe_cache_engine_versions_filter_by_engine() {
 
 #[tokio::test]
 async fn elasticache_describe_engine_default_parameters_redis7() {
+    if !require_docker_or_skip("elasticache_describe_engine_default_parameters_redis7") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1248,6 +1385,10 @@ async fn elasticache_describe_engine_default_parameters_redis7() {
 
 #[tokio::test]
 async fn elasticache_describe_engine_default_parameters_valkey8() {
+    if !require_docker_or_skip("elasticache_describe_engine_default_parameters_valkey8") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1266,6 +1407,10 @@ async fn elasticache_describe_engine_default_parameters_valkey8() {
 
 #[tokio::test]
 async fn elasticache_describe_cache_parameter_groups_all() {
+    if !require_docker_or_skip("elasticache_describe_cache_parameter_groups_all") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1295,6 +1440,10 @@ async fn elasticache_describe_cache_parameter_groups_all() {
 
 #[tokio::test]
 async fn elasticache_describe_cache_parameter_groups_by_name() {
+    if !require_docker_or_skip("elasticache_describe_cache_parameter_groups_by_name") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1317,6 +1466,10 @@ async fn elasticache_describe_cache_parameter_groups_by_name() {
 
 #[tokio::test]
 async fn elasticache_modify_replication_group_description() {
+    if !require_docker_or_skip("elasticache_modify_replication_group_description") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1354,6 +1507,10 @@ async fn elasticache_modify_replication_group_description() {
 
 #[tokio::test]
 async fn elasticache_modify_replication_group_kitchen_sink() {
+    if !require_docker_or_skip("elasticache_modify_replication_group_kitchen_sink") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1598,6 +1755,11 @@ async fn elasticache_modify_replication_group_kitchen_sink() {
 
 #[tokio::test]
 async fn elasticache_modify_replication_group_remove_user_groups_clears_all() {
+    if !require_docker_or_skip("elasticache_modify_replication_group_remove_user_groups_clears_all")
+    {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1653,6 +1815,10 @@ async fn elasticache_modify_replication_group_remove_user_groups_clears_all() {
 
 #[tokio::test]
 async fn elasticache_modify_replication_group_auth_token_delete_clears() {
+    if !require_docker_or_skip("elasticache_modify_replication_group_auth_token_delete_clears") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1680,6 +1846,11 @@ async fn elasticache_modify_replication_group_auth_token_delete_clears() {
 
 #[tokio::test]
 async fn elasticache_modify_replication_group_rejects_invalid_cluster_mode() {
+    if !require_docker_or_skip("elasticache_modify_replication_group_rejects_invalid_cluster_mode")
+    {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1719,6 +1890,10 @@ async fn elasticache_modify_replication_group_rejects_invalid_cluster_mode() {
 
 #[tokio::test]
 async fn elasticache_increase_replica_count() {
+    if !require_docker_or_skip("elasticache_increase_replica_count") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1748,6 +1923,10 @@ async fn elasticache_increase_replica_count() {
 
 #[tokio::test]
 async fn elasticache_decrease_replica_count() {
+    if !require_docker_or_skip("elasticache_decrease_replica_count") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1777,6 +1956,10 @@ async fn elasticache_decrease_replica_count() {
 
 #[tokio::test]
 async fn elasticache_test_failover() {
+    if !require_docker_or_skip("elasticache_test_failover") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1805,6 +1988,10 @@ async fn elasticache_test_failover() {
 
 #[tokio::test]
 async fn elasticache_create_snapshot_and_describe() {
+    if !require_docker_or_skip("elasticache_create_snapshot_and_describe") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1849,6 +2036,10 @@ async fn elasticache_create_snapshot_and_describe() {
 
 #[tokio::test]
 async fn elasticache_describe_snapshots_with_replication_group_filter() {
+    if !require_docker_or_skip("elasticache_describe_snapshots_with_replication_group_filter") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1900,6 +2091,10 @@ async fn elasticache_describe_snapshots_with_replication_group_filter() {
 
 #[tokio::test]
 async fn elasticache_delete_snapshot_and_verify_gone() {
+    if !require_docker_or_skip("elasticache_delete_snapshot_and_verify_gone") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1941,6 +2136,10 @@ async fn elasticache_delete_snapshot_and_verify_gone() {
 
 #[tokio::test]
 async fn elasticache_create_duplicate_snapshot_errors() {
+    if !require_docker_or_skip("elasticache_create_duplicate_snapshot_errors") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1972,6 +2171,10 @@ async fn elasticache_create_duplicate_snapshot_errors() {
 
 #[tokio::test]
 async fn elasticache_delete_nonexistent_snapshot_errors() {
+    if !require_docker_or_skip("elasticache_delete_nonexistent_snapshot_errors") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -1988,6 +2191,10 @@ async fn elasticache_delete_nonexistent_snapshot_errors() {
 
 #[tokio::test]
 async fn elasticache_create_serverless_cache_and_describe() {
+    if !require_docker_or_skip("elasticache_create_serverless_cache_and_describe") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -2028,6 +2235,10 @@ async fn elasticache_create_serverless_cache_and_describe() {
 
 #[tokio::test]
 async fn elasticache_describe_serverless_caches_paginates() {
+    if !require_docker_or_skip("elasticache_describe_serverless_caches_paginates") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -2066,6 +2277,10 @@ async fn elasticache_describe_serverless_caches_paginates() {
 
 #[tokio::test]
 async fn elasticache_modify_serverless_cache_updates_fields() {
+    if !require_docker_or_skip("elasticache_modify_serverless_cache_updates_fields") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -2106,6 +2321,10 @@ async fn elasticache_modify_serverless_cache_updates_fields() {
 
 #[tokio::test]
 async fn elasticache_delete_serverless_cache_and_verify_gone() {
+    if !require_docker_or_skip("elasticache_delete_serverless_cache_and_verify_gone") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -2140,6 +2359,10 @@ async fn elasticache_delete_serverless_cache_and_verify_gone() {
 
 #[tokio::test]
 async fn elasticache_create_serverless_cache_rejects_invalid_engine() {
+    if !require_docker_or_skip("elasticache_create_serverless_cache_rejects_invalid_engine") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -2155,6 +2378,10 @@ async fn elasticache_create_serverless_cache_rejects_invalid_engine() {
 
 #[tokio::test]
 async fn elasticache_create_serverless_cache_snapshot_and_describe() {
+    if !require_docker_or_skip("elasticache_create_serverless_cache_snapshot_and_describe") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -2198,6 +2425,10 @@ async fn elasticache_create_serverless_cache_snapshot_and_describe() {
 
 #[tokio::test]
 async fn elasticache_describe_serverless_cache_snapshots_paginates() {
+    if !require_docker_or_skip("elasticache_describe_serverless_cache_snapshots_paginates") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -2241,6 +2472,10 @@ async fn elasticache_describe_serverless_cache_snapshots_paginates() {
 
 #[tokio::test]
 async fn elasticache_delete_serverless_cache_snapshot_and_verify_gone() {
+    if !require_docker_or_skip("elasticache_delete_serverless_cache_snapshot_and_verify_gone") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -2282,6 +2517,10 @@ async fn elasticache_delete_serverless_cache_snapshot_and_verify_gone() {
 
 #[tokio::test]
 async fn elasticache_delete_nonexistent_serverless_cache_snapshot_errors() {
+    if !require_docker_or_skip("elasticache_delete_nonexistent_serverless_cache_snapshot_errors") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -2298,6 +2537,10 @@ async fn elasticache_delete_nonexistent_serverless_cache_snapshot_errors() {
 
 #[tokio::test]
 async fn elasticache_create_memcached_cluster_and_connect() {
+    if !require_docker_or_skip("elasticache_create_memcached_cluster_and_connect") {
+        return;
+    }
+
     if !docker_available() {
         return;
     }
@@ -2359,6 +2602,10 @@ async fn elasticache_create_memcached_cluster_and_connect() {
 
 #[tokio::test]
 async fn elasticache_memcached_replication_group_rejected() {
+    if !require_docker_or_skip("elasticache_memcached_replication_group_rejected") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -2374,6 +2621,10 @@ async fn elasticache_memcached_replication_group_rejected() {
 
 #[tokio::test]
 async fn elasticache_describe_engine_default_parameters_memcached() {
+    if !require_docker_or_skip("elasticache_describe_engine_default_parameters_memcached") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -2398,6 +2649,10 @@ async fn elasticache_describe_engine_default_parameters_memcached() {
 
 #[tokio::test]
 async fn elasticache_describe_cache_engine_versions_includes_memcached() {
+    if !require_docker_or_skip("elasticache_describe_cache_engine_versions_includes_memcached") {
+        return;
+    }
+
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
 
@@ -2420,6 +2675,10 @@ async fn elasticache_describe_cache_engine_versions_includes_memcached() {
 
 #[tokio::test]
 async fn elasticache_create_cache_cluster_round_trips_extended_fields() {
+    if !require_docker_or_skip("elasticache_create_cache_cluster_round_trips_extended_fields") {
+        return;
+    }
+
     // Kitchen-sink CreateCacheCluster: every documented input AWS supports
     // through the SDK builder. Asserts the create + describe responses echo
     // every field that maps to a slot on the CacheCluster shape, and that
@@ -2567,6 +2826,12 @@ async fn elasticache_create_cache_cluster_round_trips_extended_fields() {
 
 #[tokio::test]
 async fn elasticache_modify_replication_group_shard_configuration_changes_shard_count() {
+    if !require_docker_or_skip(
+        "elasticache_modify_replication_group_shard_configuration_changes_shard_count",
+    ) {
+        return;
+    }
+
     if !docker_available() {
         return;
     }
@@ -2637,6 +2902,12 @@ async fn elasticache_modify_replication_group_shard_configuration_changes_shard_
 
 #[tokio::test]
 async fn elasticache_modify_replication_group_shard_configuration_rejects_non_cluster_change() {
+    if !require_docker_or_skip(
+        "elasticache_modify_replication_group_shard_configuration_rejects_non_cluster_change",
+    ) {
+        return;
+    }
+
     if !docker_available() {
         return;
     }
@@ -2667,6 +2938,10 @@ async fn elasticache_modify_replication_group_shard_configuration_rejects_non_cl
 
 #[tokio::test]
 async fn elasticache_increase_replica_count_per_shard() {
+    if !require_docker_or_skip("elasticache_increase_replica_count_per_shard") {
+        return;
+    }
+
     if !docker_available() {
         return;
     }
@@ -2709,6 +2984,10 @@ async fn elasticache_increase_replica_count_per_shard() {
 
 #[tokio::test]
 async fn elasticache_decrease_replica_count_per_shard() {
+    if !require_docker_or_skip("elasticache_decrease_replica_count_per_shard") {
+        return;
+    }
+
     if !docker_available() {
         return;
     }
@@ -2747,6 +3026,10 @@ async fn elasticache_decrease_replica_count_per_shard() {
 
 #[tokio::test]
 async fn elasticache_memcached_cluster_emits_configuration_endpoint() {
+    if !require_docker_or_skip("elasticache_memcached_cluster_emits_configuration_endpoint") {
+        return;
+    }
+
     if !docker_available() {
         return;
     }
@@ -2857,6 +3140,10 @@ async fn redis_config_supported(addr: &str) -> bool {
 
 #[tokio::test]
 async fn elasticache_modify_user_applies_acl_to_running_redis() {
+    if !require_docker_or_skip("elasticache_modify_user_applies_acl_to_running_redis") {
+        return;
+    }
+
     if !docker_available() {
         return;
     }
@@ -2939,6 +3226,10 @@ async fn elasticache_modify_user_applies_acl_to_running_redis() {
 
 #[tokio::test]
 async fn elasticache_modify_cache_parameter_group_applies_config_set() {
+    if !require_docker_or_skip("elasticache_modify_cache_parameter_group_applies_config_set") {
+        return;
+    }
+
     if !docker_available() {
         return;
     }
