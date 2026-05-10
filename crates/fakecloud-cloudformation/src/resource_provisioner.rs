@@ -8233,6 +8233,9 @@ impl ResourceProvisioner {
             delivery_destination_type,
             arn: arn.clone(),
             tags: BTreeMap::new(),
+            field_delimiter: None,
+            record_fields: Vec::new(),
+            s3_delivery_configuration: None,
         };
 
         let mut logs_accounts = self.logs_state.write();
