@@ -14,6 +14,27 @@ mod helpers;
 use aws_sdk_ecs::types::{ContainerDefinition, PropagateTags, Tag, TaskField};
 use helpers::TestServer;
 
+fn docker_available() -> bool {
+    std::process::Command::new("docker")
+        .arg("info")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn require_docker_or_skip(test: &str) -> bool {
+    if docker_available() {
+        return true;
+    }
+    if std::env::var("CI").is_ok() {
+        panic!("docker is required for {test} in CI");
+    }
+    eprintln!("skipping {test}: docker is not available");
+    false
+}
+
 async fn bootstrap(client: &aws_sdk_ecs::Client, cluster: &str, family: &str, tags: Vec<Tag>) {
     client
         .create_cluster()
@@ -240,6 +261,9 @@ async fn propagate_tags_service_copies_service_tags_onto_tasks() {
 
 #[tokio::test]
 async fn update_service_scale_in_skips_protected_tasks() {
+    if !require_docker_or_skip("update_service_scale_in_skips_protected_tasks") {
+        return;
+    }
     let server = TestServer::start().await;
     let client = server.ecs_client().await;
     bootstrap(&client, "prot-cluster", "prot-td", vec![]).await;
