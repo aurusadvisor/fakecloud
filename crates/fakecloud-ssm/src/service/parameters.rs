@@ -681,7 +681,7 @@ impl SsmService {
                 &arn,
                 key_id_for_enc,
                 &input.value,
-            );
+            )?;
         }
 
         // Hold on to the parsed policies + identifying metadata before
@@ -714,9 +714,18 @@ impl SsmService {
         Ok(resp)
     }
 
-    /// Encrypt a SecureString value via the configured KMS hook. Returns
-    /// plaintext unchanged if no hook is wired (preserves legacy fakecloud
-    /// behavior in tests that don't set up KMS).
+    /// Encrypt a SecureString value via the configured KMS hook.
+    ///
+    /// When a KMS hook is wired (production server, real e2e tests) the
+    /// encrypt call is strict: any failure raises `KMSAccessDeniedException`
+    /// rather than silently storing plaintext. Real AWS SSM cannot
+    /// PutParameter a SecureString when KMS is unavailable, and silent
+    /// plaintext fallback would leak secrets on a misconfigured deployment.
+    ///
+    /// When no hook is wired the value is returned unchanged. This is
+    /// reachable only from in-process unit tests that intentionally skip
+    /// KMS wiring; production builds always set a hook via
+    /// [`SsmService::with_kms_hook`].
     fn encrypt_secure_value(
         &self,
         account_id: &str,
@@ -724,31 +733,28 @@ impl SsmService {
         param_arn: &str,
         key_id: Option<&str>,
         plaintext: &str,
-    ) -> String {
+    ) -> Result<String, AwsServiceError> {
         let Some(hook) = &self.kms_hook else {
-            return plaintext.to_string();
+            return Ok(plaintext.to_string());
         };
         let key = key_id.filter(|k| !k.is_empty()).unwrap_or("aws/ssm");
         let mut ctx = std::collections::HashMap::new();
         ctx.insert("PARAMETER_ARN".to_string(), param_arn.to_string());
-        match hook.encrypt(
+        hook.encrypt(
             account_id,
             region,
             key,
             plaintext.as_bytes(),
             "ssm.amazonaws.com",
             ctx,
-        ) {
-            Ok(ct) => ct,
-            Err(err) => {
-                tracing::warn!(
-                    parameter = %param_arn,
-                    error = %err,
-                    "KMS encrypt failed for SSM SecureString; storing plaintext"
-                );
-                plaintext.to_string()
-            }
-        }
+        )
+        .map_err(|err| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "KMSAccessDeniedException",
+                format!("Unable to encrypt SecureString parameter {param_arn} via KMS: {err}"),
+            )
+        })
     }
 
     /// Decrypt a stored SecureString value via the configured KMS hook.
