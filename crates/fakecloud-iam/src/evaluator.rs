@@ -290,20 +290,22 @@ fn parse_statement(value: &Value) -> Option<ParsedStatement> {
 /// - `"Principal": "*"`
 /// - `"Principal": {"AWS": "*"}` or `{"AWS": ["..."]}`
 /// - `"Principal": {"Service": "lambda.amazonaws.com"}` (string or array)
-/// - `"Principal": {"Federated": "..."}` (unhandled — debug log, drop)
-/// - `"Principal": {"CanonicalUser": "..."}` (unhandled — debug log, drop)
+/// - `"Principal": {"Federated": "..."}` (matched via [`principal_is_federated`])
+/// - `"Principal": {"CanonicalUser": "..."}` (unhandled — warn log, drop)
 ///
 /// Unknown shapes fall through to an empty ref list, which the matcher
-/// treats as "doesn't match" — never silently grant.
+/// treats as "doesn't match" — never silently grant. The drop is logged at
+/// `warn` so callers can see when their policy uses an unsupported
+/// principal type rather than discovering the silent skip in production.
 fn parse_principal(value: &Value) -> Vec<PrincipalRef> {
     let mut out = Vec::new();
     match value {
         Value::String(s) if s == "*" => out.push(PrincipalRef::AnyAws),
         Value::String(other) => {
-            tracing::debug!(
+            tracing::warn!(
                 target: "fakecloud::iam::audit",
                 principal = %other,
-                "Principal string other than \"*\" is not a recognized shape; skipping"
+                "Principal string other than \"*\" is not a recognized shape; statement will not match"
             );
         }
         Value::Object(map) => {
@@ -325,19 +327,20 @@ fn parse_principal(value: &Value) -> Vec<PrincipalRef> {
                         }
                     }
                     other => {
-                        tracing::debug!(
+                        tracing::warn!(
                             target: "fakecloud::iam::audit",
                             principal_type = %other,
-                            "Principal type not implemented in this rollout; skipping entry"
+                            "Principal type not recognized; entries dropped — statement \
+                             will not match unless other Principal entries cover the caller"
                         );
                     }
                 }
             }
         }
         _ => {
-            tracing::debug!(
+            tracing::warn!(
                 target: "fakecloud::iam::audit",
-                "Principal has an unexpected JSON shape; skipping"
+                "Principal has an unexpected JSON shape; statement will not match"
             );
         }
     }
