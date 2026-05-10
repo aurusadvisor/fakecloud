@@ -286,6 +286,7 @@ impl EcsService {
                 enable_execute_command,
                 attachments: Vec::new(),
                 volume_configurations: volume_configurations.clone(),
+                task_set_arn: None,
             };
             state.tasks.insert(task_id.clone(), task.clone());
             if let Some(cluster) = state.clusters.get_mut(&cluster_name) {
@@ -677,6 +678,7 @@ mod multi_container_tests {
             enable_execute_command: false,
             attachments: Vec::new(),
             volume_configurations: Vec::new(),
+            task_set_arn: None,
         };
         for name in ["app", "sidecar"] {
             task.containers.push(Container {
@@ -935,6 +937,7 @@ mod port_mapping_tests {
             enable_execute_command: false,
             attachments: Vec::new(),
             volume_configurations: Vec::new(),
+            task_set_arn: None,
         };
         task.last_status = "PENDING".into();
         acct.tasks.insert("abc".into(), task);

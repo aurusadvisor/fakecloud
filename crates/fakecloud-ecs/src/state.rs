@@ -438,6 +438,10 @@ pub struct Task {
     /// inherited from the service. Stored as raw JSON.
     #[serde(default)]
     pub volume_configurations: Vec<Value>,
+    /// Task set this task belongs to. Populated when the task is spawned
+    /// by a service using the CODE_DEPLOY deployment controller.
+    #[serde(default)]
+    pub task_set_arn: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

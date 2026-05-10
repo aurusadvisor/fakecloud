@@ -468,3 +468,208 @@ async fn daemon_spawns_one_task_per_capacity_provider() {
         "all daemon tasks should be STOPPED after delete_daemon; got {del_daemon_tasks:?}"
     );
 }
+
+// ── CODE_DEPLOY blue/green (O16) ────────────────────────────────────────
+
+#[tokio::test]
+async fn codedeploy_service_creates_primary_task_set() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("bg-cluster")
+        .send()
+        .await
+        .unwrap();
+    client
+        .register_task_definition()
+        .family("bg-td")
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("app")
+                .image("public.ecr.aws/library/alpine:latest")
+                .essential(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let dc = aws_sdk_ecs::types::DeploymentController::builder()
+        .r#type(aws_sdk_ecs::types::DeploymentControllerType::CodeDeploy)
+        .build()
+        .unwrap();
+    client
+        .create_service()
+        .cluster("bg-cluster")
+        .service_name("web")
+        .task_definition("bg-td")
+        .desired_count(2)
+        .deployment_controller(dc)
+        .send()
+        .await
+        .expect("create_service CODE_DEPLOY");
+
+    let described = client
+        .describe_services()
+        .cluster("bg-cluster")
+        .services("web")
+        .send()
+        .await
+        .expect("describe_services");
+    let svc = described.services().first().expect("service present");
+    let sets = svc.task_sets();
+    assert_eq!(
+        sets.len(),
+        1,
+        "CODE_DEPLOY service should have one PRIMARY task set; got {sets:?}"
+    );
+    let ts = &sets[0];
+    assert_eq!(
+        ts.status(),
+        Some("PRIMARY"),
+        "task set should be PRIMARY; got {:?}",
+        ts.status()
+    );
+    assert!(
+        ts.task_definition().unwrap_or("").contains("bg-td"),
+        "PRIMARY task set should reference bg-td; got {:?}",
+        ts.task_definition()
+    );
+    assert_eq!(
+        svc.deployments().len(),
+        0,
+        "CODE_DEPLOY service should have no deployments; got {:?}",
+        svc.deployments()
+    );
+}
+
+#[tokio::test]
+async fn codedeploy_update_service_flips_primary_task_set() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("bg-up-cluster")
+        .send()
+        .await
+        .unwrap();
+    client
+        .register_task_definition()
+        .family("bg-td")
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("app")
+                .image("public.ecr.aws/library/alpine:latest")
+                .essential(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    client
+        .register_task_definition()
+        .family("bg-td2")
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("app")
+                .image("public.ecr.aws/library/alpine:latest")
+                .essential(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let dc = aws_sdk_ecs::types::DeploymentController::builder()
+        .r#type(aws_sdk_ecs::types::DeploymentControllerType::CodeDeploy)
+        .build()
+        .unwrap();
+    client
+        .create_service()
+        .cluster("bg-up-cluster")
+        .service_name("web")
+        .task_definition("bg-td")
+        .desired_count(2)
+        .deployment_controller(dc)
+        .send()
+        .await
+        .expect("create_service CODE_DEPLOY");
+
+    // Update service to new task definition.
+    client
+        .update_service()
+        .cluster("bg-up-cluster")
+        .service("web")
+        .task_definition("bg-td2")
+        .send()
+        .await
+        .expect("update_service");
+
+    let described = client
+        .describe_services()
+        .cluster("bg-up-cluster")
+        .services("web")
+        .send()
+        .await
+        .expect("describe_services");
+    let svc = described.services().first().expect("service present");
+    let sets: Vec<_> = svc.task_sets().to_vec();
+    assert_eq!(
+        sets.len(),
+        2,
+        "after update there should be 2 task sets; got {sets:?}"
+    );
+    let primary = sets
+        .iter()
+        .find(|ts| ts.status() == Some("PRIMARY"))
+        .expect("one PRIMARY task set");
+    assert!(
+        primary.task_definition().unwrap_or("").contains("bg-td2"),
+        "PRIMARY should reference new TD bg-td2; got {:?}",
+        primary.task_definition()
+    );
+    let old = sets
+        .iter()
+        .find(|ts| ts.status() == Some("ACTIVE"))
+        .expect("old task set demoted to ACTIVE");
+    assert!(
+        old.task_definition().unwrap_or("").contains("bg-td"),
+        "ACTIVE should reference old TD bg-td; got {:?}",
+        old.task_definition()
+    );
+    assert_eq!(
+        old.computed_desired_count(),
+        0,
+        "old task set should have computedDesiredCount=0; got {:?}",
+        old.computed_desired_count()
+    );
+
+    // Old tasks on bg-td should be desired STOPPED.
+    let tasks = client
+        .list_tasks()
+        .cluster("bg-up-cluster")
+        .send()
+        .await
+        .expect("list_tasks");
+    //
+    for arn in tasks.task_arns() {
+        let d = client
+            .describe_tasks()
+            .cluster("bg-up-cluster")
+            .tasks(arn)
+            .send()
+            .await
+            .expect("describe_tasks");
+        let t = d.tasks().first().expect("task");
+        let td = t.task_definition_arn().unwrap_or("");
+        if td.contains("bg-td") && !td.contains("bg-td2") {
+            assert_eq!(
+                t.desired_status(),
+                Some("STOPPED"),
+                "old-TD task should be desired STOPPED; got {:?}",
+                t.desired_status()
+            );
+        }
+    }
+}
