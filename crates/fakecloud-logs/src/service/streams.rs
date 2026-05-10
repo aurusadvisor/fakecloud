@@ -1107,7 +1107,7 @@ impl LogsService {
 
     pub(crate) fn get_log_record(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let _log_record_pointer = body["logRecordPointer"].as_str().ok_or_else(|| {
+        let pointer = body["logRecordPointer"].as_str().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterException",
@@ -1115,12 +1115,97 @@ impl LogsService {
             )
         })?;
 
-        // Stub: return empty log record
+        // fakecloud-issued pointers are base64 of `<group>|<stream>|<index>`,
+        // matching the GetLogObject pointer encoding. Real CWL pointers are
+        // opaque tokens minted by Insights queries — callers cannot
+        // legitimately construct them without first observing them, so we
+        // only need to round-trip what other operations produced.
+        let (group_name, stream_name, idx) =
+            parse_log_record_pointer(pointer).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "logRecordPointer is not a fakecloud-issued pointer",
+                )
+            })?;
+        let accounts = self.state.read();
+        let state = accounts.get(&req.account_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                "log record not found",
+            )
+        })?;
+        let group = state.log_groups.get(&group_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("log group '{group_name}' not found"),
+            )
+        })?;
+        let stream = group.log_streams.get(&stream_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("log stream '{stream_name}' not found"),
+            )
+        })?;
+        let ev = stream.events.get(idx).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                "log event index out of range",
+            )
+        })?;
+        let mut record = serde_json::Map::new();
+        record.insert("@timestamp".into(), Value::String(ev.timestamp.to_string()));
+        record.insert(
+            "@ingestionTime".into(),
+            Value::String(ev.ingestion_time.to_string()),
+        );
+        record.insert("@logStream".into(), Value::String(stream_name));
+        record.insert("@logGroup".into(), Value::String(group_name));
+        record.insert("@message".into(), Value::String(ev.message.clone()));
+        // If the event message is JSON, expose its top-level keys alongside
+        // the synthetic ones — matches what CWL Insights does for
+        // discovered fields.
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Map<String, Value>>(&ev.message) {
+            for (k, v) in parsed {
+                if !record.contains_key(&k) {
+                    let stringified = match &v {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    record.insert(k, Value::String(stringified));
+                }
+            }
+        }
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({ "logRecord": {} })).unwrap(),
+            serde_json::to_string(&json!({ "logRecord": record })).unwrap(),
         ))
     }
+}
+
+/// Pointer format mirrors GetLogObject: base64(`<group>|<stream>|<index>`).
+fn parse_log_record_pointer(pointer: &str) -> Option<(String, String, usize)> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(pointer)
+        .ok()?;
+    let raw = String::from_utf8(bytes).ok()?;
+    let parts: Vec<&str> = raw.splitn(3, '|').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let idx = parts[2].parse::<usize>().ok()?;
+    Some((parts[0].to_string(), parts[1].to_string(), idx))
+}
+
+#[cfg(test)]
+pub(crate) fn encode_log_record_pointer(group: &str, stream: &str, idx: usize) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(format!("{group}|{stream}|{idx}").as_bytes())
 }
 
 #[cfg(test)]
@@ -1128,6 +1213,45 @@ mod tests {
     use super::*;
     use crate::service::test_helpers::*;
     use serde_json::{json, Value};
+
+    // ---- get_log_record ----
+
+    #[test]
+    fn get_log_record_rejects_garbage_pointer() {
+        let svc = make_service();
+        let req = make_request("GetLogRecord", json!({ "logRecordPointer": "not-base64" }));
+        match svc.get_log_record(&req) {
+            Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
+            Ok(_) => panic!("expected InvalidParameterException"),
+        }
+    }
+
+    #[test]
+    fn get_log_record_returns_event_for_valid_pointer() {
+        let svc = make_service();
+        create_group(&svc, "/test/getrec");
+        create_stream(&svc, "/test/getrec", "s1");
+        put_events(
+            &svc,
+            "/test/getrec",
+            "s1",
+            &["{\"level\":\"info\",\"msg\":\"hi\"}"],
+        );
+
+        let pointer = super::encode_log_record_pointer("/test/getrec", "s1", 0);
+        let req = make_request("GetLogRecord", json!({ "logRecordPointer": pointer }));
+        let resp = svc.get_log_record(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["logRecord"]["@logStream"], "s1");
+        assert_eq!(body["logRecord"]["@logGroup"], "/test/getrec");
+        assert!(body["logRecord"]["@message"]
+            .as_str()
+            .unwrap()
+            .contains("hi"));
+        // JSON keys discovered from the message body.
+        assert_eq!(body["logRecord"]["level"], "info");
+        assert_eq!(body["logRecord"]["msg"], "hi");
+    }
 
     // ---- filter_log_events: logGroupIdentifier ----
 
