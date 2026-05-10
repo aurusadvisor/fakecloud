@@ -3067,6 +3067,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
+ "crc32fast",
  "fakecloud-bedrock-agent",
  "fakecloud-core",
  "fakecloud-testkit",

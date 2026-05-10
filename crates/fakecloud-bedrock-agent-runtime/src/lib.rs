@@ -1,3 +1,4 @@
+pub(crate) mod eventstream;
 pub mod service;
 pub mod state;
 
