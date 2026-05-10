@@ -231,74 +231,120 @@ impl EcsService {
         let tags = parse_tags(&body);
 
         let now = Utc::now();
-        let mut accounts = self.state.write();
-        let account_id = request.account_id.clone();
-        let s = accounts.get_or_create(&account_id);
-        let cluster_name = cluster_arn_to_name(cluster_input.unwrap_or("default"));
-        let cluster_arn = s.cluster_arn(&cluster_name);
+        let runtime = self.runtime.clone();
+        let account = request.account_id.clone();
+        let principal_arn = request
+            .principal
+            .as_ref()
+            .map(|p| p.arn.clone())
+            .unwrap_or_default();
 
-        if !s.clusters.contains_key(&cluster_name) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ClusterNotFoundException",
-                format!("Cluster {} not found", cluster_name),
-            ));
-        }
+        let (daemon_arn, deployment_arn, daemon_json, spawn_ids) = {
+            let mut accounts = self.state.write();
+            let s = accounts.get_or_create(&account);
+            let cluster_name = cluster_arn_to_name(cluster_input.unwrap_or("default"));
+            let cluster_arn = s.cluster_arn(&cluster_name);
 
-        let key = EcsState::daemon_key(&cluster_name, &daemon_name);
-        if s.daemons.contains_key(&key) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ClientException",
-                format!(
-                    "Daemon {} already exists in cluster {}",
-                    daemon_name, cluster_name
-                ),
-            ));
-        }
+            if !s.clusters.contains_key(&cluster_name) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ClusterNotFoundException",
+                    format!("Cluster {} not found", cluster_name),
+                ));
+            }
 
-        let daemon_arn = s.daemon_arn(&cluster_name, &daemon_name);
-        let deployment_id = uuid::Uuid::new_v4().to_string();
-        let deployment_arn = s.daemon_deployment_arn(&daemon_name, &deployment_id);
+            let key = EcsState::daemon_key(&cluster_name, &daemon_name);
+            if s.daemons.contains_key(&key) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ClientException",
+                    format!(
+                        "Daemon {} already exists in cluster {}",
+                        daemon_name, cluster_name
+                    ),
+                ));
+            }
 
-        let deployment = DaemonDeployment {
-            deployment_arn: deployment_arn.clone(),
-            daemon_arn: daemon_arn.clone(),
-            daemon_name: daemon_name.clone(),
-            cluster_arn: cluster_arn.clone(),
-            task_definition_arn: task_definition_arn.clone(),
-            status: "PRIMARY".to_string(),
-            revision: 1,
-            created_at: now,
-            updated_at: now,
+            let daemon_arn = s.daemon_arn(&cluster_name, &daemon_name);
+            let deployment_id = uuid::Uuid::new_v4().to_string();
+            let deployment_arn = s.daemon_deployment_arn(&daemon_name, &deployment_id);
+
+            let deployment = DaemonDeployment {
+                deployment_arn: deployment_arn.clone(),
+                daemon_arn: daemon_arn.clone(),
+                daemon_name: daemon_name.clone(),
+                cluster_arn: cluster_arn.clone(),
+                task_definition_arn: task_definition_arn.clone(),
+                status: "PRIMARY".to_string(),
+                revision: 1,
+                created_at: now,
+                updated_at: now,
+            };
+
+            let daemon = Daemon {
+                daemon_name: daemon_name.clone(),
+                daemon_arn: daemon_arn.clone(),
+                cluster_arn,
+                cluster_name: cluster_name.clone(),
+                daemon_task_definition_arn: task_definition_arn.clone(),
+                status: "ACTIVE".to_string(),
+                deployment_arn: deployment_arn.clone(),
+                created_at: now,
+                updated_at: now,
+                capacity_provider_arns,
+                deployment_configuration,
+                propagate_tags,
+                enable_ecs_managed_tags,
+                enable_execute_command,
+                client_token,
+                tags,
+                deployment_history: vec![deployment_arn.clone()],
+                task_arns: Vec::new(),
+            };
+
+            s.daemons.insert(key.clone(), daemon.clone());
+            s.daemon_deployments
+                .insert(deployment_arn.clone(), deployment);
+            let ids = spawn_daemon_tasks(s, &daemon, &principal_arn, "EC2");
+            if let Some(d) = s.daemons.get_mut(&key) {
+                d.task_arns = ids.clone();
+            }
+            let json = daemon_json(s.daemons.get(&key).unwrap());
+            (daemon_arn, deployment_arn, json, ids)
         };
 
-        let daemon = Daemon {
-            daemon_name: daemon_name.clone(),
-            daemon_arn: daemon_arn.clone(),
-            cluster_arn,
-            cluster_name,
-            daemon_task_definition_arn: task_definition_arn.clone(),
-            status: "ACTIVE".to_string(),
-            deployment_arn: deployment_arn.clone(),
-            created_at: now,
-            updated_at: now,
-            capacity_provider_arns,
-            deployment_configuration,
-            propagate_tags,
-            enable_ecs_managed_tags,
-            enable_execute_command,
-            client_token,
-            tags,
-            deployment_history: vec![deployment_arn.clone()],
-        };
-
-        s.daemons.insert(key, daemon);
-        s.daemon_deployments
-            .insert(deployment_arn.clone(), deployment);
+        if let Some(rt) = runtime {
+            for id in &spawn_ids {
+                rt.clone()
+                    .run_task(self.state.clone(), id.clone(), account.clone());
+            }
+        } else {
+            let mut accounts = self.state.write();
+            if let Some(s) = accounts.get_mut(&account) {
+                for id in &spawn_ids {
+                    if let Some(t) = s.tasks.get_mut(id) {
+                        t.last_status = "STOPPED".into();
+                        t.desired_status = "STOPPED".into();
+                        t.stop_code = Some("TaskFailedToStart".into());
+                        t.stopped_reason = Some(
+                            "No container runtime available (docker/podman not installed)".into(),
+                        );
+                        t.stopped_at = Some(Utc::now());
+                        for c in t.containers.iter_mut() {
+                            c.last_status = "STOPPED".into();
+                        }
+                        if let Some(cluster) = s.clusters.get_mut(&t.cluster_name) {
+                            if cluster.pending_tasks_count > 0 {
+                                cluster.pending_tasks_count -= 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(AwsResponse::ok_json(json!({
-            "daemonArn": daemon_arn,
+            "daemonArn": daemon_json.get("daemonArn").cloned().unwrap_or(json!(daemon_arn)),
             "status": "ACTIVE",
             "createdAt": now.timestamp() as f64 + now.timestamp_subsec_micros() as f64 / 1_000_000.0,
             "deploymentArn": deployment_arn,
@@ -348,73 +394,163 @@ impl EcsService {
             });
 
         let now = Utc::now();
-        let mut accounts = self.state.write();
-        let account_id = request.account_id.clone();
-        let s = accounts.get_or_create(&account_id);
+        let runtime = self.runtime.clone();
+        let account = request.account_id.clone();
+        let principal_arn = request
+            .principal
+            .as_ref()
+            .map(|p| p.arn.clone())
+            .unwrap_or_default();
 
-        let key = lookup_daemon_key_by_arn(s, &daemon_arn).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ClientException",
-                format!("Daemon {} not found", daemon_arn),
-            )
-        })?;
+        let (snapshot, stop_ids, spawn_ids) = {
+            let mut accounts = self.state.write();
+            let s = accounts.get_or_create(&account);
 
-        // Mint a new deployment if task definition changed.
-        let mut new_deployment_arn: Option<String> = None;
-        if let Some(td_arn) = new_task_def.clone() {
-            let daemon_name = s
+            let key = lookup_daemon_key_by_arn(s, &daemon_arn).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ClientException",
+                    format!("Daemon {} not found", daemon_arn),
+                )
+            })?;
+
+            // Mint a new deployment if task definition changed.
+            let mut new_deployment_arn: Option<String> = None;
+            if let Some(td_arn) = new_task_def.clone() {
+                let daemon_name = s
+                    .daemons
+                    .get(&key)
+                    .map(|d| d.daemon_name.clone())
+                    .unwrap_or_default();
+                let cluster_arn = s
+                    .daemons
+                    .get(&key)
+                    .map(|d| d.cluster_arn.clone())
+                    .unwrap_or_default();
+                let daemon_arn = s
+                    .daemons
+                    .get(&key)
+                    .map(|d| d.daemon_arn.clone())
+                    .unwrap_or_default();
+                let deployment_id = uuid::Uuid::new_v4().to_string();
+                let deployment_arn = s.daemon_deployment_arn(&daemon_name, &deployment_id);
+                let revision = s
+                    .daemons
+                    .get(&key)
+                    .map(|d| d.deployment_history.len() as i64 + 1)
+                    .unwrap_or(1);
+                let deployment = DaemonDeployment {
+                    deployment_arn: deployment_arn.clone(),
+                    daemon_arn,
+                    daemon_name,
+                    cluster_arn,
+                    task_definition_arn: td_arn,
+                    status: "PRIMARY".to_string(),
+                    revision,
+                    created_at: now,
+                    updated_at: now,
+                };
+                s.daemon_deployments
+                    .insert(deployment_arn.clone(), deployment);
+                new_deployment_arn = Some(deployment_arn);
+            }
+
+            let old_task_ids: Vec<String> = s
                 .daemons
                 .get(&key)
-                .map(|d| d.daemon_name.clone())
+                .map(|d| d.task_arns.clone())
                 .unwrap_or_default();
-            let cluster_arn = s
-                .daemons
-                .get(&key)
-                .map(|d| d.cluster_arn.clone())
-                .unwrap_or_default();
-            let daemon_arn = s
-                .daemons
-                .get(&key)
-                .map(|d| d.daemon_arn.clone())
-                .unwrap_or_default();
-            let deployment_id = uuid::Uuid::new_v4().to_string();
-            let deployment_arn = s.daemon_deployment_arn(&daemon_name, &deployment_id);
-            let revision = s
-                .daemons
-                .get(&key)
-                .map(|d| d.deployment_history.len() as i64 + 1)
-                .unwrap_or(1);
-            let deployment = DaemonDeployment {
-                deployment_arn: deployment_arn.clone(),
-                daemon_arn,
-                daemon_name,
-                cluster_arn,
-                task_definition_arn: td_arn,
-                status: "PRIMARY".to_string(),
-                revision,
-                created_at: now,
-                updated_at: now,
+
+            {
+                let daemon = s.daemons.get_mut(&key).unwrap();
+                if let Some(td) = new_task_def {
+                    daemon.daemon_task_definition_arn = td;
+                }
+                if let Some(caps) = new_caps {
+                    daemon.capacity_provider_arns = caps;
+                }
+                if let Some(dep_arn) = new_deployment_arn {
+                    daemon.deployment_arn = dep_arn.clone();
+                    daemon.deployment_history.push(dep_arn);
+                }
+                daemon.updated_at = now;
+            }
+
+            // Re-spawn tasks when definition or providers changed.
+            let ids = {
+                let daemon = s.daemons.get(&key).unwrap().clone();
+                spawn_daemon_tasks(s, &daemon, &principal_arn, "EC2")
             };
-            s.daemon_deployments
-                .insert(deployment_arn.clone(), deployment);
-            new_deployment_arn = Some(deployment_arn);
+            if let Some(d) = s.daemons.get_mut(&key) {
+                d.task_arns = ids.clone();
+            }
+            let snap = s.daemons.get(&key).unwrap().clone();
+            (snap, old_task_ids, ids)
+        };
+
+        // Stop old tasks.
+        for id in &stop_ids {
+            {
+                let mut accounts = self.state.write();
+                if let Some(s) = accounts.get_mut(&account) {
+                    if let Some(t) = s.tasks.get_mut(id) {
+                        t.desired_status = "STOPPED".into();
+                        t.stopping_at = Some(Utc::now());
+                        if runtime.is_none() {
+                            t.last_status = "STOPPED".into();
+                            t.stopped_at = Some(Utc::now());
+                            t.stop_code = Some("UserInitiated".into());
+                            for c in t.containers.iter_mut() {
+                                c.last_status = "STOPPED".into();
+                            }
+                            if let Some(cluster) = s.clusters.get_mut(&t.cluster_name) {
+                                if cluster.pending_tasks_count > 0 {
+                                    cluster.pending_tasks_count -= 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(rt) = &runtime {
+                let rt2 = rt.clone();
+                let id_clone = id.clone();
+                tokio::spawn(async move {
+                    rt2.stop_task(&id_clone, "ECS daemon update").await;
+                });
+            }
         }
 
-        let daemon = s.daemons.get_mut(&key).unwrap();
-        if let Some(td) = new_task_def {
-            daemon.daemon_task_definition_arn = td;
+        if let Some(rt) = runtime {
+            for id in &spawn_ids {
+                rt.clone()
+                    .run_task(self.state.clone(), id.clone(), account.clone());
+            }
+        } else {
+            let mut accounts = self.state.write();
+            if let Some(s) = accounts.get_mut(&account) {
+                for id in &spawn_ids {
+                    if let Some(t) = s.tasks.get_mut(id) {
+                        t.last_status = "STOPPED".into();
+                        t.desired_status = "STOPPED".into();
+                        t.stop_code = Some("TaskFailedToStart".into());
+                        t.stopped_reason = Some(
+                            "No container runtime available (docker/podman not installed)".into(),
+                        );
+                        t.stopped_at = Some(Utc::now());
+                        for c in t.containers.iter_mut() {
+                            c.last_status = "STOPPED".into();
+                        }
+                        if let Some(cluster) = s.clusters.get_mut(&t.cluster_name) {
+                            if cluster.pending_tasks_count > 0 {
+                                cluster.pending_tasks_count -= 1;
+                            }
+                        }
+                    }
+                }
+            }
         }
-        if let Some(caps) = new_caps {
-            daemon.capacity_provider_arns = caps;
-        }
-        if let Some(dep_arn) = new_deployment_arn {
-            daemon.deployment_arn = dep_arn.clone();
-            daemon.deployment_history.push(dep_arn);
-        }
-        daemon.updated_at = now;
 
-        let snapshot = daemon.clone();
         Ok(AwsResponse::ok_json(json!({
             "daemonArn": snapshot.daemon_arn,
             "status": snapshot.status,
@@ -433,28 +569,66 @@ impl EcsService {
         let body = request.json_body();
         let daemon_arn = req_str(&body, "daemonArn")?.to_string();
 
-        let mut accounts = self.state.write();
-        let account_id = request.account_id.clone();
-        let s = accounts.get_or_create(&account_id);
+        let runtime = self.runtime.clone();
+        let account = request.account_id.clone();
+        let (snapshot, stop_ids) = {
+            let mut accounts = self.state.write();
+            let s = accounts.get_or_create(&account);
 
-        let key = lookup_daemon_key_by_arn(s, &daemon_arn).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ClientException",
-                format!("Daemon {} not found", daemon_arn),
-            )
-        })?;
-        let mut daemon = s.daemons.remove(&key).unwrap();
-        daemon.status = "DRAINING".to_string();
-        daemon.updated_at = Utc::now();
+            let key = lookup_daemon_key_by_arn(s, &daemon_arn).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ClientException",
+                    format!("Daemon {} not found", daemon_arn),
+                )
+            })?;
+            let mut daemon = s.daemons.remove(&key).unwrap();
+            daemon.status = "DRAINING".to_string();
+            daemon.updated_at = Utc::now();
+            let ids = daemon.task_arns.clone();
+            (daemon, ids)
+        };
+
+        for id in &stop_ids {
+            {
+                let mut accounts = self.state.write();
+                if let Some(s) = accounts.get_mut(&account) {
+                    if let Some(t) = s.tasks.get_mut(id) {
+                        t.desired_status = "STOPPED".into();
+                        t.stopping_at = Some(Utc::now());
+                        if runtime.is_none() {
+                            t.last_status = "STOPPED".into();
+                            t.stopped_at = Some(Utc::now());
+                            t.stop_code = Some("UserInitiated".into());
+                            for c in t.containers.iter_mut() {
+                                c.last_status = "STOPPED".into();
+                            }
+                            if let Some(cluster) = s.clusters.get_mut(&t.cluster_name) {
+                                if cluster.pending_tasks_count > 0 {
+                                    cluster.pending_tasks_count -= 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(rt) = &runtime {
+                let rt2 = rt.clone();
+                let id_clone = id.clone();
+                tokio::spawn(async move {
+                    rt2.stop_task(&id_clone, "ECS daemon deletion").await;
+                });
+            }
+        }
+
         Ok(AwsResponse::ok_json(json!({
-            "daemonArn": daemon.daemon_arn,
-            "status": daemon.status,
-            "createdAt": daemon.created_at.timestamp() as f64
-                + daemon.created_at.timestamp_subsec_micros() as f64 / 1_000_000.0,
-            "updatedAt": daemon.updated_at.timestamp() as f64
-                + daemon.updated_at.timestamp_subsec_micros() as f64 / 1_000_000.0,
-            "deploymentArn": daemon.deployment_arn,
+            "daemonArn": snapshot.daemon_arn,
+            "status": snapshot.status,
+            "createdAt": snapshot.created_at.timestamp() as f64
+                + snapshot.created_at.timestamp_subsec_micros() as f64 / 1_000_000.0,
+            "updatedAt": snapshot.updated_at.timestamp() as f64
+                + snapshot.updated_at.timestamp_subsec_micros() as f64 / 1_000_000.0,
+            "deploymentArn": snapshot.deployment_arn,
         })))
     }
 
