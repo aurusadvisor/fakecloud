@@ -8,6 +8,27 @@ mod helpers;
 use aws_sdk_ecs::types::{ContainerDefinition, Tag};
 use helpers::TestServer;
 
+fn docker_available() -> bool {
+    std::process::Command::new("docker")
+        .arg("info")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn require_docker_or_skip(test: &str) -> bool {
+    if docker_available() {
+        return true;
+    }
+    if std::env::var("CI").is_ok() {
+        panic!("docker is required for {test} in CI");
+    }
+    eprintln!("Skipping {test}: docker not available");
+    false
+}
+
 #[tokio::test]
 async fn create_describe_list_delete_cluster() {
     let server = TestServer::start().await;
@@ -508,6 +529,9 @@ async fn register_runnable_task_def(client: &aws_sdk_ecs::Client, family: &str) 
 
 #[tokio::test]
 async fn run_task_records_task_and_accepts_describe() {
+    if !require_docker_or_skip("run_task_records_task_and_accepts_describe") {
+        return;
+    }
     let server = TestServer::start().await;
     let client = server.ecs_client().await;
 
@@ -717,6 +741,9 @@ async fn bootstrap_service_fixtures(client: &aws_sdk_ecs::Client, cluster: &str,
 
 #[tokio::test]
 async fn create_service_spawns_desired_tasks_and_describe_roundtrips() {
+    if !require_docker_or_skip("create_service_spawns_desired_tasks_and_describe_roundtrips") {
+        return;
+    }
     let server = TestServer::start().await;
     let client = server.ecs_client().await;
 
@@ -767,6 +794,9 @@ async fn create_service_spawns_desired_tasks_and_describe_roundtrips() {
 
 #[tokio::test]
 async fn update_service_scales_up_and_down() {
+    if !require_docker_or_skip("update_service_scales_up_and_down") {
+        return;
+    }
     let server = TestServer::start().await;
     let client = server.ecs_client().await;
     bootstrap_service_fixtures(&client, "scale-cluster", "scale-td").await;

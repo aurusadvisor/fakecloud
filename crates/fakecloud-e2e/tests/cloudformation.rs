@@ -4,6 +4,27 @@ use std::io::Write;
 
 use helpers::TestServer;
 
+fn docker_available() -> bool {
+    std::process::Command::new("docker")
+        .arg("info")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn require_docker_or_skip(test: &str) -> bool {
+    if docker_available() {
+        return true;
+    }
+    if std::env::var("CI").is_ok() {
+        panic!("docker is required for {test} in CI");
+    }
+    eprintln!("skipping {test}: docker is not available");
+    false
+}
+
 #[tokio::test]
 async fn cloudformation_create_stack_with_sqs_queue() {
     let server = TestServer::start().await;
@@ -480,6 +501,9 @@ async fn get_lambda_invocations(endpoint: &str) -> serde_json::Value {
 
 #[tokio::test]
 async fn cloudformation_custom_resource_invokes_lambda() {
+    if !require_docker_or_skip("cloudformation_custom_resource_invokes_lambda") {
+        return;
+    }
     use aws_sdk_lambda::primitives::Blob;
     use aws_sdk_lambda::types::{FunctionCode, Runtime};
 

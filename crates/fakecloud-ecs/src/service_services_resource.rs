@@ -215,6 +215,33 @@ impl EcsService {
             for id in spawn_task_ids {
                 rt.clone().run_task(self.state.clone(), id, account.clone());
             }
+        } else {
+            let mut accounts = self.state.write();
+            if let Some(state) = accounts.get_mut(&account) {
+                let mut cluster_drains: Vec<String> = Vec::new();
+                for id in &spawn_task_ids {
+                    if let Some(t) = state.tasks.get_mut(id) {
+                        t.last_status = "STOPPED".into();
+                        t.desired_status = "STOPPED".into();
+                        t.stop_code = Some("TaskFailedToStart".into());
+                        t.stopped_reason = Some(
+                            "No container runtime available (docker/podman not installed)".into(),
+                        );
+                        t.stopped_at = Some(Utc::now());
+                        for c in t.containers.iter_mut() {
+                            c.last_status = "STOPPED".into();
+                        }
+                        cluster_drains.push(t.cluster_name.clone());
+                    }
+                }
+                for name in cluster_drains {
+                    if let Some(cluster) = state.clusters.get_mut(&name) {
+                        if cluster.pending_tasks_count > 0 {
+                            cluster.pending_tasks_count -= 1;
+                        }
+                    }
+                }
+            }
         }
 
         Ok(AwsResponse::ok_json(json!({ "service": service_json })))
@@ -457,6 +484,30 @@ impl EcsService {
             (service_to_json(svc), spawn, stop)
         };
 
+        // Always flip desired_status for tasks we plan to stop.
+        for id in &stop_ids {
+            let mut accounts = self.state.write();
+            if let Some(state) = accounts.get_mut(&account) {
+                if let Some(task) = state.tasks.get_mut(id) {
+                    task.desired_status = "STOPPED".into();
+                    task.stopping_at = Some(Utc::now());
+                    if runtime.is_none() {
+                        task.last_status = "STOPPED".into();
+                        task.stopped_at = Some(Utc::now());
+                        task.stop_code = Some("UserInitiated".into());
+                        for c in task.containers.iter_mut() {
+                            c.last_status = "STOPPED".into();
+                        }
+                        if let Some(cluster) = state.clusters.get_mut(&task.cluster_name) {
+                            if cluster.pending_tasks_count > 0 {
+                                cluster.pending_tasks_count -= 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(rt) = runtime {
             for id in spawn_ids {
                 rt.clone().run_task(self.state.clone(), id, account.clone());
@@ -467,12 +518,31 @@ impl EcsService {
                 tokio::spawn(async move {
                     rt2.stop_task(&id_clone, "ECS service scale-down").await;
                 });
-                // Flip the task's desired status synchronously so DescribeTasks reflects intent.
-                let mut accounts = self.state.write();
-                if let Some(state) = accounts.get_mut(&account) {
-                    if let Some(task) = state.tasks.get_mut(&id) {
-                        task.desired_status = "STOPPED".into();
-                        task.stopping_at = Some(Utc::now());
+            }
+        } else {
+            let mut accounts = self.state.write();
+            if let Some(state) = accounts.get_mut(&account) {
+                let mut cluster_drains: Vec<String> = Vec::new();
+                for id in &spawn_ids {
+                    if let Some(t) = state.tasks.get_mut(id) {
+                        t.last_status = "STOPPED".into();
+                        t.desired_status = "STOPPED".into();
+                        t.stop_code = Some("TaskFailedToStart".into());
+                        t.stopped_reason = Some(
+                            "No container runtime available (docker/podman not installed)".into(),
+                        );
+                        t.stopped_at = Some(Utc::now());
+                        for c in t.containers.iter_mut() {
+                            c.last_status = "STOPPED".into();
+                        }
+                        cluster_drains.push(t.cluster_name.clone());
+                    }
+                }
+                for name in cluster_drains {
+                    if let Some(cluster) = state.clusters.get_mut(&name) {
+                        if cluster.pending_tasks_count > 0 {
+                            cluster.pending_tasks_count -= 1;
+                        }
                     }
                 }
             }
@@ -539,16 +609,31 @@ impl EcsService {
             (svc_snapshot, stop_ids)
         };
 
-        if let Some(rt) = &self.runtime {
-            for id in &task_ids_to_stop {
-                rt.stop_task(id, "ECS service deletion").await;
+        for id in &task_ids_to_stop {
+            {
                 let mut accounts = self.state.write();
                 if let Some(state) = accounts.get_mut(&request.account_id) {
                     if let Some(task) = state.tasks.get_mut(id) {
                         task.desired_status = "STOPPED".into();
                         task.stopping_at = Some(Utc::now());
+                        if self.runtime.is_none() {
+                            task.last_status = "STOPPED".into();
+                            task.stopped_at = Some(Utc::now());
+                            task.stop_code = Some("UserInitiated".into());
+                            for c in task.containers.iter_mut() {
+                                c.last_status = "STOPPED".into();
+                            }
+                            if let Some(cluster) = state.clusters.get_mut(&task.cluster_name) {
+                                if cluster.pending_tasks_count > 0 {
+                                    cluster.pending_tasks_count -= 1;
+                                }
+                            }
+                        }
                     }
                 }
+            }
+            if let Some(rt) = &self.runtime {
+                rt.stop_task(id, "ECS service deletion").await;
             }
         }
 
