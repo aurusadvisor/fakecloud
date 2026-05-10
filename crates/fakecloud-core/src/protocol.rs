@@ -279,6 +279,19 @@ fn parse_localstack_prefix(prefix: &str) -> Option<RoutingHost> {
                 bucket: Some(bucket),
             })
         }
+        n if n >= 3 && labels[n - 2] == "s3-accesspoint" => {
+            let bucket = labels[..n - 2].join(".");
+            Some(RoutingHost {
+                service: "s3".to_string(),
+                region: labels[n - 1].to_string(),
+                bucket: Some(bucket),
+            })
+        }
+        n if n >= 3 && labels[n - 2] == "s3-control" => Some(RoutingHost {
+            service: "s3".to_string(),
+            region: labels[n - 1].to_string(),
+            bucket: None,
+        }),
         _ => None,
     }
 }
@@ -336,6 +349,34 @@ fn parse_aws_prefix(prefix: &str) -> Option<RoutingHost> {
             service: "s3".to_string(),
             region: "us-east-1".to_string(),
             bucket: Some(labels[..labels.len() - 1].join(".")),
+        });
+    }
+
+    // `s3-accesspoint.<region>` — path-style access point endpoint.
+    // `{alias}-{account-id}.s3-accesspoint.<region>` — virtual-hosted access point.
+    if last == "s3-accesspoint" {
+        if labels.len() == 2 {
+            return Some(RoutingHost {
+                service: "s3".to_string(),
+                region: labels[0].to_string(),
+                bucket: None,
+            });
+        }
+        let bucket = labels[..labels.len() - 2].join(".");
+        return Some(RoutingHost {
+            service: "s3".to_string(),
+            region: labels[labels.len() - 1].to_string(),
+            bucket: Some(bucket),
+        });
+    }
+
+    // `s3-control.<region>` or `{account-id}.s3-control.<region>` — S3
+    // Control endpoint (access point management).
+    if labels.len() >= 2 && labels[labels.len() - 2] == "s3-control" {
+        return Some(RoutingHost {
+            service: "s3".to_string(),
+            region: last.to_string(),
+            bucket: None,
         });
     }
 

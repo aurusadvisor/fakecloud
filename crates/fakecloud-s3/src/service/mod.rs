@@ -18,6 +18,7 @@ use base64::Engine as _;
 use crate::logging;
 use crate::state::{AclGrant, S3Bucket, S3Object, SharedS3State};
 
+mod access_points;
 mod acl;
 mod buckets;
 mod config;
@@ -227,6 +228,36 @@ impl AwsService for S3Service {
             }
         }
 
+        // Access point data plane: resolve alias -> bucket before routing.
+        access_points::resolve_access_point(self, &mut req)?;
+
+        let account_id = req.account_id.as_str();
+
+        // S3 Control endpoint (access point management).
+        let host = req
+            .headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let is_control = host.to_ascii_lowercase().contains("s3-control");
+        if is_control {
+            let v1 = req.path_segments.first().map(|s| s.as_str());
+            let v2 = req.path_segments.get(1).map(|s| s.as_str());
+            let v3 = req.path_segments.get(2).map(|s| s.as_str());
+            if v1 == Some("v20180820") && v2 == Some("accesspoint") {
+                if let Some(name) = v3 {
+                    match req.method {
+                        Method::PUT => return self.create_access_point(account_id, &req, name),
+                        Method::GET => return self.get_access_point(account_id, &req, name),
+                        Method::DELETE => return self.delete_access_point(account_id, &req, name),
+                        _ => {}
+                    }
+                } else if req.method == Method::GET {
+                    return self.list_access_points(account_id, &req);
+                }
+            }
+        }
+
         // S3 REST routing: method + path segments + query params
         let bucket = req.path_segments.first().map(|s| s.as_str());
         // Extract key from the raw path to preserve leading slashes and empty segments.
@@ -253,8 +284,6 @@ impl AwsService for S3Service {
         } else {
             None
         };
-
-        let account_id = req.account_id.as_str();
 
         // Multipart upload operations (checked before main match)
         if let Some(b) = bucket {

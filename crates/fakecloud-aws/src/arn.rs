@@ -40,6 +40,18 @@ impl Arn {
         }
     }
 
+    /// Create an S3 Access Point ARN.
+    /// Format: `arn:aws:s3:<region>:<account-id>:accesspoint/<name>`.
+    pub fn s3_access_point(region: &str, account_id: &str, name: &str) -> Self {
+        Self {
+            partition: partition_for(region).to_string(),
+            service: "s3".to_string(),
+            region: region.to_string(),
+            account_id: account_id.to_string(),
+            resource: format!("accesspoint/{name}"),
+        }
+    }
+
     /// Override the partition (default `aws`). Use for `aws-cn` / `aws-us-gov`.
     pub fn with_partition(mut self, partition: &str) -> Self {
         self.partition = partition.to_string();

@@ -3976,3 +3976,233 @@ async fn compute_checksum_streaming_supports_crc64nvme() {
     .unwrap();
     assert_eq!(decoded.len(), 8);
 }
+
+#[tokio::test]
+async fn access_point_control_plane_crud() {
+    let state: SharedS3State = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("000000000000", "us-east-1", ""),
+    ));
+    let delivery = Arc::new(fakecloud_core::delivery::DeliveryBus::new());
+    let service = crate::S3Service::new(state, delivery);
+
+    // Pre-create bucket.
+    let req = AwsRequest {
+        service: "s3".to_string(),
+        action: String::new(),
+        region: "us-east-1".to_string(),
+        account_id: "000000000000".to_string(),
+        request_id: "req-1".to_string(),
+        headers: http::HeaderMap::new(),
+        query_params: std::collections::HashMap::new(),
+        body: bytes::Bytes::new(),
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: vec!["ap-bucket".to_string()],
+        raw_path: "/ap-bucket".to_string(),
+        raw_query: String::new(),
+        method: http::Method::PUT,
+        is_query_protocol: false,
+        access_key_id: None,
+        principal: None,
+    };
+    service.handle(req).await.unwrap();
+
+    // Create access point.
+    let req = AwsRequest {
+        service: "s3".to_string(),
+        action: String::new(),
+        region: "us-east-1".to_string(),
+        account_id: "000000000000".to_string(),
+        request_id: "req-2".to_string(),
+        headers: {
+            let mut h = http::HeaderMap::new();
+            h.insert("host", "000000000000.s3-control.us-east-1.localhost.localstack.cloud:4566".parse().unwrap());
+            h
+        },
+        query_params: std::collections::HashMap::new(),
+        body: bytes::Bytes::from_static(b"<CreateAccessPointConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Bucket>ap-bucket</Bucket></CreateAccessPointConfiguration>"),
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: vec!["v20180820".to_string(), "accesspoint".to_string(), "my-ap".to_string()],
+        raw_path: "/v20180820/accesspoint/my-ap".to_string(),
+        raw_query: String::new(),
+        method: http::Method::PUT,
+        is_query_protocol: false,
+        access_key_id: None,
+        principal: None,
+    };
+    let resp = service.handle(req).await.unwrap();
+    assert_eq!(resp.status, http::StatusCode::OK);
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(body.contains("AccessPointArn"));
+    assert!(body.contains("my-ap-000000000000"));
+
+    // Get access point.
+    let req = AwsRequest {
+        service: "s3".to_string(),
+        action: String::new(),
+        region: "us-east-1".to_string(),
+        account_id: "000000000000".to_string(),
+        request_id: "req-3".to_string(),
+        headers: {
+            let mut h = http::HeaderMap::new();
+            h.insert(
+                "host",
+                "000000000000.s3-control.us-east-1.localhost.localstack.cloud:4566"
+                    .parse()
+                    .unwrap(),
+            );
+            h
+        },
+        query_params: std::collections::HashMap::new(),
+        body: bytes::Bytes::new(),
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: vec![
+            "v20180820".to_string(),
+            "accesspoint".to_string(),
+            "my-ap".to_string(),
+        ],
+        raw_path: "/v20180820/accesspoint/my-ap".to_string(),
+        raw_query: String::new(),
+        method: http::Method::GET,
+        is_query_protocol: false,
+        access_key_id: None,
+        principal: None,
+    };
+    let resp = service.handle(req).await.unwrap();
+    assert_eq!(resp.status, http::StatusCode::OK);
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(body.contains("my-ap"));
+    assert!(body.contains("ap-bucket"));
+
+    // List access points.
+    let req = AwsRequest {
+        service: "s3".to_string(),
+        action: String::new(),
+        region: "us-east-1".to_string(),
+        account_id: "000000000000".to_string(),
+        request_id: "req-4".to_string(),
+        headers: {
+            let mut h = http::HeaderMap::new();
+            h.insert(
+                "host",
+                "000000000000.s3-control.us-east-1.localhost.localstack.cloud:4566"
+                    .parse()
+                    .unwrap(),
+            );
+            h
+        },
+        query_params: std::collections::HashMap::new(),
+        body: bytes::Bytes::new(),
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: vec!["v20180820".to_string(), "accesspoint".to_string()],
+        raw_path: "/v20180820/accesspoint".to_string(),
+        raw_query: String::new(),
+        method: http::Method::GET,
+        is_query_protocol: false,
+        access_key_id: None,
+        principal: None,
+    };
+    let resp = service.handle(req).await.unwrap();
+    assert_eq!(resp.status, http::StatusCode::OK);
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(body.contains("my-ap"));
+
+    // Delete access point.
+    let req = AwsRequest {
+        service: "s3".to_string(),
+        action: String::new(),
+        region: "us-east-1".to_string(),
+        account_id: "000000000000".to_string(),
+        request_id: "req-5".to_string(),
+        headers: {
+            let mut h = http::HeaderMap::new();
+            h.insert(
+                "host",
+                "000000000000.s3-control.us-east-1.localhost.localstack.cloud:4566"
+                    .parse()
+                    .unwrap(),
+            );
+            h
+        },
+        query_params: std::collections::HashMap::new(),
+        body: bytes::Bytes::new(),
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: vec![
+            "v20180820".to_string(),
+            "accesspoint".to_string(),
+            "my-ap".to_string(),
+        ],
+        raw_path: "/v20180820/accesspoint/my-ap".to_string(),
+        raw_query: String::new(),
+        method: http::Method::DELETE,
+        is_query_protocol: false,
+        access_key_id: None,
+        principal: None,
+    };
+    let resp = service.handle(req).await.unwrap();
+    assert_eq!(resp.status, http::StatusCode::NO_CONTENT);
+}
+
+#[test]
+fn access_point_data_plane_routes_to_bucket() {
+    let state: SharedS3State = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("000000000000", "us-east-1", ""),
+    ));
+    let delivery = Arc::new(fakecloud_core::delivery::DeliveryBus::new());
+    let service = crate::S3Service::new(state.clone(), delivery);
+
+    // Create bucket and access point directly in state.
+    {
+        let mut st = state.write();
+        let s3_st = st.get_or_create("000000000000");
+        s3_st.buckets.insert(
+            "ap-data-bucket".to_string(),
+            crate::state::S3Bucket::new("ap-data-bucket", "us-east-1", "000000000000"),
+        );
+        s3_st.access_points.insert(
+            "data-ap".to_string(),
+            crate::state::S3AccessPoint {
+                name: "data-ap".to_string(),
+                bucket: "ap-data-bucket".to_string(),
+                account_id: "000000000000".to_string(),
+                network_origin: "Internet".to_string(),
+                vpc_configuration: None,
+                creation_date: chrono::Utc::now(),
+                public_access_block: None,
+                bucket_account_id: Some("000000000000".to_string()),
+            },
+        );
+    }
+
+    let mut req = AwsRequest {
+        service: "s3".to_string(),
+        action: String::new(),
+        region: "us-east-1".to_string(),
+        account_id: "000000000000".to_string(),
+        request_id: "req-1".to_string(),
+        headers: {
+            let mut h = http::HeaderMap::new();
+            h.insert(
+                "host",
+                "data-ap-000000000000.s3-accesspoint.us-east-1.localhost.localstack.cloud:4566"
+                    .parse()
+                    .unwrap(),
+            );
+            h
+        },
+        query_params: std::collections::HashMap::new(),
+        body: bytes::Bytes::new(),
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: vec!["data-ap-000000000000".to_string(), "key.txt".to_string()],
+        raw_path: "/data-ap-000000000000/key.txt".to_string(),
+        raw_query: String::new(),
+        method: http::Method::GET,
+        is_query_protocol: false,
+        access_key_id: None,
+        principal: None,
+    };
+
+    crate::service::access_points::resolve_access_point(&service, &mut req).unwrap();
+
+    assert_eq!(req.path_segments[0], "ap-data-bucket");
+    assert_eq!(req.raw_path, "/ap-data-bucket/key.txt");
+}
