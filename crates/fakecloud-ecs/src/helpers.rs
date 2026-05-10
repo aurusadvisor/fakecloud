@@ -439,6 +439,9 @@ pub(crate) fn task_to_json(task: &Task) -> Value {
     if let Some(ref v) = task.group {
         map.insert("group".into(), json!(v));
     }
+    if let Some(ref v) = task.task_set_arn {
+        map.insert("taskSetArn".into(), json!(v));
+    }
     map.insert("connectivity".into(), json!(task.connectivity));
     if let Some(ref v) = task.stop_code {
         map.insert("stopCode".into(), json!(v));
@@ -668,6 +671,7 @@ pub(crate) fn spawn_service_tasks(
     count: i32,
     principal_arn: &str,
     launch_type: &str,
+    task_set_arn: Option<String>,
 ) -> Vec<String> {
     if count <= 0 {
         return Vec::new();
@@ -812,6 +816,7 @@ pub(crate) fn spawn_service_tasks(
             enable_execute_command: service_exec,
             attachments: Vec::new(),
             volume_configurations: Vec::new(),
+            task_set_arn: task_set_arn.clone(),
         };
         state.tasks.insert(task_id.clone(), task);
         if let Some(cluster) = state.clusters.get_mut(&cluster_name) {
@@ -978,6 +983,7 @@ pub(crate) fn spawn_daemon_tasks(
             enable_execute_command: daemon_exec,
             attachments: Vec::new(),
             volume_configurations: Vec::new(),
+            task_set_arn: None,
         };
         state.tasks.insert(task_id.clone(), task);
         if let Some(cluster) = state.clusters.get_mut(&cluster_name) {
@@ -1017,6 +1023,23 @@ pub(crate) fn recompute_service_counts(
     if let Some(map) = service_json.as_object_mut() {
         map.insert("runningCount".into(), json!(running));
         map.insert("pendingCount".into(), json!(pending));
+    }
+}
+
+pub(crate) fn inject_service_task_sets(
+    state: &EcsState,
+    service_name: &str,
+    cluster_name: &str,
+    service_json: &mut Value,
+) {
+    let sets: Vec<Value> = state
+        .task_sets
+        .values()
+        .filter(|ts| ts.service_name == service_name && ts.cluster_name == cluster_name)
+        .map(task_set_to_json)
+        .collect();
+    if let Some(map) = service_json.as_object_mut() {
+        map.insert("taskSets".into(), Value::Array(sets));
     }
 }
 

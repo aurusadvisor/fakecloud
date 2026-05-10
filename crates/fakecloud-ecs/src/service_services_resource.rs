@@ -140,22 +140,27 @@ impl EcsService {
                     return Err(service_already_exists(&service_name));
                 }
             }
-            let deployment = Deployment {
-                deployment_id: format!(
-                    "ecs-svc/{}",
-                    uuid::Uuid::new_v4().as_u128() & 0xffff_ffff_ffff_ffff
-                ),
-                status: "PRIMARY".into(),
-                task_definition_arn: td_arn.clone(),
-                desired_count,
-                pending_count: 0,
-                running_count: 0,
-                failed_tasks: 0,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-                launch_type: launch_type.clone(),
-                rollout_state: "IN_PROGRESS".into(),
-                rollout_state_reason: Some("ECS deployment in progress.".into()),
+            let is_code_deploy = deployment_controller == "CODE_DEPLOY";
+            let deployments = if is_code_deploy {
+                Vec::new()
+            } else {
+                vec![Deployment {
+                    deployment_id: format!(
+                        "ecs-svc/{}",
+                        uuid::Uuid::new_v4().as_u128() & 0xffff_ffff_ffff_ffff
+                    ),
+                    status: "PRIMARY".into(),
+                    task_definition_arn: td_arn.clone(),
+                    desired_count,
+                    pending_count: 0,
+                    running_count: 0,
+                    failed_tasks: 0,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    launch_type: launch_type.clone(),
+                    rollout_state: "IN_PROGRESS".into(),
+                    rollout_state_reason: Some("ECS deployment in progress.".into()),
+                }]
             };
             let service = Service {
                 service_name: service_name.clone(),
@@ -171,13 +176,13 @@ impl EcsService {
                 launch_type: launch_type.clone(),
                 status: "ACTIVE".into(),
                 scheduling_strategy: scheduling,
-                deployment_controller,
+                deployment_controller: deployment_controller.clone(),
                 minimum_healthy_percent: min_healthy,
                 maximum_percent: max_percent,
                 circuit_breaker,
-                deployments: vec![deployment],
-                load_balancers,
-                service_registries,
+                deployments,
+                load_balancers: load_balancers.clone(),
+                service_registries: service_registries.clone(),
                 placement_constraints,
                 placement_strategy,
                 network_configuration,
@@ -206,9 +211,54 @@ impl EcsService {
                 last_status: Some("ACTIVE".into()),
                 detail: json!({"serviceArn": service_arn, "desiredCount": desired_count}),
             });
-            let ids =
-                spawn_service_tasks(state, &service, desired_count, &principal_arn, &launch_type);
-            (service_to_json(state.services.get(&key).unwrap()), ids)
+            let ids = spawn_service_tasks(
+                state,
+                &service,
+                desired_count,
+                &principal_arn,
+                &launch_type,
+                None,
+            );
+            if is_code_deploy {
+                let ts_id = uuid::Uuid::new_v4().to_string().replace('-', "");
+                let ts_arn = format!(
+                    "arn:aws:ecs:{}:{}:task-set/{}/{}/{}",
+                    state.region, state.account_id, cluster_name, service_name, ts_id
+                );
+                let task_set = TaskSet {
+                    task_set_id: ts_id,
+                    task_set_arn: ts_arn.clone(),
+                    service_arn: service_arn.clone(),
+                    cluster_arn: service.cluster_arn.clone(),
+                    service_name: service_name.clone(),
+                    cluster_name: cluster_name.clone(),
+                    external_id: None,
+                    status: "PRIMARY".into(),
+                    task_definition: service.task_definition_arn.clone(),
+                    computed_desired_count: desired_count,
+                    pending_count: ids.len() as i32,
+                    running_count: 0,
+                    launch_type: Some(launch_type.clone()),
+                    platform_version: Some("1.4.0".into()),
+                    scale: None,
+                    stability_status: "STABILIZING".into(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    load_balancers: service.load_balancers.clone(),
+                    service_registries: service.service_registries.clone(),
+                    capacity_provider_strategy: service.capacity_provider_strategy.clone(),
+                    tags: Vec::new(),
+                };
+                state.task_sets.insert(
+                    format!("{}/{}/{}", cluster_name, service_name, task_set.task_set_id),
+                    task_set,
+                );
+            }
+            let mut service_json = service_to_json(state.services.get(&key).unwrap());
+            if is_code_deploy {
+                inject_service_task_sets(state, &service_name, &cluster_name, &mut service_json);
+            }
+            (service_json, ids)
         };
 
         if let Some(rt) = runtime {
@@ -315,152 +365,279 @@ impl EcsService {
                 if let Some(n) = new_desired {
                     let n = n.max(0) as i32;
                     svc.desired_count = n;
-                    if let Some(d) = svc.deployments.iter_mut().find(|d| d.status == "PRIMARY") {
-                        d.desired_count = n;
-                        d.updated_at = Utc::now();
+                    if svc.deployment_controller != "CODE_DEPLOY" {
+                        if let Some(d) = svc.deployments.iter_mut().find(|d| d.status == "PRIMARY")
+                        {
+                            d.desired_count = n;
+                            d.updated_at = Utc::now();
+                        }
                     }
                 }
 
                 if let Some(arn) = new_td_arn.clone() {
-                    // Roll a new PRIMARY deployment; mark the previous one ACTIVE
-                    // so it's eligible for drain once the new deployment ramps.
-                    for d in svc.deployments.iter_mut() {
-                        if d.status == "PRIMARY" {
-                            d.status = "ACTIVE".into();
-                            old_deployments_drained.push(d.deployment_id.clone());
-                        }
-                    }
-                    svc.deployments.insert(
-                        0,
-                        Deployment {
-                            deployment_id: format!(
-                                "ecs-svc/{}",
-                                uuid::Uuid::new_v4().as_u128() & 0xffff_ffff_ffff_ffff
-                            ),
-                            status: "PRIMARY".into(),
-                            task_definition_arn: arn.clone(),
-                            desired_count: svc.desired_count,
-                            pending_count: 0,
-                            running_count: 0,
-                            failed_tasks: 0,
-                            created_at: Utc::now(),
-                            updated_at: Utc::now(),
-                            launch_type: svc.launch_type.clone(),
-                            rollout_state: "IN_PROGRESS".into(),
-                            rollout_state_reason: Some("ECS deployment in progress.".into()),
-                        },
-                    );
                     svc.task_definition_arn = arn;
                     svc.family = new_family;
                     svc.revision = new_revision;
                     new_deployment_triggered = true;
+                    if svc.deployment_controller != "CODE_DEPLOY" {
+                        // Roll a new PRIMARY deployment; mark the previous one ACTIVE
+                        // so it's eligible for drain once the new deployment ramps.
+                        for d in svc.deployments.iter_mut() {
+                            if d.status == "PRIMARY" {
+                                d.status = "ACTIVE".into();
+                                old_deployments_drained.push(d.deployment_id.clone());
+                            }
+                        }
+                        svc.deployments.insert(
+                            0,
+                            Deployment {
+                                deployment_id: format!(
+                                    "ecs-svc/{}",
+                                    uuid::Uuid::new_v4().as_u128() & 0xffff_ffff_ffff_ffff
+                                ),
+                                status: "PRIMARY".into(),
+                                task_definition_arn: svc.task_definition_arn.clone(),
+                                desired_count: svc.desired_count,
+                                pending_count: 0,
+                                running_count: 0,
+                                failed_tasks: 0,
+                                created_at: Utc::now(),
+                                updated_at: Utc::now(),
+                                launch_type: svc.launch_type.clone(),
+                                rollout_state: "IN_PROGRESS".into(),
+                                rollout_state_reason: Some("ECS deployment in progress.".into()),
+                            },
+                        );
+                    }
                 }
 
                 effective_desired = svc.desired_count;
             }
 
+            let controller = state
+                .services
+                .get(&key)
+                .unwrap()
+                .deployment_controller
+                .clone();
+            let primary_ts_arn = if controller == "CODE_DEPLOY" {
+                state
+                    .task_sets
+                    .values()
+                    .find(|ts| {
+                        ts.service_name == service_name
+                            && ts.cluster_name == cluster_name
+                            && ts.status == "PRIMARY"
+                    })
+                    .map(|ts| ts.task_set_arn.clone())
+            } else {
+                None
+            };
+
             // Compute spawn + stop plan.
             let mut spawn: Vec<String> = Vec::new();
             let mut stop: Vec<String> = Vec::new();
 
-            // Tasks belonging to this service (by startedBy convention).
-            // Track per-task protection so scale-down skips protected ones
-            // (UpdateTaskProtection). Real AWS only terminates a protected
-            // task when nothing else is eligible.
             let service_tag = format!("ecs-svc/{}", service_name);
             let now = Utc::now();
-            let current_tasks: Vec<(String, String, bool)> = state
-                .tasks
-                .iter()
-                .filter(|(_, t)| {
-                    t.started_by.as_deref() == Some(service_tag.as_str())
-                        && t.cluster_name == cluster_name
-                        && t.last_status != "STOPPED"
-                })
-                .map(|(id, t)| {
-                    let protected = t
-                        .protection
-                        .as_ref()
-                        .filter(|p| p.enabled && p.expiration.is_none_or(|exp| exp > now))
-                        .is_some();
-                    (id.clone(), t.task_definition_arn.clone(), protected)
-                })
-                .collect();
 
-            let current_count = current_tasks.len() as i32;
-            if effective_desired > current_count {
-                let add = (effective_desired - current_count) as usize;
-                let svc_snapshot = state.services.get(&key).unwrap().clone();
-                let mut new_ids = spawn_service_tasks(
-                    state,
-                    &svc_snapshot,
-                    add as i32,
-                    &principal_arn,
-                    &launch_type_clone,
-                );
-                spawn.append(&mut new_ids);
-            } else if effective_desired < current_count {
-                let mut remove = (current_count - effective_desired) as usize;
-                // First pass: drain unprotected tasks. Only fall back to
-                // protected ones when there's nothing else left to stop.
-                for (id, _, protected) in current_tasks.iter() {
-                    if remove == 0 {
-                        break;
-                    }
-                    if !*protected {
-                        stop.push(id.clone());
-                        remove -= 1;
-                    }
-                }
-                if remove > 0 {
-                    for (id, _, protected) in current_tasks.iter() {
-                        if remove == 0 {
-                            break;
-                        }
-                        if *protected && !stop.contains(id) {
-                            stop.push(id.clone());
-                            remove -= 1;
-                        }
-                    }
-                }
-            }
-
-            // If a new deployment was triggered, also stop tasks still on
-            // the old task definition so the new deployment can ramp up,
-            // then spawn replacements — but only enough to hit the
-            // effective desired count (not `stop.len()`, which conflates
-            // scale-down drain with TD-drain and would over-spawn).
-            if new_deployment_triggered {
+            if new_deployment_triggered && controller == "CODE_DEPLOY" {
                 let new_td_arn_match = state
                     .services
                     .get(&key)
                     .unwrap()
                     .task_definition_arn
                     .clone();
-                // Tasks already on the new task definition that we're NOT
-                // stopping (scale-down may have picked the first N; those
-                // are skipped here via `stop.contains(id)`).
-                let kept_on_new_td: i32 = current_tasks
-                    .iter()
-                    .filter(|(id, t_arn, _)| *t_arn == new_td_arn_match && !stop.contains(id))
-                    .count() as i32;
-                for (id, t_arn, protected) in &current_tasks {
-                    if *t_arn != new_td_arn_match && !stop.contains(id) && !*protected {
+
+                // Create new ACTIVE task set with the new TD
+                let ts_id = uuid::Uuid::new_v4().to_string().replace('-', "");
+                let ts_arn = format!(
+                    "arn:aws:ecs:{}:{}:task-set/{}/{}/{}",
+                    state.region, state.account_id, cluster_name, service_name, ts_id
+                );
+                let svc_snapshot = state.services.get(&key).unwrap().clone();
+                let task_set = TaskSet {
+                    task_set_id: ts_id,
+                    task_set_arn: ts_arn.clone(),
+                    service_arn: svc_snapshot.service_arn.clone(),
+                    cluster_arn: svc_snapshot.cluster_arn.clone(),
+                    service_name: service_name.clone(),
+                    cluster_name: cluster_name.clone(),
+                    external_id: None,
+                    status: "ACTIVE".into(),
+                    task_definition: new_td_arn_match.clone(),
+                    computed_desired_count: 0,
+                    pending_count: 0,
+                    running_count: 0,
+                    launch_type: Some(launch_type_clone.clone()),
+                    platform_version: Some("1.4.0".into()),
+                    scale: None,
+                    stability_status: "STABILIZING".into(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    load_balancers: svc_snapshot.load_balancers.clone(),
+                    service_registries: svc_snapshot.service_registries.clone(),
+                    capacity_provider_strategy: svc_snapshot.capacity_provider_strategy.clone(),
+                    tags: Vec::new(),
+                };
+                state.task_sets.insert(
+                    format!("{}/{}/{}", cluster_name, service_name, task_set.task_set_id),
+                    task_set.clone(),
+                );
+
+                // Spawn tasks for the new task set
+                let mut new_ids = spawn_service_tasks(
+                    state,
+                    &svc_snapshot,
+                    effective_desired,
+                    &principal_arn,
+                    &launch_type_clone,
+                    Some(ts_arn.clone()),
+                );
+                spawn.append(&mut new_ids);
+
+                // Flip PRIMARY: demote old PRIMARY to ACTIVE with computed_desired_count=0
+                if let Some(old_ts) = state.task_sets.values_mut().find(|ts| {
+                    ts.service_name == service_name
+                        && ts.cluster_name == cluster_name
+                        && ts.status == "PRIMARY"
+                }) {
+                    old_ts.status = "ACTIVE".into();
+                    old_ts.computed_desired_count = 0;
+                    old_ts.updated_at = Utc::now();
+                }
+
+                // Promote new task set to PRIMARY
+                if let Some(new_ts) = state.task_sets.get_mut(&format!(
+                    "{}/{}/{}",
+                    cluster_name, service_name, task_set.task_set_id
+                )) {
+                    new_ts.status = "PRIMARY".into();
+                    new_ts.computed_desired_count = effective_desired;
+                    new_ts.updated_at = Utc::now();
+                }
+
+                // Stop ALL old tasks
+                for (id, task) in state.tasks.iter() {
+                    if task.started_by.as_deref() == Some(service_tag.as_str())
+                        && task.cluster_name == cluster_name
+                        && task.task_definition_arn != new_td_arn_match
+                        && !stop.contains(id)
+                    {
                         stop.push(id.clone());
                     }
                 }
-                let already_spawned = spawn.len() as i32;
-                let need = (effective_desired - kept_on_new_td - already_spawned).max(0);
-                if need > 0 {
+            } else {
+                // Tasks belonging to this service (by startedBy convention).
+                // Track per-task protection so scale-down skips protected ones
+                // (UpdateTaskProtection). Real AWS only terminates a protected
+                // task when nothing else is eligible.
+                let current_tasks: Vec<(String, String, bool)> = state
+                    .tasks
+                    .iter()
+                    .filter(|(_, t)| {
+                        t.started_by.as_deref() == Some(service_tag.as_str())
+                            && t.cluster_name == cluster_name
+                            && t.last_status != "STOPPED"
+                    })
+                    .map(|(id, t)| {
+                        let protected = t
+                            .protection
+                            .as_ref()
+                            .filter(|p| p.enabled && p.expiration.is_none_or(|exp| exp > now))
+                            .is_some();
+                        (id.clone(), t.task_definition_arn.clone(), protected)
+                    })
+                    .collect();
+
+                let current_count = current_tasks.len() as i32;
+                if effective_desired > current_count {
+                    let add = (effective_desired - current_count) as usize;
                     let svc_snapshot = state.services.get(&key).unwrap().clone();
-                    let mut more = spawn_service_tasks(
+                    let mut new_ids = spawn_service_tasks(
                         state,
                         &svc_snapshot,
-                        need,
+                        add as i32,
                         &principal_arn,
                         &launch_type_clone,
+                        primary_ts_arn.clone(),
                     );
-                    spawn.append(&mut more);
+                    spawn.append(&mut new_ids);
+                } else if effective_desired < current_count {
+                    let mut remove = (current_count - effective_desired) as usize;
+                    // First pass: drain unprotected tasks. Only fall back to
+                    // protected ones when there's nothing else left to stop.
+                    for (id, _, protected) in current_tasks.iter() {
+                        if remove == 0 {
+                            break;
+                        }
+                        if !*protected {
+                            stop.push(id.clone());
+                            remove -= 1;
+                        }
+                    }
+                    if remove > 0 {
+                        for (id, _, protected) in current_tasks.iter() {
+                            if remove == 0 {
+                                break;
+                            }
+                            if *protected && !stop.contains(id) {
+                                stop.push(id.clone());
+                                remove -= 1;
+                            }
+                        }
+                    }
+                }
+
+                // If a new deployment was triggered, also stop tasks still on
+                // the old task definition so the new deployment can ramp up,
+                // then spawn replacements — but only enough to hit the
+                // effective desired count (not `stop.len()`, which conflates
+                // scale-down drain with TD-drain and would over-spawn).
+                if new_deployment_triggered {
+                    let new_td_arn_match = state
+                        .services
+                        .get(&key)
+                        .unwrap()
+                        .task_definition_arn
+                        .clone();
+                    // Tasks already on the new task definition that we're NOT
+                    // stopping (scale-down may have picked the first N; those
+                    // are skipped here via `stop.contains(id)`).
+                    let kept_on_new_td: i32 = current_tasks
+                        .iter()
+                        .filter(|(id, t_arn, _)| *t_arn == new_td_arn_match && !stop.contains(id))
+                        .count() as i32;
+                    for (id, t_arn, protected) in &current_tasks {
+                        if *t_arn != new_td_arn_match && !stop.contains(id) && !*protected {
+                            stop.push(id.clone());
+                        }
+                    }
+                    let already_spawned = spawn.len() as i32;
+                    let need = (effective_desired - kept_on_new_td - already_spawned).max(0);
+                    if need > 0 {
+                        let svc_snapshot = state.services.get(&key).unwrap().clone();
+                        let mut more = spawn_service_tasks(
+                            state,
+                            &svc_snapshot,
+                            need,
+                            &principal_arn,
+                            &launch_type_clone,
+                            primary_ts_arn.clone(),
+                        );
+                        spawn.append(&mut more);
+                    }
+                }
+            }
+
+            if controller == "CODE_DEPLOY" && !new_deployment_triggered {
+                if let Some(ts) = state.task_sets.values_mut().find(|ts| {
+                    ts.service_name == service_name
+                        && ts.cluster_name == cluster_name
+                        && ts.status == "PRIMARY"
+                }) {
+                    ts.computed_desired_count = effective_desired;
+                    ts.updated_at = Utc::now();
                 }
             }
 
@@ -480,7 +657,11 @@ impl EcsService {
             });
 
             let svc = state.services.get(&key).unwrap();
-            (service_to_json(svc), spawn, stop)
+            let mut service_json = service_to_json(svc);
+            if controller == "CODE_DEPLOY" {
+                inject_service_task_sets(state, &service_name, &cluster_name, &mut service_json);
+            }
+            (service_json, spawn, stop)
         };
 
         // Always flip desired_status for tasks we plan to stop.
@@ -560,7 +741,7 @@ impl EcsService {
         let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
         let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
 
-        let (snapshot, task_ids_to_stop) = {
+        let (snapshot, task_ids_to_stop, task_sets_for_response) = {
             let mut accounts = self.state.write();
             let state = accounts
                 .get_mut(&request.account_id)
@@ -595,6 +776,18 @@ impl EcsService {
                 }
             }
             let svc_snapshot = state.services.get(&key).unwrap().clone();
+            let mut task_sets_for_response = Vec::new();
+            if svc_snapshot.deployment_controller == "CODE_DEPLOY" {
+                task_sets_for_response = state
+                    .task_sets
+                    .values()
+                    .filter(|ts| ts.service_name == service_name && ts.cluster_name == cluster_name)
+                    .map(task_set_to_json)
+                    .collect();
+                state.task_sets.retain(|_, ts| {
+                    ts.service_name != service_name || ts.cluster_name != cluster_name
+                });
+            }
             state.services.remove(&key);
             state.push_event(crate::state::LifecycleEvent {
                 at: Utc::now(),
@@ -604,7 +797,7 @@ impl EcsService {
                 last_status: Some("DRAINING".into()),
                 detail: json!({"serviceArn": svc_snapshot.service_arn}),
             });
-            (svc_snapshot, stop_ids)
+            (svc_snapshot, stop_ids, task_sets_for_response)
         };
 
         for id in &task_ids_to_stop {
@@ -635,9 +828,13 @@ impl EcsService {
             }
         }
 
-        Ok(AwsResponse::ok_json(
-            json!({ "service": service_to_json(&snapshot) }),
-        ))
+        let mut resp = json!({ "service": service_to_json(&snapshot) });
+        if !task_sets_for_response.is_empty() {
+            resp.as_object_mut()
+                .unwrap()
+                .insert("taskSets".into(), json!(task_sets_for_response));
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(super) fn describe_services(
@@ -677,6 +874,7 @@ impl EcsService {
                     let mut v = service_to_json(svc);
                     // Update derived running/pending counts from current tasks.
                     recompute_service_counts(state, &name, &cluster_name, &mut v);
+                    inject_service_task_sets(state, &name, &cluster_name, &mut v);
                     found.push(v);
                 }
                 None => failures.push(json!({"arn": r, "reason": "MISSING"})),

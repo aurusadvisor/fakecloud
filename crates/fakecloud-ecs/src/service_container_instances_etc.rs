@@ -637,10 +637,13 @@ impl EcsService {
             .services
             .get(&service_key)
             .ok_or_else(|| service_not_found(&service_name))?;
-        if svc.deployment_controller != "EXTERNAL" {
+        if !matches!(
+            svc.deployment_controller.as_str(),
+            "EXTERNAL" | "CODE_DEPLOY"
+        ) {
             return Err(client_exception(
                 "CreateTaskSet requires the service to be created with \
-                 deploymentController.type = EXTERNAL",
+                 deploymentController.type = EXTERNAL or CODE_DEPLOY",
             ));
         }
         let ts_id = format!("ecs-svc-{}", uuid::Uuid::new_v4().simple());

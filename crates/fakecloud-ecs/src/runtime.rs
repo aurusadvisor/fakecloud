@@ -2644,6 +2644,7 @@ mod tests {
             enable_execute_command: false,
             attachments: Vec::new(),
             volume_configurations: Vec::new(),
+            task_set_arn: None,
         }
     }
 
