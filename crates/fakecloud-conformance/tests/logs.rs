@@ -1122,12 +1122,48 @@ async fn logs_deletion_protection() {
 #[test_action("logs", "GetLogRecord", checksum = "f45a109e")]
 #[tokio::test]
 async fn logs_get_log_record() {
+    use base64::Engine;
+
     let server = TestServer::start().await;
     let client = server.logs_client().await;
 
+    // Seed a real log group + stream + event so the pointer resolves.
+    client
+        .create_log_group()
+        .log_group_name("/cf/getrec")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_log_stream()
+        .log_group_name("/cf/getrec")
+        .log_stream_name("s1")
+        .send()
+        .await
+        .unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    client
+        .put_log_events()
+        .log_group_name("/cf/getrec")
+        .log_stream_name("s1")
+        .log_events(
+            aws_sdk_cloudwatchlogs::types::InputLogEvent::builder()
+                .timestamp(now_ms)
+                .message("conformance")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let pointer = base64::engine::general_purpose::STANDARD.encode(b"/cf/getrec|s1|0");
     let resp = client
         .get_log_record()
-        .log_record_pointer("some-pointer")
+        .log_record_pointer(pointer)
         .send()
         .await
         .unwrap();

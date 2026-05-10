@@ -2392,17 +2392,61 @@ async fn logs_deletion_protection() {
 
 #[tokio::test]
 async fn logs_get_log_record() {
+    use base64::Engine;
+
     let server = TestServer::start().await;
     let client = server.logs_client().await;
 
-    let resp = client
-        .get_log_record()
-        .log_record_pointer("some-pointer")
+    // Seed a log group + stream + JSON event so we can resolve a real pointer.
+    client
+        .create_log_group()
+        .log_group_name("/test/getrec")
         .send()
         .await
         .unwrap();
-    // Returns a (possibly empty) map of fields
-    let _ = resp.log_record();
+    client
+        .create_log_stream()
+        .log_group_name("/test/getrec")
+        .log_stream_name("s1")
+        .send()
+        .await
+        .unwrap();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    client
+        .put_log_events()
+        .log_group_name("/test/getrec")
+        .log_stream_name("s1")
+        .log_events(
+            aws_sdk_cloudwatchlogs::types::InputLogEvent::builder()
+                .timestamp(now_ms)
+                .message("{\"level\":\"info\",\"msg\":\"hi\"}")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let pointer = base64::engine::general_purpose::STANDARD.encode(b"/test/getrec|s1|0");
+    let resp = client
+        .get_log_record()
+        .log_record_pointer(pointer)
+        .send()
+        .await
+        .unwrap();
+    let record = resp.log_record().expect("log_record present");
+    assert_eq!(record.get("@logStream").map(String::as_str), Some("s1"));
+    assert_eq!(record.get("level").map(String::as_str), Some("info"));
+
+    // Non-fakecloud-issued pointer rejected with InvalidParameterException.
+    let err = client
+        .get_log_record()
+        .log_record_pointer("not-base64")
+        .send()
+        .await
+        .expect_err("expected InvalidParameterException");
+    let svc_err = err.into_service_error();
+    assert_eq!(svc_err.meta().code(), Some("InvalidParameterException"));
 }
 
 // ---- Cross-service integrations: CloudWatch Logs → Lambda ----
