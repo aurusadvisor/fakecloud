@@ -66,6 +66,16 @@ impl EcsService {
         let launch_type = opt_str(&body, "launchType")
             .unwrap_or("FARGATE")
             .to_string();
+        let placement_constraints: Vec<Value> = body
+            .get("placementConstraints")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let placement_strategy: Vec<Value> = body
+            .get("placementStrategy")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         let count = body
             .get("count")
             .and_then(|v| v.as_i64())
@@ -237,7 +247,7 @@ impl EcsService {
                 .and_then(|item| item.get("capacityProvider"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            let task = Task {
+            let mut task = Task {
                 task_arn: task_arn.clone(),
                 task_id: task_id.clone(),
                 cluster_arn: cluster_arn.clone(),
@@ -245,6 +255,7 @@ impl EcsService {
                 task_definition_arn: td_arn.clone(),
                 family: td_family.clone(),
                 revision: td_revision,
+                container_instance_arn: None,
                 capacity_provider_name,
                 last_status: "PROVISIONING".into(),
                 desired_status: "RUNNING".into(),
@@ -288,6 +299,27 @@ impl EcsService {
                 volume_configurations: volume_configurations.clone(),
                 task_set_arn: None,
             };
+            // Best-effort placement for EC2 / EXTERNAL launch types.
+            if launch_type != "FARGATE" {
+                if let Some(arn) = crate::placement::select_container_instance(
+                    state,
+                    &cluster_name,
+                    &placement_constraints,
+                    &placement_strategy,
+                    task.group.as_deref(),
+                    &td_arn,
+                    &launch_type,
+                ) {
+                    task.container_instance_arn = Some(arn.clone());
+                    if let Some(ci) = state
+                        .container_instances
+                        .values_mut()
+                        .find(|ci| ci.container_instance_arn == arn)
+                    {
+                        ci.pending_tasks_count += 1;
+                    }
+                }
+            }
             state.tasks.insert(task_id.clone(), task.clone());
             if let Some(cluster) = state.clusters.get_mut(&cluster_name) {
                 cluster.pending_tasks_count += 1;
@@ -647,6 +679,7 @@ mod multi_container_tests {
                 .into(),
             family: "multi".into(),
             revision: 1,
+            container_instance_arn: None,
             capacity_provider_name: None,
             last_status: "RUNNING".into(),
             desired_status: "RUNNING".into(),
@@ -887,6 +920,7 @@ mod port_mapping_tests {
             task_definition_arn: "arn:aws:ecs:us-east-1:000000000000:task-definition/web:1".into(),
             family: "web".into(),
             revision: 1,
+            container_instance_arn: None,
             capacity_provider_name: None,
             last_status: "PENDING".into(),
             desired_status: "RUNNING".into(),
