@@ -79,6 +79,14 @@ routes encryption through that key instead. KMS calls land in
 `/_fakecloud/kms/usage` with the `PARAMETER_ARN` encryption context, so tests
 can assert that a parameter's plaintext is never persisted.
 
+`PutParameter` hard-fails when the KMS `Encrypt` call is rejected — a denied
+key policy, a disabled CMK, or a missing key all surface as
+`KMSInternalException` (with the underlying KMS error in the message) and the
+SecureString parameter is never stored. This matches real SSM behavior and
+prevents a silent fallback to plaintext storage when an explicit `KeyId` is
+unreachable; tests can flip the CMK state via the KMS admin endpoints and
+assert that the subsequent `PutParameter` errors rather than persisting.
+
 ## Limitations
 
 - `StartSession` returns a clear `501 Not Implemented` with a documentation pointer rather than opening a real websocket. The Session Manager data plane is not implemented; tests that depend on live port-forwarding should use the `POST /_fakecloud/ssm/sessions/{id}/inject` admin endpoint to simulate a websocket session.

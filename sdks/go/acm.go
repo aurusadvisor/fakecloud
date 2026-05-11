@@ -55,3 +55,40 @@ func (c *ACMClient) ApproveCertificate(ctx context.Context, arnOrID string) erro
 	path := fmt.Sprintf("/_fakecloud/acm/certificates/%s/approve", id)
 	return c.fc.doPost(ctx, path, nil, nil)
 }
+
+// CertificateChainInfo is the shape returned by GetCertificateChainInfo.
+//
+// fakecloud is not a PKI: ExternalCaValidated is always false,
+// documenting that imported chains are stored verbatim rather than
+// verified against a real trust store. The byte/block counts let
+// callers confirm the PEM they uploaded round-trips intact.
+type CertificateChainInfo struct {
+	CertificateArn       string `json:"certificate_arn"`
+	CertificatePemBytes  int    `json:"certificate_pem_bytes"`
+	CertificatePemBlocks int    `json:"certificate_pem_blocks"`
+	ChainPemBytes        int    `json:"chain_pem_bytes"`
+	ChainPemBlocks       int    `json:"chain_pem_blocks"`
+	ExternalCaValidated  bool   `json:"external_ca_validated"`
+	Status               string `json:"status"`
+	CertType             string `json:"cert_type"`
+}
+
+// GetCertificateChainInfo inspects a stored certificate's PEM block
+// counts and byte sizes. arnOrID accepts either the full ACM ARN or
+// just the trailing UUID. Use this to confirm uploaded chains
+// round-trip intact, especially for ImportCertificate flows.
+func (c *ACMClient) GetCertificateChainInfo(
+	ctx context.Context,
+	arnOrID string,
+) (*CertificateChainInfo, error) {
+	id := arnOrID
+	if idx := strings.LastIndex(arnOrID, "certificate/"); idx >= 0 {
+		id = arnOrID[idx+len("certificate/"):]
+	}
+	path := fmt.Sprintf("/_fakecloud/acm/certificates/%s/chain-info", id)
+	var out CertificateChainInfo
+	if err := c.fc.doGet(ctx, path, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

@@ -2,6 +2,7 @@ package dev.fakecloud;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.util.List;
 import java.util.Map;
@@ -765,4 +766,23 @@ public final class Types {
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record LogsAnomalyInjectResponse(String anomalyId) {}
+
+    /**
+     * Response from {@code GET /_fakecloud/acm/certificates/{arn-or-id}/chain-info}.
+     *
+     * <p>fakecloud is not a PKI: {@code externalCaValidated} is always
+     * {@code false}, documenting that imported chains are stored verbatim
+     * rather than verified against a real trust store. The byte/block
+     * counts let callers confirm the PEM they uploaded round-trips intact.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record AcmCertificateChainInfo(
+            @JsonProperty("certificate_arn") String certificateArn,
+            @JsonProperty("certificate_pem_bytes") int certificatePemBytes,
+            @JsonProperty("certificate_pem_blocks") int certificatePemBlocks,
+            @JsonProperty("chain_pem_bytes") int chainPemBytes,
+            @JsonProperty("chain_pem_blocks") int chainPemBlocks,
+            @JsonProperty("external_ca_validated") boolean externalCaValidated,
+            @JsonProperty("status") String status,
+            @JsonProperty("cert_type") String certType) {}
 }

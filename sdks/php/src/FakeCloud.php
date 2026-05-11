@@ -857,4 +857,47 @@ final class AcmClient
             '/_fakecloud/acm/certificates/' . HttpTransport::encodePath($id) . '/approve'
         );
     }
+
+    /**
+     * Inspect a stored certificate's PEM block counts and byte sizes.
+     *
+     * Returns the PEM block / byte counts for the certificate and chain
+     * plus a constant `external_ca_validated=false` marker — fakecloud
+     * does not run a real X.509 verifier, so the field documents the
+     * emulator gap rather than reporting a verification result. Use
+     * this to confirm uploaded chains round-trip intact, especially
+     * for ImportCertificate flows. $arnOrId accepts the full ACM ARN
+     * or just the trailing UUID.
+     *
+     * @return array{
+     *     certificate_arn:string,
+     *     certificate_pem_bytes:int,
+     *     certificate_pem_blocks:int,
+     *     chain_pem_bytes:int,
+     *     chain_pem_blocks:int,
+     *     external_ca_validated:bool,
+     *     status:string,
+     *     cert_type:string,
+     * }
+     */
+    public function getCertificateChainInfo(string $arnOrId): array
+    {
+        $idx = strrpos($arnOrId, 'certificate/');
+        $id = $idx === false ? $arnOrId : substr($arnOrId, $idx + strlen('certificate/'));
+        /** @var array{
+         *     certificate_arn:string,
+         *     certificate_pem_bytes:int,
+         *     certificate_pem_blocks:int,
+         *     chain_pem_bytes:int,
+         *     chain_pem_blocks:int,
+         *     external_ca_validated:bool,
+         *     status:string,
+         *     cert_type:string,
+         * } $resp
+         */
+        $resp = $this->http->get(
+            '/_fakecloud/acm/certificates/' . HttpTransport::encodePath($id) . '/chain-info'
+        );
+        return $resp;
+    }
 }

@@ -819,5 +819,24 @@ public final class FakeCloud {
             http.postNoContent(
                     "/_fakecloud/acm/certificates/" + encodePath(id) + "/approve");
         }
+
+        /**
+         * Inspect a stored certificate's PEM block counts and byte sizes.
+         * Returns {@code externalCaValidated=false} to document that
+         * fakecloud does not run real X.509 verification — use the
+         * byte/block counts to confirm uploaded chains round-trip intact,
+         * especially for {@code ImportCertificate} flows. {@code arnOrId}
+         * accepts either the full ACM ARN or the trailing UUID portion.
+         */
+        public Types.AcmCertificateChainInfo getCertificateChainInfo(String arnOrId) {
+            String id = arnOrId;
+            int idx = arnOrId.lastIndexOf("certificate/");
+            if (idx >= 0) {
+                id = arnOrId.substring(idx + "certificate/".length());
+            }
+            return http.get(
+                    "/_fakecloud/acm/certificates/" + encodePath(id) + "/chain-info",
+                    Types.AcmCertificateChainInfo.class);
+        }
     }
 }

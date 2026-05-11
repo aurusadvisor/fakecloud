@@ -328,6 +328,39 @@ class SesEmailsResponse:
 
 
 @dataclass
+class AcmCertificateChainInfo:
+    """PEM block + byte counts for an ACM certificate's stored chain.
+
+    fakecloud isn't a PKI: ``external_ca_validated`` is always ``False``,
+    documenting that imported chains are stored verbatim rather than
+    verified against a real trust store. Callers use the byte/block
+    counts to confirm the chain they uploaded round-trips intact.
+    """
+
+    certificate_arn: str
+    certificate_pem_bytes: int
+    certificate_pem_blocks: int
+    chain_pem_bytes: int
+    chain_pem_blocks: int
+    external_ca_validated: bool
+    status: str
+    cert_type: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> AcmCertificateChainInfo:
+        return cls(
+            certificate_arn=data.get("certificate_arn", ""),
+            certificate_pem_bytes=int(data.get("certificate_pem_bytes", 0)),
+            certificate_pem_blocks=int(data.get("certificate_pem_blocks", 0)),
+            chain_pem_bytes=int(data.get("chain_pem_bytes", 0)),
+            chain_pem_blocks=int(data.get("chain_pem_blocks", 0)),
+            external_ca_validated=bool(data.get("external_ca_validated", False)),
+            status=data.get("status", ""),
+            cert_type=data.get("cert_type", ""),
+        )
+
+
+@dataclass
 class InboundEmailRequest:
     from_addr: str
     to: List[str]

@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional, cast
 import httpx
 
 from fakecloud.types import (
+    AcmCertificateChainInfo,
     ApiGatewayV2RequestsResponse,
     AppAsScheduledTickResponse,
     AppAsTickResponse,
@@ -498,6 +499,25 @@ class AcmClient:
         )
         _check(resp)
 
+    async def get_certificate_chain_info(
+        self, arn_or_id: str
+    ) -> AcmCertificateChainInfo:
+        """Inspect a stored certificate's PEM block counts and byte sizes.
+
+        Returns the PEM block / byte counts for the certificate and its
+        chain plus a constant ``external_ca_validated=False`` marker —
+        fakecloud doesn't run a real X.509 verifier, so the field
+        documents the emulator gap rather than reporting a verification
+        result. Use this to confirm that the chain you uploaded round-
+        trips intact, especially for ``ImportCertificate`` flows.
+        ``arn_or_id`` accepts the full ACM ARN or the trailing UUID.
+        """
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/acm/certificates/{_acm_id(arn_or_id)}/chain-info",
+        )
+        _check(resp)
+        return AcmCertificateChainInfo.from_dict(resp.json())
+
 
 class _SyncAcmClient:
     """Sync ACM admin client."""
@@ -526,6 +546,13 @@ class _SyncAcmClient:
             f"{self._base}/_fakecloud/acm/certificates/{_acm_id(arn_or_id)}/approve",
         )
         _check(resp)
+
+    def get_certificate_chain_info(self, arn_or_id: str) -> AcmCertificateChainInfo:
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/acm/certificates/{_acm_id(arn_or_id)}/chain-info",
+        )
+        _check(resp)
+        return AcmCertificateChainInfo.from_dict(resp.json())
 
 
 class LogsClient:
