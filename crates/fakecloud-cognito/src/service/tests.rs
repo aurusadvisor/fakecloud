@@ -7017,3 +7017,27 @@ fn pretoken_v1_claims_override_details_shape() {
     assert!(id_payload.get("aud").is_none());
     assert_eq!(id_payload["cognito:groups"], serde_json::json!(["g1"]));
 }
+
+#[test]
+fn get_signing_certificate_returns_real_x509_matching_pool_jwt_key() {
+    use base64::Engine;
+    let (svc, pool_id) = setup_svc_with_pool();
+
+    let req = make_req(
+        "GetSigningCertificate",
+        &format!(r#"{{"UserPoolId":"{pool_id}"}}"#),
+    );
+    let resp = svc.get_signing_certificate(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let cert_b64 = body["Certificate"].as_str().unwrap();
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(cert_b64)
+        .unwrap();
+
+    assert!(!der.is_empty(), "cert DER should be non-empty");
+    assert_eq!(&der[0..2], &[0x30, 0x82], "DER must start with SEQUENCE");
+    assert!(
+        der.windows(8).any(|w| w == b"fakeclou"),
+        "subject should mention fakecloud"
+    );
+}

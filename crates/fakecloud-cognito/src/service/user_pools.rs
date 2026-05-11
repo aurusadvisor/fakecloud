@@ -989,9 +989,55 @@ impl CognitoService {
 
         ensure_user_pool_exists(state, pool_id)?;
 
-        // Return a placeholder self-signed certificate (base64-encoded DER)
+        // Issue a real self-signed X.509 cert bound to the pool's RSA
+        // signing key. Verifying the cert's public key against pool-issued
+        // JWTs roundtrips: the JWT was signed by the same private key
+        // whose SubjectPublicKeyInfo lives in this cert.
+        let pem = state
+            .user_pools
+            .get(pool_id)
+            .and_then(|p| p.signing_key_pem.clone())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalErrorException",
+                    "user pool has no signing key",
+                )
+            })?;
+        drop(accounts);
+
+        let der = build_signing_cert_der(pool_id, &pem).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalErrorException",
+                "failed to build signing certificate",
+            )
+        })?;
+        let cert_b64 = {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(&der)
+        };
+
         Ok(AwsResponse::ok_json(json!({
-            "Certificate": "MIICpTCCAY0CFDfakecloud000000000000000000000MA0GCSqGSIb3DQEBCwUAMBUxEzARBgNVBAMMCmZha2VjbG91ZDAeFw0yNjAxMDEwMDAwMDBaFw0yNzAxMDEwMDAwMDBaMBUxEzARBgNVBAMMCmZha2VjbG91ZDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALfakecloud00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002DAQABo1MwUTAdBgNVHQ4EFgQUfakecloud0000000000000000wHwYDVR0jBBgwFoAUfakecloud0000000000000000wDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAfakecloud0000000000000000000000000000000000000"
+            "Certificate": cert_b64
         })))
     }
+}
+
+/// Build a self-signed X.509 cert whose subject is `CN=<pool_id>` and
+/// whose key is the pool's existing RSA signing key. Returns DER bytes.
+/// Returns `None` if `signing_key_pem` is not a parseable RSA PKCS#8 PEM
+/// or rcgen rejects the params.
+fn build_signing_cert_der(pool_id: &str, signing_key_pem: &str) -> Option<Vec<u8>> {
+    use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
+
+    let key_pair = KeyPair::from_pem(signing_key_pem).ok()?;
+    let mut params = CertificateParams::new(vec![pool_id.to_string()]).ok()?;
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, pool_id);
+    dn.push(DnType::OrganizationName, "fakecloud Cognito");
+    params.distinguished_name = dn;
+
+    let cert = params.self_signed(&key_pair).ok()?;
+    Some(cert.der().to_vec())
 }
