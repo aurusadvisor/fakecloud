@@ -4,13 +4,17 @@ description = "Every /_fakecloud/* endpoint for test assertions, simulation, and
 weight = 3
 +++
 
-fakecloud exposes `/_fakecloud/*` endpoints for testing behaviors that AWS runs asynchronously (TTL expiration, scheduled rotation, lifecycle, etc.) and for asserting on state from within tests. The first-party SDKs wrap these into ergonomic helpers — see [SDK setup](/docs/getting-started/sdk-setup/) — but the raw endpoints are documented here as the source of truth.
+fakecloud exposes `/_fakecloud/*` endpoints for testing behaviors that AWS runs asynchronously (TTL expiration, scheduled rotation, lifecycle, etc.) and for asserting on state from within tests. The first-party SDKs wrap these into ergonomic helpers -- see [SDK setup](/docs/getting-started/sdk-setup/) -- but the raw endpoints are documented here as the source of truth.
 
-## Health
+This page lists every `/_fakecloud/*` endpoint shipped today: 83 routes across 26 service areas. Endpoints marked **NEW** were added in the last two weeks.
 
-| Endpoint                  | Method | Description |
-| ------------------------- | ------ | ----------- |
-| `/_fakecloud/health`      | GET    | Returns `{"status":"ok","version":"<version>","services":[...]}`. Lists every service fakecloud is serving. |
+## Health and reset
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/health` | GET | Returns `{"status":"ok","version":"<v>","services":[...]}`. |
+| `/_fakecloud/reset/{service}` | POST | Reset all state for a single service. |
+| `/_fakecloud/reset/{service}/{account_id}` | POST | Reset a single service for one account (multi-account setups). |
 
 ```sh
 curl http://localhost:4566/_fakecloud/health
@@ -19,7 +23,7 @@ curl http://localhost:4566/_fakecloud/health
 ```json
 {
   "status": "ok",
-  "version": "0.10.0",
+  "version": "0.13.3",
   "services": [
     "apigatewayv2", "bedrock", "cloudformation", "cognito-idp",
     "dynamodb", "elasticache", "events", "iam", "kinesis", "kms",
@@ -29,124 +33,235 @@ curl http://localhost:4566/_fakecloud/health
 }
 ```
 
-## Reset
+## ACM
 
-| Endpoint                      | Method | Description |
-| ----------------------------- | ------ | ----------- |
-| `/_fakecloud/reset`           | POST   | Reset all state across all services. |
-| `/_fakecloud/reset/{service}` | POST   | Reset only the specified service. Returns `{"reset":"<service>"}`. |
-
-## Lambda
-
-| Endpoint                                          | Method | Description |
-| ------------------------------------------------- | ------ | ----------- |
-| `/_fakecloud/lambda/invocations`                  | GET    | List all Lambda invocations. |
-| `/_fakecloud/lambda/warm-containers`              | GET    | List warm Lambda containers. |
-| `/_fakecloud/lambda/{function-name}/evict-container` | POST | Force a cold start on the next invoke. |
-
-## SQS
-
-| Endpoint                                    | Method | Description |
-| ------------------------------------------- | ------ | ----------- |
-| `/_fakecloud/sqs/messages`                  | GET    | List all SQS messages across queues. |
-| `/_fakecloud/sqs/expiration-processor/tick` | POST   | Expire SQS messages past retention. |
-| `/_fakecloud/sqs/{queue_name}/force-dlq`    | POST   | Force-move messages exceeding `maxReceiveCount` to DLQ. |
-
-## SNS
-
-| Endpoint                                | Method | Description |
-| --------------------------------------- | ------ | ----------- |
-| `/_fakecloud/sns/messages`              | GET    | List all published SNS messages. |
-| `/_fakecloud/sns/pending-confirmations` | GET    | List subscriptions pending confirmation. |
-| `/_fakecloud/sns/confirm-subscription`  | POST   | Force-confirm a subscription. Body: `{"subscriptionArn":"..."}`. |
-
-## EventBridge
-
-| Endpoint                       | Method | Description |
-| ------------------------------ | ------ | ----------- |
-| `/_fakecloud/events/history`   | GET    | List all EventBridge events and deliveries. |
-| `/_fakecloud/events/fire-rule` | POST   | Fire an EventBridge rule manually. Body: `{"busName":"...","ruleName":"..."}`. |
-
-## S3
-
-| Endpoint                                    | Method | Description |
-| ------------------------------------------- | ------ | ----------- |
-| `/_fakecloud/s3/notifications`              | GET    | List S3 notification events. |
-| `/_fakecloud/s3/lifecycle-processor/tick`   | POST   | Run one S3 lifecycle tick. Returns counts. |
-
-## DynamoDB
-
-| Endpoint                                     | Method | Description |
-| -------------------------------------------- | ------ | ----------- |
-| `/_fakecloud/dynamodb/ttl-processor/tick`    | POST   | Expire items whose TTL attribute is in the past. |
-
-## Application Auto Scaling
-
-| Endpoint                                     | Method | Description |
-| -------------------------------------------- | ------ | ----------- |
-| `/_fakecloud/application-autoscaling/tick`           | POST   | Force the watcher to evaluate every scaling policy now. Returns `{ "applied": <int> }` — the count of policies that applied a capacity change this tick. |
-| `/_fakecloud/application-autoscaling/scheduled-tick` | POST   | Force the scheduled-action executor to evaluate every scheduled action now. Returns `{ "fired": <int> }` — the count of actions that fired this tick. |
-
-## Secrets Manager
-
-| Endpoint                                              | Method | Description |
-| ----------------------------------------------------- | ------ | ----------- |
-| `/_fakecloud/secretsmanager/rotation-scheduler/tick`  | POST   | Rotate secrets whose rotation schedule is due. |
-
-## SSM
-
-| Endpoint                                              | Method | Description |
-| ----------------------------------------------------- | ------ | ----------- |
-| `/_fakecloud/ssm/commands/{command_id}/status`        | POST   | Force a `SendCommand` to a specific status. Body: `{"accountId":"...", "status":"Failed"}`. |
-| `/_fakecloud/ssm/commands/{command_id}/fail`          | POST   | Fail one (or all) command invocations. Body: `{"accountId":"?", "instanceId":"?", "statusDetails":"?", "standardErrorContent":"?"}`. Returns `{"updatedInvocations":N}`. |
-
-`SendCommand` runs through `Pending` -> `InProgress` -> `Success` automatically over ~2 seconds. The `/fail` endpoint lets tests inject a non-zero exit at any point — by default it stamps every invocation, or pass `instanceId` to target one. `statusDetails` overrides the friendly status string (e.g. `"Script exited with code 7"`); `standardErrorContent` is exposed via `GetCommandInvocation`.
-
-## SES
-
-| Endpoint                   | Method | Description |
-| -------------------------- | ------ | ----------- |
-| `/_fakecloud/ses/emails`   | GET    | List all sent SES emails. |
-| `/_fakecloud/ses/inbound`  | POST   | Simulate receiving an inbound email. Evaluates receipt rules and executes actions. |
-
-## Cognito
-
-| Endpoint                                                      | Method | Description |
-| ------------------------------------------------------------- | ------ | ----------- |
-| `/_fakecloud/cognito/confirmation-codes`                      | GET    | List all pending confirmation codes. |
-| `/_fakecloud/cognito/confirmation-codes/{pool_id}/{username}` | GET    | Codes for a specific user. |
-| `/_fakecloud/cognito/confirm-user`                            | POST   | Force-confirm a user. |
-| `/_fakecloud/cognito/tokens`                                  | GET    | List all active tokens (without exposing strings). |
-| `/_fakecloud/cognito/expire-tokens`                           | POST   | Expire tokens for a pool/user. |
-| `/_fakecloud/cognito/auth-events`                             | GET    | List auth events (signup, signin, failures). |
-| `/_fakecloud/cognito/authorization-codes`                     | POST   | Mint a single-use OAuth2 authorization code for the `authorization_code` grant. Test-only equivalent of `/oauth2/authorize`. |
-
-## Step Functions
-
-| Endpoint                               | Method | Description |
-| -------------------------------------- | ------ | ----------- |
-| `/_fakecloud/stepfunctions/executions` | GET    | List executions with status, input, output, timestamps. |
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/acm/certificates/{arn_or_id}/status` | POST | Change a certificate's status. |
+| `/_fakecloud/acm/certificates/{arn_or_id}/approve` | POST | Approve a pending certificate. |
+| `/_fakecloud/acm/certificates/{arn_or_id}/chain-info` | GET | **NEW** -- Inspect issued chain (subject, issuer, SANs, validity). |
 
 ## API Gateway v2
 
-| Endpoint                              | Method | Description |
-| ------------------------------------- | ------ | ----------- |
-| `/_fakecloud/apigatewayv2/requests`   | GET    | List all HTTP API requests received. |
-| `/_fakecloud/apigatewayv2/connections` | GET   | List live WebSocket connections (id, api, stage, timestamps, source IP). |
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/apigatewayv2/requests` | GET | List captured HTTP API requests. |
+| `/_fakecloud/apigatewayv2/connections` | GET | List active WebSocket connections. |
+| `/_fakecloud/apigatewayv2/ws/{api_id}` | WS | WebSocket upgrade endpoint backing a deployed WebSocket API. |
+| `/_fakecloud/apigatewayv2/domain-names/{name}/mtls-info` | GET | **NEW** -- Inspect attached mTLS trust store and client-CA bundle. |
 
-## RDS
+## Application Auto Scaling
 
-| Endpoint                    | Method | Description |
-| --------------------------- | ------ | ----------- |
-| `/_fakecloud/rds/instances` | GET    | List fakecloud-managed DB instances with runtime metadata (container id, host port). |
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/application-autoscaling/tick` | POST | Trigger one policy-evaluation tick. |
+| `/_fakecloud/application-autoscaling/scheduled-tick` | POST | Run scheduled scaling actions that are due. |
 
 ## Bedrock
 
-| Endpoint                                                | Method        | Description |
-| ------------------------------------------------------- | ------------- | ----------- |
-| `/_fakecloud/bedrock/invocations`                       | GET           | List runtime invocations. Each entry has `modelId`, `input`, `output`, `timestamp`, `error`. |
-| `/_fakecloud/bedrock/models/{model_id}/response`        | POST          | Set a single custom response for a model (all calls). |
-| `/_fakecloud/bedrock/models/{model_id}/responses`       | POST / DELETE | Set or clear prompt-conditional response rules. See the [Bedrock testing guide](/docs/guides/testing-bedrock/). |
-| `/_fakecloud/bedrock/faults`                            | POST / GET / DELETE | Queue, list, or clear fault-injection rules (`ThrottlingException`, `ModelTimeoutException`, etc.). |
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/bedrock/invocations` | GET | List model invocations captured by the runtime. |
+| `/_fakecloud/bedrock/models/{model_id}/response` | POST | Set a single canned response for a model. |
+| `/_fakecloud/bedrock/models/{model_id}/responses` | POST | Set prompt-conditional response rules. |
+| `/_fakecloud/bedrock/faults` | POST | Inject faults (throttle, timeout, error) into the next N invocations. |
 
-See the [Bedrock testing guide](/docs/guides/testing-bedrock/) for the full test loop using these endpoints.
+## CloudFront
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/cloudfront/distributions/{id}/status` | POST | Change a distribution's status (deployed / in-progress / failed). |
+
+## Cognito
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/cognito/confirmation-codes` | GET | List all pending sign-up/forgot-password codes. |
+| `/_fakecloud/cognito/confirmation-codes/{pool_id}/{username}` | GET | Codes for a specific user. |
+| `/_fakecloud/cognito/confirm-user` | POST | Force-confirm a user without code entry. |
+| `/_fakecloud/cognito/tokens` | GET | List currently active access/ID/refresh tokens. |
+| `/_fakecloud/cognito/expire-tokens` | POST | Forcibly expire tokens. |
+| `/_fakecloud/cognito/auth-events` | GET | List authentication events recorded by adaptive auth. |
+| `/_fakecloud/cognito/authorization-codes` | POST | Mint an OAuth2 authorization code (for hosted-UI flow simulation). |
+| `/_fakecloud/cognito/compromised-passwords` | POST | **NEW** -- Mark a password as compromised so the next AdminInitiateAuth surfaces the advisory. |
+| `/_fakecloud/cognito/webauthn-credentials` | GET | **NEW** -- List registered WebAuthn credentials with their attestation details. |
+
+## DynamoDB
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/dynamodb/ttl-processor/tick` | POST | Expire TTL items that are due. |
+
+## ECR
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/ecr/repositories` | GET | List all repositories with image counts. |
+| `/_fakecloud/ecr/images` | GET | List images across repositories. |
+| `/_fakecloud/ecr/pull-through-rules` | GET | List configured pull-through cache rules. |
+
+## ECS
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/ecs/clusters` | GET | List clusters and their service/task counts. |
+| `/_fakecloud/ecs/tasks` | GET | List tasks across clusters. |
+| `/_fakecloud/ecs/tasks/{task_id}` | GET | Full task details (container state, exit codes, network). |
+| `/_fakecloud/ecs/tasks/{task_id}/logs` | GET | Captured stdout/stderr for task containers. |
+| `/_fakecloud/ecs/tasks/{task_id}/force-stop` | POST | Force-stop a running task. |
+| `/_fakecloud/ecs/tasks/{task_id}/mark-failed` | POST | Mark a task as failed for testing failure handling. |
+| `/_fakecloud/ecs/events` | GET | List ECS service/task lifecycle events. |
+| `/_fakecloud/ecs/creds/{task_id}` | GET | Task IAM credentials (used by the ECS Exec data plane). |
+| `/_fakecloud/ecs/v3/{task_id}` | GET | **NEW** -- ECS metadata v3 endpoint exposed to task containers. |
+| `/_fakecloud/ecs/v4/{task_id}` | GET | **NEW** -- ECS metadata v4 endpoint exposed to task containers. |
+
+## ElastiCache
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/elasticache/clusters` | GET | List cache clusters and node state. |
+| `/_fakecloud/elasticache/replication-groups` | GET | List replication groups with primary/replica layout. |
+| `/_fakecloud/elasticache/serverless-caches` | GET | List serverless cache resources. |
+
+## ELBv2
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/elbv2/load-balancers` | GET | List ALB/NLB/GWLB load balancers. |
+| `/_fakecloud/elbv2/target-groups` | GET | List target groups and target health. |
+| `/_fakecloud/elbv2/listeners` | GET | List listeners across load balancers. |
+| `/_fakecloud/elbv2/rules` | GET | List listener rules. |
+| `/_fakecloud/elbv2/access-logs/flush` | POST | Force-flush buffered access logs to S3. |
+| `/_fakecloud/elbv2/waf-counts` | GET | **NEW** -- Per-target-group WAF allow/block counters. |
+
+## EventBridge
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/events/history` | GET | All events seen plus per-rule delivery results. |
+| `/_fakecloud/events/fire-rule` | POST | Manually fire a rule against the current bus state. |
+
+## IAM
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/iam/create-admin` | POST | Bootstrap an admin user in a non-default account (multi-account setups). |
+
+## KMS
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/kms/usage` | GET | Per-key usage records (op, principal, timestamp) for billing/audit simulation. |
+
+## Lambda
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/lambda/invocations` | GET | All recorded invocations (function, payload, response, duration). |
+| `/_fakecloud/lambda/warm-containers` | GET | Current warm execution environments. |
+| `/_fakecloud/lambda/{function_name}/evict-container` | POST | Force a cold start by evicting warm containers. |
+| `/_fakecloud/lambda/layer-content/{account_id}/{layer_name}/{file}` | GET | Serve a layer zip (used by the invoke runtime to mount `/opt`). |
+
+## Logs
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/logs/anomalies/inject` | POST | **NEW** -- Inject anomaly findings against a log group/anomaly detector. |
+
+## RDS
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/rds/instances` | GET | List DB instances with engine, status, and lifecycle metadata. |
+| `/_fakecloud/rds/lambda-invoke` | POST | Invoke a Lambda from the RDS aws_lambda extension bridge. |
+| `/_fakecloud/rds/s3-import` | POST | Run an aws_s3 import (S3 -> Postgres/MySQL). |
+| `/_fakecloud/rds/s3-export` | POST | Run an aws_s3 export (Postgres/MySQL -> S3). |
+
+## Route53
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/route53/health-checks/{id}/status` | POST | Flip a health check status (healthy / unhealthy). |
+| `/_fakecloud/route53/zones/{id}/dnssec` | GET | **NEW** -- Inspect a zone's DNSSEC configuration. |
+| `/_fakecloud/route53/zones/{id}/dnssec/sign` | POST | **NEW** -- Sign a zone's DNSSEC records. |
+
+## S3
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/s3/notifications` | GET | All bucket notification events captured. |
+| `/_fakecloud/s3/lifecycle-processor/tick` | POST | Run one lifecycle evaluation tick. |
+
+## Scheduler (EventBridge Scheduler)
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/scheduler/schedules` | GET | List all schedules across groups. |
+| `/_fakecloud/scheduler/fire/{group}/{name}` | POST | Manually fire a schedule's target. |
+
+## Secrets Manager
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/secretsmanager/rotation-scheduler/tick` | POST | Rotate any secrets whose rotation window is due. |
+
+## SES
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/ses/emails` | GET | List sent emails with full envelope and body. |
+| `/_fakecloud/ses/inbound` | POST | Simulate an inbound email being received by a rule set. |
+| `/_fakecloud/ses/account/sandbox` | POST | Move the account in or out of the SES sandbox. |
+| `/_fakecloud/ses/identities/{name}/mail-from-status` | POST | Set the custom MAIL FROM verification state. |
+| `/_fakecloud/ses/identities/{name}/dkim-public-key` | GET | Fetch the published DKIM public key for an identity. |
+| `/_fakecloud/ses/metrics` | GET | **NEW** -- Aggregate send metrics (sends, bounces, complaints, deliveries). |
+
+## SNS
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/sns/messages` | GET | All Publish calls with per-subscriber delivery results. |
+| `/_fakecloud/sns/pending-confirmations` | GET | List subscriptions waiting on confirmation. |
+| `/_fakecloud/sns/confirm-subscription` | POST | Force-confirm a pending subscription. |
+| `/_fakecloud/sns/sms` | GET | List delivered SMS messages. |
+| `/_fakecloud/sns/cert.pem` | GET | Serve the SNS signing certificate (PEM) used to verify message signatures. |
+
+## SQS
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/sqs/messages` | GET | List messages across queues. |
+| `/_fakecloud/sqs/expiration-processor/tick` | POST | Expire messages whose retention window has passed. |
+| `/_fakecloud/sqs/{queue_name}/force-dlq` | POST | Force-move in-flight messages to the dead-letter queue. |
+
+## SSM
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/ssm/commands/{command_id}/status` | POST | Change a Run Command invocation status. |
+| `/_fakecloud/ssm/commands/{command_id}/fail` | POST | Mark all invocations of a command as failed. |
+| `/_fakecloud/ssm/parameter-policy-events` | GET | List Parameter Store policy events (Expiration/NoChangeNotification). |
+| `/_fakecloud/ssm/parameter-policy-events` | DELETE | Clear recorded policy events. |
+| `/_fakecloud/ssm/sessions/inject` | POST | **NEW** -- Inject a fully-formed Session Manager session for testing. |
+
+## Step Functions
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/stepfunctions/executions` | GET | List state-machine executions and step history. |
+| `/_fakecloud/stepfunctions/enqueue-activity-task` | POST | Enqueue an activity task for a worker to pick up. |
+
+## WAFv2
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/wafv2/evaluate` | POST | Evaluate an arbitrary request against a Web ACL's rules and return the verdict. |
+
+## Conventions
+
+- All endpoints return JSON unless otherwise noted (the SNS `cert.pem` route returns `application/x-pem-file`, the Lambda `layer-content` route returns `application/zip`, the API Gateway v2 WebSocket route is an upgrade endpoint).
+- Path parameters use `{snake_case}` placeholders.
+- `POST` endpoints that mutate state always accept an empty body when no parameters are required.
+- All endpoints are gated behind the fakecloud server itself -- they are never exposed by the real AWS SDKs, so production traffic cannot reach them by accident.
+
+> **NEW** markers reflect endpoints added in the last two weeks (2026-04-27 through 2026-05-11). Older entries with no marker are stable parts of the introspection surface.
