@@ -2628,3 +2628,70 @@ async fn snap_start_default_response_has_apply_on_none() {
     assert_eq!(v["SnapStart"]["ApplyOn"], "None");
     assert_eq!(v["SnapStart"]["OptimizationStatus"], "Off");
 }
+
+#[tokio::test]
+async fn invoke_publishes_invocations_metric_when_runtime_missing() {
+    // Even though Lambda execution fails (no Docker), the Invoke entry
+    // still publishes Invocations + Errors metrics so CloudWatch alarms
+    // catch failed invokes.
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct MetricSink {
+        events: Mutex<Vec<(String, f64)>>,
+    }
+    impl fakecloud_core::delivery::CloudwatchDelivery for MetricSink {
+        fn put_metric(
+            &self,
+            _account_id: &str,
+            _region: &str,
+            _namespace: &str,
+            metric_name: &str,
+            value: f64,
+            _unit: Option<&str>,
+            _dimensions: std::collections::BTreeMap<String, String>,
+            _timestamp_ms: i64,
+        ) {
+            self.events
+                .lock()
+                .unwrap()
+                .push((metric_name.to_string(), value));
+        }
+    }
+
+    let sink = std::sync::Arc::new(MetricSink::default());
+    let bus = std::sync::Arc::new(
+        fakecloud_core::delivery::DeliveryBus::new().with_cloudwatch_metrics(sink.clone()),
+    );
+    let svc = LambdaService::new(make_state()).with_delivery_bus(bus);
+    // Seed with a real ZipFile so the runtime-missing check is what
+    // triggers the failure path, not the code_zip pre-check.
+    let zip = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        b"PK\x05\x06fake",
+    );
+    let body = json!({
+        "FunctionName": "metered",
+        "Runtime": "python3.12",
+        "Role": "arn:aws:iam::123456789012:role/r",
+        "Handler": "index.handler",
+        "Code": {"ZipFile": zip},
+    });
+    let req = make_request(Method::POST, "/2015-03-31/functions", &body.to_string());
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/functions/metered/invocations",
+        "{}",
+    );
+    let _ = svc.handle(req).await;
+    let events = sink.events.lock().unwrap();
+    let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(
+        names.contains(&"Invocations"),
+        "missing Invocations: {names:?}"
+    );
+    assert!(names.contains(&"Duration"), "missing Duration: {names:?}");
+    assert!(names.contains(&"Errors"), "missing Errors: {names:?}");
+}
