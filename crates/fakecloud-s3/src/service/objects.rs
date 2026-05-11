@@ -1222,6 +1222,29 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
         let obj = resolve_object(b, key, req.query_params.get("versionId"))?;
 
+        // PublicAccessBlock.IgnorePublicAcls: anonymous callers cannot
+        // ride a public-read ACL when the bucket has IgnorePublicAcls
+        // set. Authenticated callers always pass this gate; the ACL
+        // check itself is unchanged for authed paths.
+        if req.access_key_id.is_none() {
+            if let Some(xml) = b.public_access_block.as_ref() {
+                let flags = crate::service::config::PublicAccessBlockFlags::parse(xml);
+                let acl_is_public = obj.acl_grants.iter().chain(b.acl_grants.iter()).any(|g| {
+                    g.grantee_type == "Group"
+                        && g.grantee_uri
+                            .as_deref()
+                            .is_some_and(|u| u.contains("acs.amazonaws.com/groups/global/AllUsers"))
+                });
+                if acl_is_public && flags.ignore_public_acls {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::FORBIDDEN,
+                        "AccessDenied",
+                        "Access Denied: PublicAccessBlock IgnorePublicAcls is enabled",
+                    ));
+                }
+            }
+        }
+
         if obj.is_delete_marker {
             return Err(AwsServiceError::aws_error_with_fields(
                 StatusCode::NOT_FOUND,
