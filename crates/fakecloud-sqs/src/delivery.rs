@@ -10,11 +10,23 @@ use crate::state::{MessageAttribute, SharedSqsState, SqsMessage};
 /// Implements SqsDelivery so other services can push messages into SQS queues.
 pub struct SqsDeliveryImpl {
     state: SharedSqsState,
+    kms_hook: Option<std::sync::Arc<dyn fakecloud_core::delivery::KmsHook>>,
 }
 
 impl SqsDeliveryImpl {
     pub fn new(state: SharedSqsState) -> Self {
-        Self { state }
+        Self {
+            state,
+            kms_hook: None,
+        }
+    }
+
+    pub fn with_kms_hook(
+        mut self,
+        hook: std::sync::Arc<dyn fakecloud_core::delivery::KmsHook>,
+    ) -> Self {
+        self.kms_hook = Some(hook);
+        self
     }
 }
 
@@ -70,6 +82,7 @@ impl SqsDelivery for SqsDeliveryImpl {
         } else {
             target_account
         };
+        let region = accounts.region().to_string();
         let state = accounts.get_or_create(&target_account);
 
         // Find queue by ARN
@@ -78,6 +91,14 @@ impl SqsDelivery for SqsDeliveryImpl {
             .values_mut()
             .find(|q| q.arn == queue_arn)
             .ok_or_else(|| SqsDeliveryError::QueueNotFound(queue_arn.to_string()))?;
+
+        // If queue has SSE-KMS configured and a KMS hook is wired,
+        // encrypt the body before storing it. Cross-service injections
+        // (SNS fanout, EventBridge target, Scheduler) need the same
+        // encryption guarantee as direct SendMessage callers; otherwise
+        // SSE-KMS queues silently store plaintext from upstream services.
+        let kms_key_id = queue.attributes.get("KmsMasterKeyId").cloned();
+        let queue_arn_owned = queue.arn.clone();
 
         // For FIFO queues without content-based dedup, require explicit dedup ID
         if queue.is_fifo && message_dedup_id.is_none() {
@@ -138,11 +159,40 @@ impl SqsDelivery for SqsDeliveryImpl {
             })
             .collect();
 
+        let stored_body = match (kms_key_id.as_deref(), &self.kms_hook) {
+            (Some(key), Some(hook)) if !key.is_empty() => {
+                let mut ctx = HashMap::new();
+                ctx.insert("aws:sqs:arn".to_string(), queue_arn_owned.clone());
+                hook.encrypt(
+                    &target_account,
+                    &region,
+                    key,
+                    message_body.as_bytes(),
+                    "sqs.amazonaws.com",
+                    ctx,
+                )
+                .map_err(|e| {
+                    SqsDeliveryError::InvalidParameter(format!(
+                        "SQS SSE-KMS encrypt failed for {queue_arn_owned}: {e}"
+                    ))
+                })?
+            }
+            _ => message_body.to_string(),
+        };
+        // Reacquire mutable queue after the borrow drop above (hook call
+        // used `&self.kms_hook` not `state`).
+        let queue = accounts
+            .get_or_create(&target_account)
+            .queues
+            .values_mut()
+            .find(|q| q.arn == queue_arn_owned)
+            .ok_or_else(|| SqsDeliveryError::QueueNotFound(queue_arn_owned.clone()))?;
+
         let msg = SqsMessage {
             message_id: uuid::Uuid::new_v4().to_string(),
             receipt_handle: None,
             md5_of_body: crate::service::md5_hex(message_body),
-            body: message_body.to_string(),
+            body: stored_body,
             sent_timestamp: now.timestamp_millis(),
             attributes: BTreeMap::new(),
             message_attributes: sqs_attrs,
@@ -356,6 +406,60 @@ mod tests {
             blob.binary_value.as_deref(),
             Some(&[0x01u8, 0x02, 0x03][..])
         );
+    }
+
+    struct StubKmsHook;
+    impl fakecloud_core::delivery::KmsHook for StubKmsHook {
+        fn encrypt(
+            &self,
+            _account_id: &str,
+            _region: &str,
+            _key_id: &str,
+            plaintext: &[u8],
+            _service: &str,
+            _ctx: HashMap<String, String>,
+        ) -> Result<String, String> {
+            Ok(format!("ENC:{}", String::from_utf8_lossy(plaintext)))
+        }
+        fn decrypt(
+            &self,
+            _account_id: &str,
+            _envelope: &str,
+            _service: &str,
+            _ctx: HashMap<String, String>,
+        ) -> Result<Vec<u8>, String> {
+            Err("unused".to_string())
+        }
+    }
+
+    #[test]
+    fn cross_service_delivery_encrypts_when_queue_has_kms_key() {
+        let mut queue = make_queue("encrypted", false, false);
+        queue
+            .attributes
+            .insert("KmsMasterKeyId".to_string(), "alias/aws/sqs".to_string());
+        let url = queue.queue_url.clone();
+        let arn = queue.arn.clone();
+        let state = make_state_with_queue(queue);
+        let delivery = SqsDeliveryImpl::new(state.clone()).with_kms_hook(Arc::new(StubKmsHook));
+        delivery.deliver_to_queue(&arn, "secret-body", &HashMap::new());
+        let guard = state.read();
+        let q = guard.default_ref().queues.get(&url).unwrap();
+        assert_eq!(q.messages.len(), 1);
+        assert_eq!(q.messages[0].body, "ENC:secret-body");
+    }
+
+    #[test]
+    fn cross_service_delivery_skips_encryption_when_no_kms_key() {
+        let queue = make_queue("plain", false, false);
+        let url = queue.queue_url.clone();
+        let arn = queue.arn.clone();
+        let state = make_state_with_queue(queue);
+        let delivery = SqsDeliveryImpl::new(state.clone()).with_kms_hook(Arc::new(StubKmsHook));
+        delivery.deliver_to_queue(&arn, "plain-body", &HashMap::new());
+        let guard = state.read();
+        let q = guard.default_ref().queues.get(&url).unwrap();
+        assert_eq!(q.messages[0].body, "plain-body");
     }
 
     #[test]

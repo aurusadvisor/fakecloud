@@ -432,9 +432,10 @@ async fn main() {
 
     // Cross-service delivery bus
     // Step 1: SQS delivery (SNS and EventBridge can push messages into SQS queues)
-    let sqs_delivery = Arc::new(fakecloud_sqs::delivery::SqsDeliveryImpl::new(
-        sqs_state.clone(),
-    ));
+    let sqs_delivery = Arc::new(
+        fakecloud_sqs::delivery::SqsDeliveryImpl::new(sqs_state.clone())
+            .with_kms_hook(kms_hook_for_services.clone()),
+    );
 
     // Lambda delivery (SNS can invoke Lambda functions via container runtime)
     let lambda_delivery: Option<Arc<dyn fakecloud_core::delivery::LambdaDelivery>> =
