@@ -5,7 +5,7 @@ Local AWS cloud emulator. Part of the faisca project family.
 ## Product Context
 
 - FakeCloud is a local AWS emulator focused on high-fidelity behavior and AWS-compatible responses.
-- Current project state from prior work: 24 services, with SES, Cognito User Pools, Docker-backed Lambda execution, Kinesis, RDS, ElastiCache, Step Functions, API Gateway v2, Bedrock (111 ops), Bedrock Runtime, and ECR (full 58-operation API — repositories, images, layers, OCI v2 Distribution `docker push`/`pull`, lifecycle policy evaluation, scanning, registry, pull-through cache, replication, repository creation templates) already shipped.
+- Current project state: 37+ AWS services, 2,482 operations, 100% Smithy conformance per implemented service. See [the parity matrix](website/content/docs/parity.md) for the full service-by-service breakdown of control-plane vs data-plane coverage and known limitations.
 - The broader roadmap prioritizes services that LocalStack keeps behind paid tiers, especially ECS, ELB/ALB, CloudFront, CloudWatch Metrics, and EC2.
 - Introspection SDKs (Rust, Python, TypeScript, Go, PHP, Java) are already built and maintained for the `/_fakecloud/*` endpoints.
 
@@ -25,7 +25,7 @@ cargo fmt --check                        # format check
 - `fakecloud` - binary entry point (clap CLI, Axum server)
 - `fakecloud-core` - `AwsService` trait, `ServiceRegistry`, request dispatch, protocol parsing
 - `fakecloud-aws` - shared AWS types (ARNs, error builders, SigV4 parser)
-- `fakecloud-{sqs,sns,eventbridge,iam,ssm,dynamodb,lambda,secretsmanager,s3,logs,kms,cloudformation,ses,cognito,kinesis,rds,elasticache,stepfunctions,apigatewayv2}` - individual service implementations
+- `fakecloud-<service>` crates - individual service implementations (one crate per AWS service; see the parity matrix and `crates/` directory for the full list)
 - `fakecloud-sdk` - Rust SDK for `/_fakecloud/*` introspection endpoints
 - `fakecloud-e2e` - E2E tests using `aws-sdk-rust` and AWS CLI
 

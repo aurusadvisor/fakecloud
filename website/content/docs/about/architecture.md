@@ -31,8 +31,24 @@ fakecloud is a single Rust binary built from a Cargo workspace. Each AWS service
 | `fakecloud-rds`            | RDS with Docker-backed database execution                                |
 | `fakecloud-elasticache`    | ElastiCache with Docker-backed Redis/Valkey/Memcached                    |
 | `fakecloud-bedrock`        | Bedrock + Bedrock Runtime                                                |
-| `fakecloud-apigatewayv2`   | API Gateway v2 (HTTP APIs)                                               |
+| `fakecloud-bedrock-agent`  | Bedrock Agents control plane                                             |
+| `fakecloud-bedrock-agent-runtime` | Bedrock Agents runtime (InvokeAgent, RetrieveAndGenerate)         |
+| `fakecloud-apigateway`     | API Gateway v1 (REST APIs)                                               |
+| `fakecloud-apigatewayv2`   | API Gateway v2 (HTTP APIs + WebSocket)                                   |
+| `fakecloud-ecr`            | Elastic Container Registry (OCI v2 push/pull)                            |
+| `fakecloud-ecs`            | Elastic Container Service (Docker-backed task execution)                 |
+| `fakecloud-elbv2`          | Elastic Load Balancing v2 (ALB/NLB/GWLB, in-process HTTP data plane)     |
+| `fakecloud-cloudfront`     | CloudFront                                                               |
+| `fakecloud-route53`        | Route 53 (hosted zones, RRsets, DNSSEC, traffic policies)                |
+| `fakecloud-acm`            | AWS Certificate Manager                                                  |
+| `fakecloud-wafv2`          | WAFv2 (wired into ALB and API Gateway data planes)                       |
+| `fakecloud-athena`         | Athena (control plane + synthesized query results)                       |
+| `fakecloud-application-autoscaling` | Application Auto Scaling                                        |
+| `fakecloud-organizations`  | AWS Organizations + Service Control Policies                             |
+| `fakecloud-firehose`       | Kinesis Data Firehose (real S3 destination delivery)                     |
+| `fakecloud-glue`           | Glue Data Catalog + Job control plane                                    |
 | `fakecloud-stepfunctions`  | Step Functions (ASL interpreter)                                         |
+| `fakecloud-sdk`            | Rust SDK for `/_fakecloud/*` introspection endpoints                     |
 | `fakecloud-e2e`            | End-to-end tests using `aws-sdk-rust`                                    |
 | `fakecloud-conformance`    | Smithy-driven conformance harness                                        |
 
