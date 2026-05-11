@@ -1,10 +1,10 @@
 //! Real ECDSA Sign/Verify for KMS asymmetric specs.
 //!
 //! AWS KMS supports four ECDSA curves: NIST P-256, P-384, P-521, and
-//! SECG (Bitcoin's secp256k1). We implement P-256, P-384, and P-256K1
-//! against the `p256` / `p384` / `k256` crates. P-521 has no widely
-//! used pure-Rust ECDSA crate at this version, so it falls through to
-//! the legacy fake-bytes path documented in `service_crypto.rs`.
+//! SECG (Bitcoin's secp256k1). All four are implemented end-to-end here
+//! against the `p256` / `p384` / `p521` / `k256` crates — there is no
+//! legacy fake-bytes path. SM2 is not currently supported and is
+//! refused at CreateKey.
 
 use rsa::sha2::{Sha256, Sha384};
 use signature::{Signer, Verifier};
@@ -59,6 +59,23 @@ pub fn generate_keypair(key_spec: &str) -> Result<Option<KeyPair>, EcdsaError> {
             let pub_der = vk
                 .to_public_key_der()
                 .map_err(|e| EcdsaError::CryptoFailure(format!("p384 spki encode: {e}")))?
+                .as_bytes()
+                .to_vec();
+            Ok(Some((priv_der, pub_der)))
+        }
+        "ECC_NIST_P521" => {
+            use p521::pkcs8::{EncodePrivateKey as _, EncodePublicKey as _};
+            let mut rng = rand::thread_rng();
+            let secret = p521::SecretKey::random(&mut rng);
+            let priv_der = secret
+                .to_pkcs8_der()
+                .map_err(|e| EcdsaError::CryptoFailure(format!("p521 pkcs8 encode: {e}")))?
+                .as_bytes()
+                .to_vec();
+            let pub_der = secret
+                .public_key()
+                .to_public_key_der()
+                .map_err(|e| EcdsaError::CryptoFailure(format!("p521 spki encode: {e}")))?
                 .as_bytes()
                 .to_vec();
             Ok(Some((priv_der, pub_der)))
@@ -142,6 +159,25 @@ pub fn sign(
                 Ok(sig.to_der().as_bytes().to_vec())
             }
         }
+        ("ECC_NIST_P521", "ECDSA_SHA_512") => {
+            use p521::pkcs8::DecodePrivateKey as _;
+            let secret = p521::SecretKey::from_pkcs8_der(priv_der)
+                .map_err(|e| EcdsaError::CorruptKey(format!("p521 decode: {e}")))?;
+            let sk = p521::ecdsa::SigningKey::from_slice(&secret.to_bytes())
+                .map_err(|e| EcdsaError::CorruptKey(format!("p521 SigningKey: {e}")))?;
+            let sig: p521::ecdsa::Signature = if message_is_digest {
+                // KMS MessageType=DIGEST passes the pre-hashed message.
+                // p521 ECDSA in this crate version hashes internally,
+                // so signing a digest here would double-hash. We only
+                // support the hash-the-message path end-to-end.
+                return Err(EcdsaError::UnsupportedAlgorithm(
+                    "ECC_NIST_P521 MessageType=DIGEST not supported in this fakecloud build".into(),
+                ));
+            } else {
+                sk.sign(message)
+            };
+            Ok(sig.to_der().as_bytes().to_vec())
+        }
         _ => Err(EcdsaError::UnsupportedAlgorithm(format!(
             "{key_spec}/{signing_algorithm}"
         ))),
@@ -216,6 +252,24 @@ pub fn verify(
             } else {
                 Ok(vk.verify(message, &sig).is_ok())
             }
+        }
+        ("ECC_NIST_P521", "ECDSA_SHA_512") => {
+            use p521::pkcs8::DecodePrivateKey as _;
+            let secret = p521::SecretKey::from_pkcs8_der(priv_der)
+                .map_err(|e| EcdsaError::CorruptKey(format!("p521 decode: {e}")))?;
+            let sk = p521::ecdsa::SigningKey::from_slice(&secret.to_bytes())
+                .map_err(|e| EcdsaError::CorruptKey(format!("p521 SigningKey: {e}")))?;
+            let vk: p521::ecdsa::VerifyingKey = (&sk).into();
+            let sig = match p521::ecdsa::Signature::from_der(signature) {
+                Ok(s) => s,
+                Err(_) => return Ok(false),
+            };
+            if message_is_digest {
+                return Err(EcdsaError::UnsupportedAlgorithm(
+                    "ECC_NIST_P521 MessageType=DIGEST not supported in this fakecloud build".into(),
+                ));
+            }
+            Ok(vk.verify(message, &sig).is_ok())
         }
         _ => Err(EcdsaError::UnsupportedAlgorithm(format!(
             "{key_spec}/{signing_algorithm}"
@@ -309,9 +363,26 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_curve_returns_none_for_keypair() {
-        // P-521 is currently out of scope here.
-        assert!(generate_keypair("ECC_NIST_P521").unwrap().is_none());
+    fn p521_sign_verify_roundtrip_with_message() {
+        let (priv_der, _) = generate_keypair("ECC_NIST_P521").unwrap().unwrap();
+        let msg = b"hello p521";
+        let sig = sign("ECC_NIST_P521", &priv_der, "ECDSA_SHA_512", msg, false).unwrap();
+        assert!(verify(
+            "ECC_NIST_P521",
+            &priv_der,
+            "ECDSA_SHA_512",
+            msg,
+            &sig,
+            false
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn sm2_keypair_returns_none() {
+        // SM2 is the Chinese GM standard; we refuse it at CreateKey
+        // rather than fake the signing path.
+        assert!(generate_keypair("SM2").unwrap().is_none());
     }
 
     #[test]

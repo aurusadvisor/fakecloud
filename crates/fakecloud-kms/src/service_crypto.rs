@@ -382,47 +382,45 @@ impl KmsService {
 
         let message_is_digest = body["MessageType"].as_str() == Some("DIGEST");
 
-        let signature_bytes = if let Some(priv_der) = &key.asymmetric_private_key_der {
-            if signing_algorithm.starts_with("ECDSA") {
-                super::asym_ecdsa::sign(
-                    &key.key_spec,
-                    priv_der,
-                    signing_algorithm,
-                    &message_bytes,
-                    message_is_digest,
+        let priv_der = key.asymmetric_private_key_der.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "UnsupportedOperationException",
+                format!(
+                    "KeySpec '{}' has no signing key material in this fakecloud build",
+                    key.key_spec
+                ),
+            )
+        })?;
+        let signature_bytes = if signing_algorithm.starts_with("ECDSA") {
+            super::asym_ecdsa::sign(
+                &key.key_spec,
+                priv_der,
+                signing_algorithm,
+                &message_bytes,
+                message_is_digest,
+            )
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("Sign failed: {e}"),
                 )
-                .map_err(|e| {
-                    AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "ValidationException",
-                        format!("Sign failed: {e}"),
-                    )
-                })?
-            } else {
-                super::asym::rsa_sign(
-                    priv_der,
-                    signing_algorithm,
-                    &message_bytes,
-                    message_is_digest,
-                )
-                .map_err(|e| {
-                    AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "ValidationException",
-                        format!("Sign failed: {e}"),
-                    )
-                })?
-            }
+            })?
         } else {
-            // Legacy fake-bytes path for specs whose real-crypto branch
-            // hasn't landed yet (P-521, SM2). Keeps the rest of the
-            // surface working until later G batches replace this with
-            // real-crypto paths.
-            let sig_data = format!(
-                "fakecloud-sig:{}:{}:{}",
-                key.key_id, signing_algorithm, message_b64
-            );
-            sig_data.into_bytes()
+            super::asym::rsa_sign(
+                priv_der,
+                signing_algorithm,
+                &message_bytes,
+                message_is_digest,
+            )
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("Sign failed: {e}"),
+                )
+            })?
         };
 
         let signature_b64 = base64::engine::general_purpose::STANDARD.encode(&signature_bytes);
@@ -481,38 +479,35 @@ impl KmsService {
             .unwrap_or_default();
         let message_is_digest = body["MessageType"].as_str() == Some("DIGEST");
 
-        let signature_valid = if let Some(priv_der) = &key.asymmetric_private_key_der {
-            if signing_algorithm.starts_with("ECDSA") {
-                super::asym_ecdsa::verify(
-                    &key.key_spec,
-                    priv_der,
-                    signing_algorithm,
-                    &message_bytes,
-                    &signature_bytes,
-                    message_is_digest,
-                )
-                .unwrap_or(false)
-            } else {
-                super::asym::rsa_verify(
-                    priv_der,
-                    signing_algorithm,
-                    &message_bytes,
-                    &signature_bytes,
-                    message_is_digest,
-                )
-                .unwrap_or(false)
-            }
+        let priv_der = key.asymmetric_private_key_der.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "UnsupportedOperationException",
+                format!(
+                    "KeySpec '{}' has no signing key material in this fakecloud build",
+                    key.key_spec
+                ),
+            )
+        })?;
+        let signature_valid = if signing_algorithm.starts_with("ECDSA") {
+            super::asym_ecdsa::verify(
+                &key.key_spec,
+                priv_der,
+                signing_algorithm,
+                &message_bytes,
+                &signature_bytes,
+                message_is_digest,
+            )
+            .unwrap_or(false)
         } else {
-            // Legacy fake-bytes verify (paired with the legacy Sign
-            // path above). Replaced spec-by-spec as later G batches
-            // ship real crypto for ECDSA / ECDH-derived specs.
-            let expected_sig_data = format!(
-                "fakecloud-sig:{}:{}:{}",
-                key.key_id, signing_algorithm, message_b64
-            );
-            let expected_signature_b64 =
-                base64::engine::general_purpose::STANDARD.encode(expected_sig_data.as_bytes());
-            signature_b64 == expected_signature_b64
+            super::asym::rsa_verify(
+                priv_der,
+                signing_algorithm,
+                &message_bytes,
+                &signature_bytes,
+                message_is_digest,
+            )
+            .unwrap_or(false)
         };
 
         if !signature_valid {
