@@ -25,6 +25,11 @@ import type {
   SesEmailsResponse,
   InboundEmailRequest,
   InboundEmailResponse,
+  SesMetrics,
+  SesMailFromStatus,
+  SesMailFromStatusResponse,
+  SesDkimPublicKey,
+  SesSandboxResponse,
   SnsMessagesResponse,
   PendingConfirmationsResponse,
   ConfirmSubscriptionRequest,
@@ -186,6 +191,42 @@ export class SesClient {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req),
+    });
+    return parse(resp);
+  }
+
+  async getMetrics(): Promise<SesMetrics> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/ses/metrics`);
+    return parse(resp);
+  }
+
+  async setMailFromStatus(
+    identity: string,
+    status: SesMailFromStatus,
+  ): Promise<SesMailFromStatusResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ses/identities/${encodeURIComponent(identity)}/mail-from-status`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      },
+    );
+    return parse(resp);
+  }
+
+  async getDkimPublicKey(identity: string): Promise<SesDkimPublicKey> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ses/identities/${encodeURIComponent(identity)}/dkim-public-key`,
+    );
+    return parse(resp);
+  }
+
+  async setSandbox(sandbox: boolean): Promise<SesSandboxResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/ses/account/sandbox`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sandbox }),
     });
     return parse(resp);
   }

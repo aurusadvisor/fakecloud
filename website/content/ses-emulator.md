@@ -20,6 +20,8 @@ Point your AWS SDK at `http://localhost:4566`.
 - **Test-assertion SDK.** `fc.ses.getEmails()` returns the sent-email log so tests can assert recipients, subject, body, destinations, bounces.
 - **Real DKIM signing.** Configure a domain identity, fakecloud signs outbound mail with the computed DKIM-Signature header.
 - **Configuration sets + event destinations.** Sending, delivery, bounce, complaint, click, open events published to SNS / Kinesis / CloudWatch destinations.
+- **Optional SMTP submission listener.** Set `FAKECLOUD_SES_SMTP_PORT=2525` and fakecloud accepts mail from your existing SMTP libraries on the standard SES `AUTH PLAIN` / `AUTH LOGIN` flow, with the same `ServiceUserName` / `ServicePassword` produced by IAM `CreateServiceSpecificCredential`. Off by default.
+- **Optional outbound SMTP relay.** Set `FAKECLOUD_SES_SMTP_RELAY=smtp://host:port` and accepted messages are forwarded to that relay (for example a local [MailHog](https://github.com/mailhog/MailHog) instance) in addition to being recorded. Off by default — no network traffic without an explicit opt-in.
 - **No account, no auth token, no paid tier.** AGPL-3.0.
 
 ## Send an email

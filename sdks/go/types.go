@@ -180,6 +180,41 @@ type InboundEmailResponse struct {
 	ActionsExecuted []InboundActionExecuted `json:"actionsExecuted"`
 }
 
+// SESMetrics exposes counters tracked by the SES emulator.
+type SESMetrics struct {
+	SuppressedDropsTotal uint64 `json:"suppressedDropsTotal"`
+}
+
+// SESMailFromStatusRequest sets the MAIL FROM domain verification status.
+type SESMailFromStatusRequest struct {
+	Status string `json:"status"`
+}
+
+// SESMailFromStatusResponse is returned after updating MAIL FROM status.
+type SESMailFromStatusResponse struct {
+	Identity             string `json:"identity"`
+	MailFromDomainStatus string `json:"mailFromDomainStatus"`
+}
+
+// SESDkimPublicKey describes the DKIM signing material for an identity.
+type SESDkimPublicKey struct {
+	Identity       string `json:"identity"`
+	Selector       string `json:"selector"`
+	PublicKeyBase64 string `json:"publicKeyBase64"`
+	SigningEnabled bool   `json:"signingEnabled"`
+}
+
+// SESSandboxRequest toggles sandbox / production access for the account.
+type SESSandboxRequest struct {
+	Sandbox bool `json:"sandbox"`
+}
+
+// SESSandboxResponse echoes the new sandbox state.
+type SESSandboxResponse struct {
+	Sandbox                  bool `json:"sandbox"`
+	ProductionAccessEnabled  bool `json:"productionAccessEnabled"`
+}
+
 // ── SNS ────────────────────────────────────────────────────────────
 
 // SNSMessage represents a published SNS message.

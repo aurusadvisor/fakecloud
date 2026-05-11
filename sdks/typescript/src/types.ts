@@ -165,6 +165,29 @@ export interface InboundEmailResponse {
   actionsExecuted: InboundActionExecuted[];
 }
 
+export interface SesMetrics {
+  suppressedDropsTotal: number;
+}
+
+export type SesMailFromStatus = "NotStarted" | "Pending" | "Success" | "Failed";
+
+export interface SesMailFromStatusResponse {
+  identity: string;
+  mailFromDomainStatus: SesMailFromStatus;
+}
+
+export interface SesDkimPublicKey {
+  identity: string;
+  selector: string;
+  publicKeyBase64: string;
+  signingEnabled: boolean;
+}
+
+export interface SesSandboxResponse {
+  sandbox: boolean;
+  productionAccessEnabled: boolean;
+}
+
 // ── SNS ────────────────────────────────────────────────────────────
 
 export interface SnsMessage {
