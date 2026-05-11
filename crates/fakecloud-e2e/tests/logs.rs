@@ -1174,7 +1174,7 @@ async fn logs_misc_stubs() {
         .send()
         .await
         .unwrap();
-    assert!(resp.configuration_templates().is_empty());
+    assert!(!resp.configuration_templates().is_empty());
 
     // PutBearerTokenAuthentication
     client
