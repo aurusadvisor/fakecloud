@@ -43,12 +43,25 @@ aws --endpoint-url http://localhost:4566 application-autoscaling describe-scalin
   --service-namespace ecs
 ```
 
-## DynamoDB capacity scaling
+## Real scaling apply hooks
 
-The Application Auto Scaling watcher now actually resizes DynamoDB
-provisioned tables in response to scaling policies. The watcher ticks
-every 15 seconds, walks every registered DynamoDB scalable target, and
-applies one of two algorithms per policy:
+The Application Auto Scaling watcher actually resizes the underlying
+resource when scaling policies fire. Today the watcher mutates:
+
+- **DynamoDB** — provisioned `ReadCapacityUnits` and `WriteCapacityUnits`
+  on tables (and Global Secondary Indexes) registered as scalable
+  targets.
+- **ECS** — service `DesiredCount` for `ecs:service:DesiredCount`
+  targets. When a target-tracking or step policy fires for an ECS
+  service, the watcher calls the ECS capacity hook, which updates the
+  service's `DesiredCount` and walks the running task set so the new
+  bound is reflected in `DescribeServices` and the underlying Docker
+  task count. Step scaling and `TargetTrackingScaling` against
+  `ECSServiceAverageCPUUtilization` /
+  `ECSServiceAverageMemoryUtilization` both apply.
+
+The watcher ticks every 15 seconds, walks every registered scalable
+target, and applies one of two algorithms per policy:
 
 - **`TargetTrackingScaling`** — reads the latest sample of the
   `PredefinedMetricSpecification.PredefinedMetricType` metric from
@@ -106,14 +119,14 @@ is `{ "fired": <int> }`. The introspection SDKs expose this as
 
 ## Caveats
 
-The watcher and scheduled-action executor only mutate DynamoDB table
-capacity today. ECS service `DesiredCount`, Lambda provisioned
-concurrency, RDS Aurora capacity, ElastiCache replicas, and the rest
-of Application Auto Scaling's service namespaces still store policy
-and scheduled-action configurations verbatim — the bound updates land
-on the `ScalableTarget` but no per-namespace apply hook is wired yet,
-so the underlying resource isn't resized. Predictive forecasts are
-deterministic synthetic curves, not actual ML predictions. CloudWatch
-alarms reported under `ScalingPolicy.Alarms` remain empty — the
-watcher resolves alarms by walking CloudWatch state directly rather
-than mirroring AWS's auto-attach behaviour.
+DynamoDB and ECS are the namespaces with real apply hooks today.
+Lambda provisioned concurrency, RDS Aurora capacity, ElastiCache
+replicas, and the rest of Application Auto Scaling's service
+namespaces still store policy and scheduled-action configurations
+verbatim — the bound updates land on the `ScalableTarget` but no
+per-namespace apply hook is wired yet, so the underlying resource
+isn't resized. Predictive forecasts are deterministic synthetic
+curves, not actual ML predictions. CloudWatch alarms reported under
+`ScalingPolicy.Alarms` remain empty — the watcher resolves alarms by
+walking CloudWatch state directly rather than mirroring AWS's
+auto-attach behaviour.

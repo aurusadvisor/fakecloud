@@ -16,7 +16,12 @@ Point your AWS SDK at `http://localhost:4566`. Docker required because fakecloud
 ## Why fakecloud for ElastiCache
 
 - **75 ElastiCache operations** at 100% conformance — cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users / user groups, failover, tagging.
-- **Real Redis, Valkey, and Memcached.** fakecloud pulls real Redis / Valkey / Memcached Docker images and runs them as the ElastiCache node. Your `LPUSH`, `ZADD`, `XADD`, streams, pub/sub, Lua scripts — all work because the engine is real. Memcached gets a real `memcached:1.6-alpine` container with the full text protocol.
+- **Real Redis, Valkey, and Memcached.** fakecloud pulls real Redis / Valkey / Memcached Docker images and runs them as the ElastiCache node. Your `LPUSH`, `ZADD`, `XADD`, streams, pub/sub, Lua scripts — all work because the engine is real. Memcached gets a real `memcached:1.6-alpine` container with the full text and binary protocols.
+- **Real ACL enforcement.** `CreateUser` / `ModifyUser` push `ACL SETUSER` into the live Redis container, so unauthorized commands are rejected by the real engine — not by a stub.
+- **Real parameter group changes.** `ModifyCacheParameterGroup` runtime-tunable parameters (e.g. `maxmemory-policy`, `timeout`) are pushed to the live container via `CONFIG SET` and take effect immediately.
+- **Real Memcached Auto Discovery.** Multi-node Memcached clusters expose a real `ConfigurationEndpoint` that speaks `config get cluster`, so the official ElastiCache cluster clients discover the live nodes the same way they do against AWS.
+- **Snapshot / restore round-trips real data.** `CreateSnapshot` dumps a real RDB file; `RestoreReplicationGroupFromSnapshot` seeds the replacement container with that RDB, so test fixture keys survive snapshot/restore cycles.
+- **Encryption + logging persist.** `AtRestEncryptionEnabled`, `TransitEncryptionEnabled`, `TransitEncryptionMode`, `AuthTokenEnabled`, `KmsKeyId`, `LogDeliveryConfigurations`, `MultiAZ`, `AutomaticFailover`, `DataTiering`, `NetworkType`, `IpDiscovery`, snapshot / maintenance windows, and node-group topology all round-trip through `DescribeReplicationGroups`.
 - **Endpoint works.** `DescribeCacheClusters` returns a real connectable host. Your application connects with a regular Redis client (redis-py, ioredis, lettuce, go-redis).
 - **Paid on LocalStack; free here.** ElastiCache has always been LocalStack Pro-only.
 - **No account, no auth token, no paid tier.** AGPL-3.0.
