@@ -11,7 +11,7 @@ fakecloud implements **176 of 176** IAM operations at 100% Smithy conformance.
 - **Users** — CRUD, access keys, login profiles, signing certificates, SSH public keys, service-specific credentials, MFA devices
 - **Roles** — CRUD, inline policies, managed policies, trust relationships, instance profile relationships
 - **Groups** — CRUD, user membership, inline and managed policies
-- **Policies** — managed policies, policy versions, attachment, simulation (recorded)
+- **Policies** — managed policies, policy versions, attachment, `SimulateCustomPolicy` / `SimulatePrincipalPolicy` run the same evaluator real IAM enforcement uses, so the returned `EvalDecision` (`allowed` / `explicitDeny` / `implicitDeny`) reflects identity policies, resource policies, permission boundaries, session policies, SCPs, and `Condition` blocks rather than being recorded-only stubs
 - **Instance profiles** — CRUD, role attachment
 - **OIDC providers** — CRUD, client IDs, thumbprints
 - **SAML providers** — CRUD, metadata documents
@@ -19,6 +19,12 @@ fakecloud implements **176 of 176** IAM operations at 100% Smithy conformance.
 - **Tags** — on users, roles, policies, and policy versions
 - **Service-linked roles** — CRUD with service name validation
 - **PassRole trust enforcement** — when a role ARN is passed to Lambda (`CreateFunction`) or ECS (`RegisterTaskDefinition`, `RunTask` overrides), the role's `AssumeRolePolicyDocument` is checked against the calling service's principal (`lambda.amazonaws.com`, `ecs-tasks.amazonaws.com`). Roles whose trust policy doesn't allow the principal are rejected with `InvalidParameterValueException` / `InvalidParameterException`, matching real AWS
+- **ExternalId enforcement on AssumeRole** — when a trust policy requires `sts:ExternalId`, `AssumeRole` calls without a matching `ExternalId` parameter are rejected with `AccessDenied`, matching the confused-deputy guard real STS implements. Missing, empty, and mismatched values all fail; an exact match passes
+- **Permission boundaries (Phase 3)** — `PutUserPermissionsBoundary` / `PutRolePermissionsBoundary` / `DeleteUserPermissionsBoundary` / `DeleteRolePermissionsBoundary` are enforced at evaluation time: the effective permissions are the intersection of identity policies and the boundary, with explicit Deny precedence
+- **Session policies** — passed inline or by ARN to `AssumeRole`, `AssumeRoleWithWebIdentity`, `AssumeRoleWithSAML`, and `GetFederationToken`; their intersection with the role's identity policies is recorded on the issued credentials and enforced on every subsequent call signed with those credentials
+- **ABAC (Phase 4)** — tag-based `Condition` operators `aws:ResourceTag/*`, `aws:RequestTag/*`, `aws:TagKeys`, and `aws:PrincipalTag/*` are honored across S3, SQS, SNS, and IAM resources, including `ForAllValues` / `ForAnyValue` set operators and `IfExists` suffixes
+- **`NotPrincipal` + KMS key policies (Phase 5)** — `NotPrincipal` clauses (the inverse principal-match form) are evaluated correctly across all resource policies, and KMS key policies fully participate in cross-account combining: explicit Allow on the key policy is required for cross-account access even when the calling account's identity policy grants `kms:*`
+- **Unrecognized principal logging** — policies referencing principals the emulator doesn't model (e.g. an unknown service principal in a trust policy) emit a `warn`-level log line on first evaluation rather than silently bypassing the check, so test runs surface emulator-coverage gaps in CI logs
 
 ## PassRole trust policy example
 

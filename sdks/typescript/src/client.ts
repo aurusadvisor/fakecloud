@@ -957,6 +957,25 @@ export interface SetCertificateStatusRequest {
 }
 
 /**
+ * Response shape for `acm.getCertificateChainInfo`.
+ *
+ * fakecloud isn't a PKI — `externalCaValidated` is always `false`,
+ * documenting that imported chains are stored verbatim rather than
+ * verified against a real trust store. The byte/block counts let
+ * callers confirm the PEM they uploaded round-trips intact.
+ */
+export interface AcmCertificateChainInfo {
+  certificateArn: string;
+  certificatePemBytes: number;
+  certificatePemBlocks: number;
+  chainPemBytes: number;
+  chainPemBlocks: number;
+  externalCaValidated: boolean;
+  status: string;
+  certType: string;
+}
+
+/**
  * ACM admin client.
  *
  * Wraps the per-certificate status admin endpoint that lets tests flip
@@ -1012,5 +1031,39 @@ export class AcmClient {
       const body = await resp.text().catch(() => "");
       throw new FakeCloudError(resp.status, body);
     }
+  }
+
+  /**
+   * Inspect a stored certificate's PEM block counts and byte sizes.
+   * Returns `externalCaValidated: false` to document that fakecloud
+   * does not run real X.509 verification — use the byte/block counts
+   * to confirm uploaded chains round-trip intact, especially for
+   * `ImportCertificate` flows. `arnOrId` accepts the full ACM ARN or
+   * just the trailing UUID.
+   */
+  async getCertificateChainInfo(
+    arnOrId: string,
+  ): Promise<AcmCertificateChainInfo> {
+    const idx = arnOrId.lastIndexOf("certificate/");
+    const id =
+      idx >= 0 ? arnOrId.substring(idx + "certificate/".length) : arnOrId;
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/acm/certificates/${encodeURIComponent(id)}/chain-info`,
+    );
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new FakeCloudError(resp.status, body);
+    }
+    const data = (await resp.json()) as Record<string, unknown>;
+    return {
+      certificateArn: String(data["certificate_arn"] ?? ""),
+      certificatePemBytes: Number(data["certificate_pem_bytes"] ?? 0),
+      certificatePemBlocks: Number(data["certificate_pem_blocks"] ?? 0),
+      chainPemBytes: Number(data["chain_pem_bytes"] ?? 0),
+      chainPemBlocks: Number(data["chain_pem_blocks"] ?? 0),
+      externalCaValidated: Boolean(data["external_ca_validated"] ?? false),
+      status: String(data["status"] ?? ""),
+      certType: String(data["cert_type"] ?? ""),
+    };
   }
 }

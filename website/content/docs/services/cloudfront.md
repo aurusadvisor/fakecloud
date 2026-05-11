@@ -6,7 +6,7 @@ weight = 24
 
 fakecloud implements CloudFront's REST-XML control plane focused on the operations real applications and Terraform stacks rely on: distribution lifecycle, invalidations, alias and web ACL association, tags, the full policy resource surface (OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment), CloudFront Functions, public keys + key groups, key value stores, legacy origin access identities, per-distribution monitoring subscriptions, the legacy RTMP streaming distributions, field-level encryption configs + profiles, realtime log configs, VPC origins, anycast IP lists, trust stores, resource policies, connection groups, domain association + DNS verification, managed certificate details, and the promote-staging distribution swap. 147 operations.
 
-**Status: Batches 1-6b shipped, plus ConnectionFunctions and real `boa_engine`-backed `TestFunction` / `TestConnectionFunction` execution.** Distribution tenants are deferred to a later batch.
+**Status: Batches 1-6b shipped, plus ConnectionFunctions, DistributionTenants, and real `boa_engine`-backed `TestFunction` / `TestConnectionFunction` execution.** 147 of 147 operations.
 
 ## Supported today
 
@@ -38,6 +38,7 @@ fakecloud implements CloudFront's REST-XML control plane focused on the operatio
 - **Domain ops** — `ListDomainConflicts` (returns empty conflicts in fakecloud since there is no global DNS namespace), `UpdateDomainAssociation` (round-trips `Domain` + target `DistributionId`/`DistributionTenantId`), `VerifyDnsConfiguration` (returns a deterministic `valid-configuration` status).
 - **Managed Certificate Details** — `GetManagedCertificateDetails` returns a synthesized ACM certificate ARN + `issued` status keyed by the supplied identifier.
 - **Promote-staging** — `UpdateDistributionWithStagingConfig` swaps the distribution's `ETag` against the configured `StagingDistributionId` and rejects unknown staging ids with `NoSuchDistribution`.
+- **Distribution Tenants** — `CreateDistributionTenant`, `GetDistributionTenant`, `GetDistributionTenantByDomain`, `UpdateDistributionTenant`, `DeleteDistributionTenant`, `ListDistributionTenants`, `ListDistributionTenantsByCustomization`, `VerifyDnsConfiguration` (tenant-scoped). ETag/If-Match concurrency, per-tenant `Customizations` (web ACL, certificate, geo restrictions, origin overrides) round-trip element-for-element, duplicate `Name` rejected with `EntityAlreadyExists`.
 
 ### Concurrency semantics
 
@@ -87,10 +88,10 @@ aws --endpoint-url http://localhost:4566 cloudfront create-invalidation \
 aws --endpoint-url http://localhost:4566 cloudfront list-invalidations --distribution-id "$ID"
 ```
 
-## Not yet implemented (planned)
+## Admin endpoints
 
-| Surface                                | Status                  |
-|----------------------------------------|-------------------------|
-| Distribution Tenants                   | deferred                |
+- `POST /_fakecloud/cloudfront/distributions/{id}/status` — flip a stored distribution's reported `Status` (e.g. between `InProgress` and `Deployed`) without waiting on the auto-deploy tick. Body: `{"status": "Deployed"}`. Returns `204 No Content` on success and `404 Not Found` for an unknown id. Useful for tests that assert behavior gated on the post-deploy status.
+
+## Caveats
 
 There is no edge data plane: requests against a CloudFront distribution domain are not actually proxied to origins. Use ELBv2's in-process data plane for HTTP request matching tests today.
