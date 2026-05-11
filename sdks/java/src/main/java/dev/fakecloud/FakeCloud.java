@@ -542,6 +542,14 @@ public final class FakeCloud {
                     "/_fakecloud/stepfunctions/executions",
                     StepFunctionsExecutionsResponse.class);
         }
+
+        public Types.SfnEnqueueActivityTaskResponse enqueueActivityTask(
+                Types.SfnEnqueueActivityTaskRequest req) {
+            return http.postJson(
+                    "/_fakecloud/stepfunctions/enqueue-activity-task",
+                    req,
+                    Types.SfnEnqueueActivityTaskResponse.class);
+        }
     }
 
     public static final class BedrockClient {

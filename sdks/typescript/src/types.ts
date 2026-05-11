@@ -458,6 +458,17 @@ export interface StepFunctionsExecutionsResponse {
   executions: StepFunctionsExecution[];
 }
 
+export interface SfnEnqueueActivityTaskRequest {
+  activityArn: string;
+  input?: string;
+  heartbeatSeconds?: number;
+  timeoutSeconds?: number;
+}
+
+export interface SfnEnqueueActivityTaskResponse {
+  taskToken: string;
+}
+
 // ── Bedrock ───────────────────────────────────────────────────────
 
 export interface BedrockInvocation {

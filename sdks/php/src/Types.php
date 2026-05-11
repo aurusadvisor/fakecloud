@@ -1204,6 +1204,43 @@ final class StepFunctionsExecutionsResponse
     }
 }
 
+final class SfnEnqueueActivityTaskRequest
+{
+    public function __construct(
+        public readonly string $activityArn,
+        public readonly ?string $input = null,
+        public readonly ?int $heartbeatSeconds = null,
+        public readonly ?int $timeoutSeconds = null,
+    ) {}
+
+    public function toArray(): array
+    {
+        $out = ['activityArn' => $this->activityArn];
+        if ($this->input !== null) {
+            $out['input'] = $this->input;
+        }
+        if ($this->heartbeatSeconds !== null) {
+            $out['heartbeatSeconds'] = $this->heartbeatSeconds;
+        }
+        if ($this->timeoutSeconds !== null) {
+            $out['timeoutSeconds'] = $this->timeoutSeconds;
+        }
+        return $out;
+    }
+}
+
+final class SfnEnqueueActivityTaskResponse
+{
+    public function __construct(
+        public readonly string $taskToken,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self($data['taskToken']);
+    }
+}
+
 // ── Bedrock ────────────────────────────────────────────────────
 
 final class BedrockInvocation

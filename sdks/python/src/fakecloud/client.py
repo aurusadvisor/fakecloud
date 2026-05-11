@@ -67,6 +67,8 @@ from fakecloud.types import (
     S3NotificationsResponse,
     SchedulerSchedulesResponse,
     SesEmailsResponse,
+    SfnEnqueueActivityTaskRequest,
+    SfnEnqueueActivityTaskResponse,
     SnsMessagesResponse,
     SqsMessagesResponse,
     StepFunctionsExecutionsResponse,
@@ -845,6 +847,18 @@ class StepFunctionsClient:
         _check(resp)
         return StepFunctionsExecutionsResponse.from_dict(resp.json())
 
+    async def enqueue_activity_task(
+        self, req: SfnEnqueueActivityTaskRequest
+    ) -> SfnEnqueueActivityTaskResponse:
+        """Insert a pending task into an activity worker queue without
+        running an ASL execution."""
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/stepfunctions/enqueue-activity-task",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return SfnEnqueueActivityTaskResponse.from_dict(resp.json())
+
 
 class BedrockClient:
     """Async Bedrock introspection client."""
@@ -1268,6 +1282,16 @@ class _SyncStepFunctionsClient:
         resp = self._client.get(f"{self._base}/_fakecloud/stepfunctions/executions")
         _check(resp)
         return StepFunctionsExecutionsResponse.from_dict(resp.json())
+
+    def enqueue_activity_task(
+        self, req: SfnEnqueueActivityTaskRequest
+    ) -> SfnEnqueueActivityTaskResponse:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/stepfunctions/enqueue-activity-task",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return SfnEnqueueActivityTaskResponse.from_dict(resp.json())
 
 
 class _SyncBedrockClient:

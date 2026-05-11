@@ -1048,6 +1048,33 @@ class StepFunctionsExecutionsResponse:
         )
 
 
+@dataclass
+class SfnEnqueueActivityTaskRequest:
+    activity_arn: str
+    input: Optional[str] = None
+    heartbeat_seconds: Optional[int] = None
+    timeout_seconds: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {"activityArn": self.activity_arn}
+        if self.input is not None:
+            d["input"] = self.input
+        if self.heartbeat_seconds is not None:
+            d["heartbeatSeconds"] = self.heartbeat_seconds
+        if self.timeout_seconds is not None:
+            d["timeoutSeconds"] = self.timeout_seconds
+        return d
+
+
+@dataclass
+class SfnEnqueueActivityTaskResponse:
+    task_token: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SfnEnqueueActivityTaskResponse:
+        return cls(task_token=data["taskToken"])
+
+
 # ── Bedrock ────────────────────────────────────────────────────────────
 
 

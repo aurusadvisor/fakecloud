@@ -57,6 +57,8 @@ import type {
   CompromisedPasswordsResponse,
   WebAuthnCredentialsResponse,
   StepFunctionsExecutionsResponse,
+  SfnEnqueueActivityTaskRequest,
+  SfnEnqueueActivityTaskResponse,
   EcsClustersResponse,
   EcsTask,
   EcsTasksResponse,
@@ -479,6 +481,20 @@ export class StepFunctionsClient {
   async getExecutions(): Promise<StepFunctionsExecutionsResponse> {
     const resp = await fetch(
       `${this.baseUrl}/_fakecloud/stepfunctions/executions`,
+    );
+    return parse(resp);
+  }
+
+  async enqueueActivityTask(
+    req: SfnEnqueueActivityTaskRequest,
+  ): Promise<SfnEnqueueActivityTaskResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/stepfunctions/enqueue-activity-task`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      },
     );
     return parse(resp);
   }

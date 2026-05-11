@@ -532,6 +532,13 @@ final class StepFunctionsClient
             $this->http->get('/_fakecloud/stepfunctions/executions')
         );
     }
+
+    public function enqueueActivityTask(SfnEnqueueActivityTaskRequest $req): SfnEnqueueActivityTaskResponse
+    {
+        return SfnEnqueueActivityTaskResponse::fromArray(
+            $this->http->postJson('/_fakecloud/stepfunctions/enqueue-activity-task', $req->toArray())
+        );
+    }
 }
 
 final class BedrockClient
