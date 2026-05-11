@@ -530,7 +530,7 @@ impl CognitoService {
             }
         }
 
-        let tokens = {
+        let pretoken_setup = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
 
@@ -600,11 +600,53 @@ impl CognitoService {
                     .zip(pool.signing_kid.as_ref())
                     .map(|(p, k)| (p.clone(), k.clone()))
             });
-            let signing = pool_signing_owned
-                .as_ref()
-                .map(|(p, k)| (p.as_str(), k.as_str()));
-            let tokens = generate_tokens(pool_id, client_id, &sub, username, &region, signing);
+            (sub, pool_signing_owned)
+        };
+        let (sub, pool_signing_owned) = pretoken_setup;
 
+        let pretoken_overrides = if let Some(ctx) = self.delivery_ctx.as_ref() {
+            if let Some(function_arn) = triggers::get_trigger_arn(
+                &self.state,
+                pool_id,
+                TriggerSource::TokenGenerationAuthentication,
+            ) {
+                let event = triggers::build_trigger_event(
+                    TriggerSource::TokenGenerationAuthentication,
+                    pool_id,
+                    Some(client_id),
+                    username,
+                    &user_attrs,
+                    &region,
+                    &account_id,
+                );
+                triggers::invoke_trigger(ctx, &function_arn, &event)
+                    .await
+                    .and_then(|resp| resp.get("response").cloned())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let signing = pool_signing_owned
+            .as_ref()
+            .map(|(p, k)| (p.as_str(), k.as_str()));
+        let tokens = super::generate_tokens_with_overrides(
+            pool_id,
+            client_id,
+            &sub,
+            username,
+            &region,
+            signing,
+            None,
+            None,
+            pretoken_overrides.as_ref(),
+        );
+
+        {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
             state.refresh_tokens.insert(
                 tokens.refresh_token.clone(),
                 RefreshTokenData {
@@ -635,9 +677,7 @@ impl CognitoService {
                 success: true,
                 feedback_value: None,
             });
-
-            tokens
-        };
+        }
 
         if let Some(ctx) = self.delivery_ctx.as_ref() {
             if let Some(function_arn) = triggers::get_trigger_arn(
