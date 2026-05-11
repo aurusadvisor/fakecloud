@@ -1503,12 +1503,12 @@ mod tests {
     }
 
     #[test]
-    fn describe_configuration_templates_returns_empty() {
+    fn describe_configuration_templates_returns_standard_set() {
         let svc = make_service();
         let req = make_request("DescribeConfigurationTemplates", json!({}));
         let resp = svc.describe_configuration_templates(&req).unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-        assert!(body["configurationTemplates"]
+        assert!(!body["configurationTemplates"]
             .as_array()
             .unwrap()
             .is_empty());

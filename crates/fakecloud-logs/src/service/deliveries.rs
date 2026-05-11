@@ -721,6 +721,13 @@ impl LogsService {
             delivery_destination_type: dest_type.to_string(),
             arn: arn.clone(),
             tags: tags.clone(),
+            field_delimiter: field_delimiter.clone(),
+            record_fields: record_fields.clone(),
+            s3_delivery_configuration: if s3_delivery_config.is_null() {
+                None
+            } else {
+                Some(s3_delivery_config.clone())
+            },
         };
 
         state.deliveries.insert(delivery_id.clone(), delivery);
@@ -775,19 +782,26 @@ impl LogsService {
             )
         })?;
 
+        let mut delivery_json = json!({
+            "id": d.id,
+            "deliverySourceName": d.delivery_source_name,
+            "deliveryDestinationArn": d.delivery_destination_arn,
+            "deliveryDestinationType": d.delivery_destination_type,
+            "arn": d.arn,
+            "tags": d.tags,
+        });
+        if !d.record_fields.is_empty() {
+            delivery_json["recordFields"] = json!(d.record_fields);
+        }
+        if let Some(ref delim) = d.field_delimiter {
+            delivery_json["fieldDelimiter"] = json!(delim);
+        }
+        if let Some(ref s3) = d.s3_delivery_configuration {
+            delivery_json["s3DeliveryConfiguration"] = s3.clone();
+        }
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({
-                "delivery": {
-                    "id": d.id,
-                    "deliverySourceName": d.delivery_source_name,
-                    "deliveryDestinationArn": d.delivery_destination_arn,
-                    "deliveryDestinationType": d.delivery_destination_type,
-                    "arn": d.arn,
-                    "tags": d.tags,
-                }
-            }))
-            .unwrap(),
+            serde_json::to_string(&json!({ "delivery": delivery_json })).unwrap(),
         ))
     }
 
@@ -853,21 +867,31 @@ impl LogsService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let id = require_str(&body, "id")?;
+        let id = require_str(&body, "id")?.to_string();
 
-        let accounts = self.state.read();
-        let empty = crate::state::LogsState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        if !state.deliveries.contains_key(id) {
-            return Err(AwsServiceError::aws_error(
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let delivery = state.deliveries.get_mut(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "ResourceNotFoundException",
                 format!("Delivery not found: {id}"),
-            ));
-        }
-        drop(accounts);
+            )
+        })?;
 
-        // No-op: delivery configuration update is accepted but not stored
+        if let Some(delim) = body["fieldDelimiter"].as_str() {
+            delivery.field_delimiter = Some(delim.to_string());
+        }
+        if let Some(arr) = body["recordFields"].as_array() {
+            delivery.record_fields = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+        }
+        if !body["s3DeliveryConfiguration"].is_null() {
+            delivery.s3_delivery_configuration = Some(body["s3DeliveryConfiguration"].clone());
+        }
+
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
 
@@ -879,12 +903,60 @@ impl LogsService {
         validate_optional_string_length("service", body["service"].as_str(), 1, 255)?;
         validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 4096)?;
         validate_optional_range_i64("limit", body["limit"].as_i64(), 1, 50)?;
-        // Stub: return empty configuration templates
+        let service_filter = body["service"].as_str();
+        let log_type_filter = body["logTypes"].as_array();
+        let dest_type_filter = body["resourceType"].as_str();
+
+        let templates = standard_delivery_templates();
+        let filtered: Vec<Value> = templates
+            .into_iter()
+            .filter(|t| {
+                service_filter.is_none_or(|s| t["service"].as_str() == Some(s))
+                    && dest_type_filter
+                        .is_none_or(|d| t["deliveryDestinationType"].as_str() == Some(d))
+                    && log_type_filter.is_none_or(|types| {
+                        types.iter().any(|v| v.as_str() == t["logType"].as_str())
+                    })
+            })
+            .collect();
+
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({ "configurationTemplates": [] })).unwrap(),
+            serde_json::to_string(&json!({ "configurationTemplates": filtered })).unwrap(),
         ))
     }
+}
+
+fn standard_delivery_templates() -> Vec<Value> {
+    let services = [
+        "AWS/APIGateway",
+        "AWS/Bedrock",
+        "AWS/Lambda",
+        "AWS/CloudFront",
+    ];
+    let dest_types = ["S3", "CWL", "FH"];
+    let mut out = Vec::new();
+    for svc in services {
+        for dt in dest_types {
+            out.push(json!({
+                "service": svc,
+                "logType": "ACCESS_LOGS",
+                "resourceType": "AWS::Logs::DeliverySource",
+                "deliveryDestinationType": dt,
+                "defaultDeliveryConfigValues": {
+                    "fieldDelimiter": " ",
+                    "recordFields": ["timestamp", "message"],
+                },
+                "allowedFields": [
+                    {"name": "timestamp", "mandatory": true},
+                    {"name": "message", "mandatory": false},
+                ],
+                "allowedOutputFormats": ["json", "plain", "w3c", "raw", "parquet"],
+                "allowedActionForAllowVendedLogsDeliveryForResource": "logs:CreateDelivery",
+            }));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1220,5 +1292,73 @@ mod tests {
         let resp = svc.describe_deliveries(&req).unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         assert!(body["deliveries"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn update_delivery_configuration_persists_fields() {
+        let svc = make_service();
+
+        let req = make_request(
+            "PutDeliverySource",
+            json!({
+                "name": "my-source",
+                "resourceArn": "arn:aws:logs:us-east-1:123456789012:log-group:test",
+                "logType": "ACCESS_LOGS"
+            }),
+        );
+        svc.put_delivery_source(&req).unwrap();
+        let req = make_request(
+            "PutDeliveryDestination",
+            json!({"name": "my-dest", "deliveryDestinationConfiguration": {"destinationResourceArn": "arn:aws:s3:::my-bucket"}}),
+        );
+        let resp = svc.put_delivery_destination(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let dest_arn = body["deliveryDestination"]["arn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let req = make_request(
+            "CreateDelivery",
+            json!({"deliverySourceName": "my-source", "deliveryDestinationArn": dest_arn}),
+        );
+        let resp = svc.create_delivery(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let id = body["delivery"]["id"].as_str().unwrap().to_string();
+
+        let req = make_request(
+            "UpdateDeliveryConfiguration",
+            json!({
+                "id": id,
+                "fieldDelimiter": "|",
+                "recordFields": ["@timestamp", "@message"],
+            }),
+        );
+        svc.update_delivery_configuration(&req).unwrap();
+
+        let req = make_request("GetDelivery", json!({ "id": id }));
+        let resp = svc.get_delivery(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["delivery"]["fieldDelimiter"], "|");
+        assert_eq!(body["delivery"]["recordFields"][0], "@timestamp");
+    }
+
+    #[test]
+    fn describe_configuration_templates_returns_standard_set() {
+        let svc = make_service();
+        let req = make_request("DescribeConfigurationTemplates", json!({}));
+        let resp = svc.describe_configuration_templates(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arr = body["configurationTemplates"].as_array().unwrap();
+        assert!(!arr.is_empty(), "expected non-empty templates");
+
+        let req = make_request(
+            "DescribeConfigurationTemplates",
+            json!({"service": "AWS/Lambda"}),
+        );
+        let resp = svc.describe_configuration_templates(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let filtered = body["configurationTemplates"].as_array().unwrap();
+        assert!(filtered.iter().all(|t| t["service"] == "AWS/Lambda"));
     }
 }

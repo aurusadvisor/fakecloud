@@ -297,6 +297,12 @@ pub struct Delivery {
     pub delivery_destination_type: String,
     pub arn: String,
     pub tags: BTreeMap<String, String>,
+    #[serde(default)]
+    pub field_delimiter: Option<String>,
+    #[serde(default)]
+    pub record_fields: Vec<String>,
+    #[serde(default)]
+    pub s3_delivery_configuration: Option<serde_json::Value>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
