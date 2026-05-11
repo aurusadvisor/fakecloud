@@ -53,8 +53,8 @@ For tests that need to assert on load balancer state without going through the A
 - `GET /_fakecloud/elbv2/listeners` — list all listeners
 - `GET /_fakecloud/elbv2/rules` — list all listener rules
 
-## Roadmap
+## Status
 
-This page tracks the ELBv2 surface that has shipped. Subsequent batches will land target groups + targets + health, listeners + rules, listener attributes + trust stores + capacity reservations, and finally an in-process HTTP router so requests to the LB DNS name actually route to registered targets.
+ELBv2 control plane is fully implemented (ALB/NLB/GWLB CRUD, target groups + targets + health probes, listeners, rules, certificates, attributes, capacity reservations, mTLS trust stores + revocations, SSL policies, resource policies, tags). ALB has an in-process HTTP data plane for rule matching, target routing, fixed-response, redirect, and sticky sessions, with WAFv2 inspection wired in. NLB and GWLB are control-plane only.
 
 [Open an issue](https://github.com/faiscadev/fakecloud/issues) if you have a specific ELBv2 use case to prioritize.
