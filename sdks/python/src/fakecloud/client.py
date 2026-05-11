@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional, cast
 import httpx
 
 from fakecloud.types import (
+    AcmCertificateChainInfo,
     ApiGatewayV2RequestsResponse,
     AppAsScheduledTickResponse,
     AppAsTickResponse,
@@ -17,7 +18,6 @@ from fakecloud.types import (
     BedrockModelResponseConfig,
     BedrockResponseRule,
     BedrockStatusResponse,
-    AcmCertificateChainInfo,
     CompromisedPasswordsRequest,
     CompromisedPasswordsResponse,
     ConfirmationCodesResponse,
