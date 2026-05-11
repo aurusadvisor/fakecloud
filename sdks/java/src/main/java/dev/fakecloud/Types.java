@@ -355,6 +355,40 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record MintAuthorizationCodeResponse(String code) {}
 
+    /**
+     * Payload for {@code POST /_fakecloud/cognito/compromised-passwords}.
+     * Each plaintext is SHA-256 hashed server-side and added to the
+     * per-account compromised-password set; subsequent {@code SignUp}
+     * / {@code AdminInitiateAuth} fail with
+     * {@code InvalidPasswordException} on any pool whose
+     * {@code CompromisedCredentialsRiskConfiguration.Actions.EventAction}
+     * is {@code BLOCK}.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record CompromisedPasswordsRequest(List<String> passwords) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record CompromisedPasswordsResponse(long added) {}
+
+    /**
+     * Registered WebAuthn credential from
+     * {@code GET /_fakecloud/cognito/webauthn-credentials}. The
+     * {@code attestationInfo} field is the parsed-attestation JSON
+     * (packed format details, AAGUID, certificate chain summary,
+     * signature counter); its shape depends on the attestation format
+     * so it is surfaced as a generic {@link Object}.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record WebAuthnCredential(
+            @com.fasterxml.jackson.annotation.JsonProperty("account_id") String accountId,
+            @com.fasterxml.jackson.annotation.JsonProperty("pool_user") String poolUser,
+            @com.fasterxml.jackson.annotation.JsonProperty("credential_id") String credentialId,
+            @com.fasterxml.jackson.annotation.JsonProperty("relying_party_id") String relyingPartyId,
+            @com.fasterxml.jackson.annotation.JsonProperty("attestation_info") Object attestationInfo) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record WebAuthnCredentialsResponse(List<WebAuthnCredential> credentials) {}
+
     // ── Step Functions ─────────────────────────────────────────────
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record StepFunctionsExecution(

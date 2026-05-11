@@ -406,6 +406,41 @@ export interface MintAuthorizationCodeResponse {
   code: string;
 }
 
+/**
+ * Payload for `POST /_fakecloud/cognito/compromised-passwords`. Each
+ * plaintext is SHA-256 hashed server-side and added to the
+ * compromised-password set; subsequent `SignUp` / `AdminInitiateAuth`
+ * fail with `InvalidPasswordException` on pools whose
+ * `CompromisedCredentialsRiskConfiguration.Actions.EventAction` is
+ * `BLOCK`.
+ */
+export interface CompromisedPasswordsRequest {
+  passwords: string[];
+}
+
+export interface CompromisedPasswordsResponse {
+  added: number;
+}
+
+/**
+ * Registered WebAuthn credential from
+ * `GET /_fakecloud/cognito/webauthn-credentials`. `attestationInfo` is
+ * the parsed-attestation JSON (packed format details, AAGUID,
+ * certificate chain summary, signature counter); its shape depends on
+ * the attestation format so it is left untyped.
+ */
+export interface WebAuthnCredential {
+  account_id: string;
+  pool_user: string;
+  credential_id: string;
+  relying_party_id: string;
+  attestation_info: unknown;
+}
+
+export interface WebAuthnCredentialsResponse {
+  credentials: WebAuthnCredential[];
+}
+
 // ── Step Functions ────────────────────────────────────────────────
 
 export interface StepFunctionsExecution {

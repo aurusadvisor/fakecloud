@@ -1,5 +1,7 @@
 package fakecloud
 
+import "encoding/json"
+
 // ── Health & Reset ─────────────────────────────────────────────────
 
 // HealthResponse is returned by the health endpoint.
@@ -472,6 +474,40 @@ type MintAuthorizationCodeRequest struct {
 // MintAuthorizationCodeResponse is returned after minting a code.
 type MintAuthorizationCodeResponse struct {
 	Code string `json:"code"`
+}
+
+// CompromisedPasswordsRequest is the payload for the
+// /_fakecloud/cognito/compromised-passwords admin endpoint. Each
+// supplied plaintext password is SHA-256 hashed and added to the
+// compromised-password set; subsequent `SignUp` / `AdminInitiateAuth`
+// calls fail with `InvalidPasswordException` when a user pool has
+// `CompromisedCredentialsRiskConfiguration.Actions.EventAction = BLOCK`
+// and the supplied password hashes to a member of that set.
+type CompromisedPasswordsRequest struct {
+	Passwords []string `json:"passwords"`
+}
+
+// CompromisedPasswordsResponse is returned after registering passwords.
+type CompromisedPasswordsResponse struct {
+	Added uint64 `json:"added"`
+}
+
+// WebAuthnCredential describes a registered WebAuthn credential
+// surfaced by the introspection endpoint. `AttestationInfo` is the
+// parsed-attestation JSON object (packed format details, AAGUID,
+// certificate chain summary, signature counter) and is left as raw
+// JSON because its shape depends on the attestation format.
+type WebAuthnCredential struct {
+	AccountID       string          `json:"account_id"`
+	PoolUser        string          `json:"pool_user"`
+	CredentialID    string          `json:"credential_id"`
+	RelyingPartyID  string          `json:"relying_party_id"`
+	AttestationInfo json.RawMessage `json:"attestation_info"`
+}
+
+// WebAuthnCredentialsResponse contains all registered WebAuthn credentials.
+type WebAuthnCredentialsResponse struct {
+	Credentials []WebAuthnCredential `json:"credentials"`
 }
 
 // ── Step Functions ─────────────────────────────────────────────────

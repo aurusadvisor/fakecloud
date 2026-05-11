@@ -53,6 +53,9 @@ import type {
   AuthEventsResponse,
   MintAuthorizationCodeRequest,
   MintAuthorizationCodeResponse,
+  CompromisedPasswordsRequest,
+  CompromisedPasswordsResponse,
+  WebAuthnCredentialsResponse,
   StepFunctionsExecutionsResponse,
   EcsClustersResponse,
   EcsTask,
@@ -433,6 +436,27 @@ export class CognitoClient {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(req),
       },
+    );
+    return parse(resp);
+  }
+
+  async setCompromisedPasswords(
+    req: CompromisedPasswordsRequest,
+  ): Promise<CompromisedPasswordsResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/cognito/compromised-passwords`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      },
+    );
+    return parse(resp);
+  }
+
+  async getWebAuthnCredentials(): Promise<WebAuthnCredentialsResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/cognito/webauthn-credentials`,
     );
     return parse(resp);
   }
