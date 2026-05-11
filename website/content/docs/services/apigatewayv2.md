@@ -9,12 +9,14 @@ fakecloud implements **103 of 103** API Gateway v2 operations at 100% conformanc
 ## Supported features
 
 - **HTTP APIs** — CreateApi, UpdateApi, DeleteApi, GetApis
-- **WebSocket APIs** — CreateApi with `protocolType=WEBSOCKET`, live data plane upgrade endpoint
-- **Routes** — path parameters, wildcards, HTTP method routing
-- **Integrations** — Lambda proxy (v2.0 format), HTTP proxy, Mock integration
-- **Stages** — CRUD, deployments, default stage
-- **Authorizers** — JWT (OIDC issuers, audience validation) and Lambda authorizers
+- **WebSocket APIs** — CreateApi with `protocolType=WEBSOCKET`, live data plane upgrade endpoint, `$connect` / `$disconnect` / `$default` route dispatch to Lambda
+- **Routes** — path parameters, wildcards, HTTP method routing; stage variable substitution in integration URIs and route keys
+- **Integrations** — Lambda proxy (v2.0 format), HTTP proxy, Mock integration, AWS service integrations dispatched in-process
+- **Stages** — CRUD, deployments, default stage; stage variables exposed to integrations and access logs
+- **Authorizers** — JWT validated with real RS256 verification against the issuer's JWKS (audience, expiry, scope); REQUEST Lambda authorizers invoke real functions and cache by `identitySource`
+- **Custom domain names + API mappings** — `ApiMapping` resolves host header to the right API + stage at request time
 - **CORS** — configuration on routes and globally
+- **Access logs** — per-stage `accessLogSettings` deliver formatted log events to the configured CloudWatch Logs log group
 - **Request history** — every request served is recorded for introspection
 - **Deployments** — CreateDeployment, GetDeployments
 - **Management API** — `apigatewaymanagementapi` ops (PostToConnection, GetConnection, DeleteConnection) at `/@connections/{id}` and `/{stage}/@connections/{id}`
@@ -31,14 +33,14 @@ REST for management, path-based routing for the executed API. WebSocket APIs upg
 ## Cross-service delivery
 
 - **API Gateway v2 -> Lambda** — HTTP API routes invoke Lambda functions with proxy integration v2.0 event format
+- **API Gateway v2 -> Lambda (authorizers)** — REQUEST (Lambda) authorizers invoke real functions; policy + context returned drive the request decision
+- **API Gateway v2 -> JWT issuers** — JWT authorizers fetch the configured issuer's JWKS and verify caller tokens (RS256 signature, expiry, audience, scope)
+- **API Gateway v2 -> CloudWatch Logs** — stage access logs delivered to the configured log group with the formatted access log line
+- **API Gateway v2 -> AWS services** — AWS service integrations dispatch to in-process service handlers
 
 ## Why this matters
 
 LocalStack paywalls API Gateway v2. fakecloud implements the full HTTP API surface free, with real route matching, real Lambda proxy integration, and full request introspection. Webhook testing for event-driven applications is fully supported.
-
-## Limitations
-
-- The data plane is partially implemented. WebSocket support (`$connect`/`$disconnect`/`$default`), Lambda proxy integration, and HTTP proxy integration work. JWT authorizer enforcement, Lambda authorizer enforcement, AWS service integrations, stage-variable substitution, custom-domain `ApiMapping`, and access log delivery are either stubbed or partially implemented.
 
 ## Source
 
