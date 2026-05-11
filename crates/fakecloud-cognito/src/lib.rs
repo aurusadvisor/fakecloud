@@ -3,6 +3,7 @@ pub(crate) mod service;
 pub(crate) mod state;
 pub mod triggers;
 pub mod user_status;
+pub mod webauthn;
 
 pub use service::{
     ensure_pool_signing_key, handle_oauth2_authorize, handle_oauth2_revoke, handle_oauth2_token,

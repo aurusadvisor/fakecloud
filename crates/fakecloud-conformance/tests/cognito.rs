@@ -4338,7 +4338,7 @@ async fn cognito_complete_web_authn_registration() {
                 "authenticatorAttachment": "platform",
                 "response": {
                     "clientDataJSON": "eyJ0ZXN0IjogdHJ1ZX0",
-                    "attestationObject": "o2NmbXRkbm9uZQ",
+                    "attestationObject": "o2NmbXRmcGFja2VkaGF1dGhEYXRhWCUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAZ2F0dFN0bXSjY2FsZyZjc2lnWEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY3g1Y4FEMIIAEA",
                     "transports": ["internal"]
                 },
                 "clientExtensionResults": {}
@@ -4374,7 +4374,7 @@ async fn cognito_list_web_authn_credentials() {
                 "type": "public-key",
                 "response": {
                     "clientDataJSON": "eyJ0ZXN0IjogdHJ1ZX0",
-                    "attestationObject": "o2NmbXRkbm9uZQ",
+                    "attestationObject": "o2NmbXRmcGFja2VkaGF1dGhEYXRhWCUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAZ2F0dFN0bXSjY2FsZyZjc2lnWEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY3g1Y4FEMIIAEA",
                     "transports": ["usb"]
                 },
                 "clientExtensionResults": {}
@@ -4428,7 +4428,7 @@ async fn cognito_delete_web_authn_credential() {
                 "type": "public-key",
                 "response": {
                     "clientDataJSON": "eyJ0ZXN0IjogdHJ1ZX0",
-                    "attestationObject": "o2NmbXRkbm9uZQ",
+                    "attestationObject": "o2NmbXRmcGFja2VkaGF1dGhEYXRhWCUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAZ2F0dFN0bXSjY2FsZyZjc2lnWEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY3g1Y4FEMIIAEA",
                     "transports": ["ble"]
                 },
                 "clientExtensionResults": {}
