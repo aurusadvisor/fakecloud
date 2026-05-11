@@ -18,6 +18,8 @@ import type {
   EcrImagesResponse,
   EcrPullThroughRulesResponse,
   LambdaInvocationsResponse,
+  LogsAnomalyInjectRequest,
+  LogsAnomalyInjectResponse,
   WarmContainersResponse,
   EvictContainerResponse,
   SesEmailsResponse,
@@ -175,6 +177,24 @@ export class SesClient {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req),
     });
+    return parse(resp);
+  }
+}
+
+export class LogsClient {
+  constructor(private baseUrl: string) {}
+
+  async injectAnomaly(
+    req: LogsAnomalyInjectRequest,
+  ): Promise<LogsAnomalyInjectResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/logs/anomalies/inject`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      },
+    );
     return parse(resp);
   }
 }
@@ -519,6 +539,7 @@ export class FakeCloud {
   private readonly _rds: RdsClient;
   private readonly _elasticache: ElastiCacheClient;
   private readonly _ecr: EcrClient;
+  private readonly _logs: LogsClient;
   private readonly _ses: SesClient;
   private readonly _sns: SnsClient;
   private readonly _sqs: SqsClient;
@@ -544,6 +565,7 @@ export class FakeCloud {
     this._rds = new RdsClient(this.baseUrl);
     this._elasticache = new ElastiCacheClient(this.baseUrl);
     this._ecr = new EcrClient(this.baseUrl);
+    this._logs = new LogsClient(this.baseUrl);
     this._ses = new SesClient(this.baseUrl);
     this._sns = new SnsClient(this.baseUrl);
     this._sqs = new SqsClient(this.baseUrl);
@@ -615,6 +637,10 @@ export class FakeCloud {
 
   get ecr(): EcrClient {
     return this._ecr;
+  }
+
+  get logs(): LogsClient {
+    return this._logs;
   }
 
   get ses(): SesClient {

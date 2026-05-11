@@ -627,4 +627,22 @@ public final class Types {
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record SetCertificateStatusRequest(String status, String reason) {}
+
+    // ── CloudWatch Logs ───────────────────────────────────────────
+
+    /**
+     * Admin payload for {@code POST /_fakecloud/logs/anomalies/inject}.
+     * Lets tests seed synthetic CloudWatch Logs anomalies so they
+     * can exercise {@code ListAnomalies}/{@code UpdateAnomaly}
+     * deterministically.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record LogsAnomalyInjectRequest(
+            String anomalyDetectorArn,
+            String patternString,
+            List<String> logGroupArns,
+            String priority) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record LogsAnomalyInjectResponse(String anomalyId) {}
 }

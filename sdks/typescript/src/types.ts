@@ -700,3 +700,21 @@ export interface Elbv2Rule {
 export interface Elbv2RulesResponse {
   rules: Elbv2Rule[];
 }
+
+// ── CloudWatch Logs ────────────────────────────────────────────────
+
+/**
+ * Admin payload for `/_fakecloud/logs/anomalies/inject`. Lets tests
+ * seed synthetic CloudWatch Logs anomalies so they can exercise
+ * `ListAnomalies`/`UpdateAnomaly` deterministically.
+ */
+export interface LogsAnomalyInjectRequest {
+  anomalyDetectorArn: string;
+  patternString: string;
+  logGroupArns?: string[];
+  priority?: string;
+}
+
+export interface LogsAnomalyInjectResponse {
+  anomalyId: string;
+}

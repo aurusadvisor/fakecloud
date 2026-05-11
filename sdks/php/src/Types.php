@@ -1804,3 +1804,48 @@ final class Elbv2FlushAccessLogsResponse
         return new self((bool) ($data['flushed'] ?? false));
     }
 }
+
+// ── CloudWatch Logs ────────────────────────────────────────────────
+
+/**
+ * Admin payload for `/_fakecloud/logs/anomalies/inject`. Lets tests
+ * seed synthetic CloudWatch Logs anomalies so they can exercise
+ * `ListAnomalies`/`UpdateAnomaly` deterministically.
+ *
+ * @param list<string> $logGroupArns
+ */
+final class LogsAnomalyInjectRequest
+{
+    /** @param list<string> $logGroupArns */
+    public function __construct(
+        public readonly string $anomalyDetectorArn,
+        public readonly string $patternString,
+        public readonly array $logGroupArns = [],
+        public readonly ?string $priority = null,
+    ) {}
+
+    public function toArray(): array
+    {
+        $a = [
+            'anomalyDetectorArn' => $this->anomalyDetectorArn,
+            'patternString' => $this->patternString,
+            'logGroupArns' => $this->logGroupArns,
+        ];
+        if ($this->priority !== null) {
+            $a['priority'] = $this->priority;
+        }
+        return $a;
+    }
+}
+
+final class LogsAnomalyInjectResponse
+{
+    public function __construct(
+        public readonly string $anomalyId,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self((string) $data['anomalyId']);
+    }
+}

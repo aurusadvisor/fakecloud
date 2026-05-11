@@ -53,6 +53,8 @@ from fakecloud.types import (
     InboundEmailResponse,
     LambdaInvocationsResponse,
     LifecycleTickResponse,
+    LogsAnomalyInjectRequest,
+    LogsAnomalyInjectResponse,
     MintAuthorizationCodeRequest,
     MintAuthorizationCodeResponse,
     PendingConfirmationsResponse,
@@ -507,6 +509,24 @@ class _SyncAcmClient:
         _check(resp)
 
 
+class LogsClient:
+    """Async CloudWatch Logs admin/introspection client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def inject_anomaly(
+        self, req: LogsAnomalyInjectRequest
+    ) -> LogsAnomalyInjectResponse:
+        """Seed a synthetic anomaly for ListAnomalies/UpdateAnomaly tests."""
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/logs/anomalies/inject", json=req.to_dict()
+        )
+        _check(resp)
+        return LogsAnomalyInjectResponse.from_dict(resp.json())
+
+
 class SesClient:
     """Async SES introspection client."""
 
@@ -924,6 +944,21 @@ class _SyncElastiCacheClient:
         return ElastiCacheServerlessCachesResponse.from_dict(resp.json())
 
 
+class _SyncLogsClient:
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def inject_anomaly(
+        self, req: LogsAnomalyInjectRequest
+    ) -> LogsAnomalyInjectResponse:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/logs/anomalies/inject", json=req.to_dict()
+        )
+        _check(resp)
+        return LogsAnomalyInjectResponse.from_dict(resp.json())
+
+
 class _SyncSesClient:
     def __init__(self, client: httpx.Client, base_url: str) -> None:
         self._client = client
@@ -1293,6 +1328,10 @@ class FakeCloud:
         return EcrClient(self._client, self._base)
 
     @property
+    def logs(self) -> LogsClient:
+        return LogsClient(self._client, self._base)
+
+    @property
     def ses(self) -> SesClient:
         return SesClient(self._client, self._base)
 
@@ -1425,6 +1464,10 @@ class FakeCloudSync:
     @property
     def elasticache(self) -> _SyncElastiCacheClient:
         return _SyncElastiCacheClient(self._client, self._base)
+
+    @property
+    def logs(self) -> _SyncLogsClient:
+        return _SyncLogsClient(self._client, self._base)
 
     @property
     def ses(self) -> _SyncSesClient:
