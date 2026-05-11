@@ -2,6 +2,8 @@
 
 from fakecloud.client import (
     ApplicationAutoScalingClient,
+    BedrockAgentClient,
+    BedrockAgentRuntimeClient,
     BedrockClient,
     CognitoClient,
     DynamoDbClient,
@@ -23,6 +25,8 @@ from fakecloud.client import (
 
 __all__ = [
     "ApplicationAutoScalingClient",
+    "BedrockAgentClient",
+    "BedrockAgentRuntimeClient",
     "BedrockClient",
     "CognitoClient",
     "DynamoDbClient",

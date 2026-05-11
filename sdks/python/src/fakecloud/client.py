@@ -858,6 +858,33 @@ class BedrockClient:
         return BedrockStatusResponse.from_dict(resp.json())
 
 
+class BedrockAgentClient:
+    """Async Bedrock Agent (control plane) sub-client.
+
+    The fakecloud Bedrock Agent service has no admin/introspection endpoints
+    today; this client exists so callers can hold a typed handle alongside
+    the other Bedrock sub-clients and so future introspection helpers can
+    land here without an API break.
+    """
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+
+class BedrockAgentRuntimeClient:
+    """Async Bedrock Agent Runtime (data plane) sub-client.
+
+    Placeholder for future introspection helpers around InvokeAgent,
+    Retrieve, and RetrieveAndGenerate. Holds the base URL for parity with
+    the other Bedrock sub-clients.
+    """
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+
 # ── Sync sub-clients ────────────────────────────────────────────────
 
 
@@ -1220,6 +1247,18 @@ class _SyncBedrockClient:
         return BedrockStatusResponse.from_dict(resp.json())
 
 
+class _SyncBedrockAgentClient:
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+
+class _SyncBedrockAgentRuntimeClient:
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+
 # ── Main clients ────────────────────────────────────────────────────
 
 
@@ -1339,6 +1378,14 @@ class FakeCloud:
     @property
     def bedrock(self) -> BedrockClient:
         return BedrockClient(self._client, self._base)
+
+    @property
+    def bedrock_agent(self) -> BedrockAgentClient:
+        return BedrockAgentClient(self._client, self._base)
+
+    @property
+    def bedrock_agent_runtime(self) -> BedrockAgentRuntimeClient:
+        return BedrockAgentRuntimeClient(self._client, self._base)
 
     @property
     def ecs(self) -> EcsClient:
@@ -1473,6 +1520,14 @@ class FakeCloudSync:
     @property
     def bedrock(self) -> _SyncBedrockClient:
         return _SyncBedrockClient(self._client, self._base)
+
+    @property
+    def bedrock_agent(self) -> _SyncBedrockAgentClient:
+        return _SyncBedrockAgentClient(self._client, self._base)
+
+    @property
+    def bedrock_agent_runtime(self) -> _SyncBedrockAgentRuntimeClient:
+        return _SyncBedrockAgentRuntimeClient(self._client, self._base)
 
     @property
     def ecs(self) -> _SyncEcsClient:

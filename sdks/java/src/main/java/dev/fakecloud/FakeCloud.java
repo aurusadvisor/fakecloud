@@ -98,6 +98,8 @@ public final class FakeCloud {
     private final ApiGatewayV2Client apigatewayv2;
     private final StepFunctionsClient stepfunctions;
     private final BedrockClient bedrock;
+    private final BedrockAgentClient bedrockAgent;
+    private final BedrockAgentRuntimeClient bedrockAgentRuntime;
     private final EcsClient ecs;
     private final Elbv2Client elbv2;
     private final Route53Client route53;
@@ -126,6 +128,8 @@ public final class FakeCloud {
         this.apigatewayv2 = new ApiGatewayV2Client(http);
         this.stepfunctions = new StepFunctionsClient(http);
         this.bedrock = new BedrockClient(http);
+        this.bedrockAgent = new BedrockAgentClient(http);
+        this.bedrockAgentRuntime = new BedrockAgentRuntimeClient(http);
         this.ecs = new EcsClient(http);
         this.elbv2 = new Elbv2Client(http);
         this.route53 = new Route53Client(http);
@@ -186,6 +190,8 @@ public final class FakeCloud {
     public ApiGatewayV2Client apigatewayv2() { return apigatewayv2; }
     public StepFunctionsClient stepfunctions() { return stepfunctions; }
     public BedrockClient bedrock() { return bedrock; }
+    public BedrockAgentClient bedrockAgent() { return bedrockAgent; }
+    public BedrockAgentRuntimeClient bedrockAgentRuntime() { return bedrockAgentRuntime; }
     public EcsClient ecs() { return ecs; }
     public Elbv2Client elbv2() { return elbv2; }
     public Route53Client route53() { return route53; }
@@ -541,6 +547,31 @@ public final class FakeCloud {
         public BedrockStatusResponse clearFaults() {
             return http.delete("/_fakecloud/bedrock/faults", BedrockStatusResponse.class);
         }
+    }
+
+    /**
+     * Bedrock Agent (control plane) sub-client.
+     *
+     * The fakecloud Bedrock Agent service has no admin/introspection
+     * endpoints today; this client exists so callers can hold a typed handle
+     * alongside the other Bedrock sub-clients and so future helpers can land
+     * here without an API break.
+     */
+    public static final class BedrockAgentClient {
+        @SuppressWarnings("unused")
+        private final HttpTransport http;
+        BedrockAgentClient(HttpTransport http) { this.http = http; }
+    }
+
+    /**
+     * Bedrock Agent Runtime (data plane) sub-client. Placeholder for future
+     * introspection helpers around InvokeAgent, Retrieve, and
+     * RetrieveAndGenerate.
+     */
+    public static final class BedrockAgentRuntimeClient {
+        @SuppressWarnings("unused")
+        private final HttpTransport http;
+        BedrockAgentRuntimeClient(HttpTransport http) { this.http = http; }
     }
 
     public static final class EcsClient {

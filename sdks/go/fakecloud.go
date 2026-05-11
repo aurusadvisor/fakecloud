@@ -112,6 +112,16 @@ func (fc *FakeCloud) StepFunctions() *StepFunctionsClient { return &StepFunction
 // Bedrock returns the Bedrock sub-client.
 func (fc *FakeCloud) Bedrock() *BedrockClient { return &BedrockClient{fc: fc} }
 
+// BedrockAgent returns the Bedrock Agent (control plane) sub-client.
+func (fc *FakeCloud) BedrockAgent() *BedrockAgentClient {
+	return &BedrockAgentClient{fc: fc}
+}
+
+// BedrockAgentRuntime returns the Bedrock Agent Runtime (data plane) sub-client.
+func (fc *FakeCloud) BedrockAgentRuntime() *BedrockAgentRuntimeClient {
+	return &BedrockAgentRuntimeClient{fc: fc}
+}
+
 // ECS returns the ECS sub-client.
 func (fc *FakeCloud) ECS() *ECSClient { return &ECSClient{fc: fc} }
 
