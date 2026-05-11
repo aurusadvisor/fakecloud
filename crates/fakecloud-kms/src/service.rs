@@ -521,6 +521,25 @@ impl KmsService {
             asym_pub = Some(k);
         }
 
+        // Refuse asymmetric specs we cannot really generate keys for
+        // rather than store a no-DER key that would later fall through
+        // to a fake-bytes Sign/Verify path. SM2 currently has no
+        // pure-Rust impl wired in.
+        let is_asymmetric = input.key_spec.starts_with("ECC_")
+            || input.key_spec.starts_with("RSA_")
+            || input.key_spec == "SM2";
+        if is_asymmetric && asym_priv.is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "UnsupportedOperationException",
+                format!(
+                    "KeySpec '{}' is not supported by this fakecloud build; \
+                     no fake-signature fallback is provided",
+                    input.key_spec
+                ),
+            ));
+        }
+
         let key = KmsKey {
             key_id: key_id.clone(),
             arn: arn.clone(),
