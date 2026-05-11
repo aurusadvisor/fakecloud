@@ -571,13 +571,24 @@ async fn lambda_update_function_code_replaces_zip_and_recomputes_hash() {
 
 #[tokio::test]
 async fn lambda_update_function_code_with_s3_descriptor_rotates_hash() {
-    // S3Bucket+S3Key swap fingerprints the descriptor; a different
-    // descriptor must rotate CodeSha256 / RevisionId, identical
-    // descriptor must not.
+    // After R4 wired real S3 fetches, UpdateFunctionCode with S3Bucket+Key
+    // pulls the object bytes. The hash now reflects the actual ZIP, so
+    // seed the S3 bucket with the artifact before pointing Lambda at it.
     let server = TestServer::start().await;
-    let client = server.lambda_client().await;
+    let lambda = server.lambda_client().await;
+    let s3 = server.s3_client().await;
 
-    client
+    s3.create_bucket().bucket("deploy-bucket").send().await.unwrap();
+    let v1 = make_python_zip();
+    s3.put_object()
+        .bucket("deploy-bucket")
+        .key("lambdas/v2.zip")
+        .body(aws_sdk_s3::primitives::ByteStream::from(v1.clone()))
+        .send()
+        .await
+        .unwrap();
+
+    lambda
         .create_function()
         .function_name("upd-s3")
         .runtime(aws_sdk_lambda::types::Runtime::Python312)
@@ -585,14 +596,25 @@ async fn lambda_update_function_code_with_s3_descriptor_rotates_hash() {
         .handler("index.handler")
         .code(
             aws_sdk_lambda::types::FunctionCode::builder()
-                .zip_file(Blob::new(make_python_zip()))
+                .zip_file(Blob::new(v1.clone()))
                 .build(),
         )
         .send()
         .await
         .unwrap();
 
-    let pre_sha = client
+    // Seed a second, different artifact for the S3-source update.
+    let mut v2 = make_python_zip();
+    v2.extend_from_slice(b"-v2-tail");
+    s3.put_object()
+        .bucket("deploy-bucket")
+        .key("lambdas/v2.zip")
+        .body(aws_sdk_s3::primitives::ByteStream::from(v2.clone()))
+        .send()
+        .await
+        .unwrap();
+
+    let pre_sha = lambda
         .get_function_configuration()
         .function_name("upd-s3")
         .send()
@@ -602,7 +624,7 @@ async fn lambda_update_function_code_with_s3_descriptor_rotates_hash() {
         .unwrap()
         .to_string();
 
-    let updated = client
+    let updated = lambda
         .update_function_code()
         .function_name("upd-s3")
         .s3_bucket("deploy-bucket")
@@ -612,18 +634,6 @@ async fn lambda_update_function_code_with_s3_descriptor_rotates_hash() {
         .unwrap();
     let post_sha = updated.code_sha256().unwrap().to_string();
     assert_ne!(post_sha, pre_sha);
-
-    // Adding S3ObjectVersion changes the descriptor, so the hash rotates.
-    let versioned = client
-        .update_function_code()
-        .function_name("upd-s3")
-        .s3_bucket("deploy-bucket")
-        .s3_key("lambdas/v2.zip")
-        .s3_object_version("ver-abc123")
-        .send()
-        .await
-        .unwrap();
-    assert_ne!(versioned.code_sha256().unwrap(), post_sha);
 }
 
 #[tokio::test]
