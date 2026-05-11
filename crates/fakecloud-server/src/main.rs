@@ -563,7 +563,7 @@ async fn main() {
     let mut delivery_for_logs = DeliveryBus::new()
         .with_sqs(sqs_delivery.clone())
         .with_kinesis(kinesis_delivery)
-        .with_s3(s3_delivery_for_logs)
+        .with_s3(s3_delivery_for_logs.clone())
         .with_firehose(firehose_delivery_for_logs.clone())
         .with_cloudwatch_metrics(cloudwatch_delivery_for_logs.clone());
     if let Some(ref ld) = lambda_delivery {
@@ -1175,6 +1175,7 @@ async fn main() {
     lambda_service = lambda_service.with_role_trust_validator(
         fakecloud_iam::pass_role::IamRoleTrustValidator::shared(iam_state.clone()),
     );
+    lambda_service = lambda_service.with_s3_delivery(s3_delivery_for_logs.clone());
     if let Some(ref rt) = container_runtime {
         lambda_service = lambda_service.with_runtime(rt.clone());
     }

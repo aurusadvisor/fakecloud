@@ -456,9 +456,38 @@ impl LambdaService {
         // and size still rotate when the descriptor differs, so
         // optimistic-concurrency callers see RevisionId bump on real
         // changes.
+        // S3-sourced code: if an S3Delivery hook is wired, fetch the
+        // actual object bytes and treat them as a ZIP upload. This
+        // matches real Lambda's S3-pull semantics. Fall back to the
+        // descriptor-hash shortcut when no hook is available.
+        let s3_fetched_zip: Option<Vec<u8>> = match (
+            body["S3Bucket"].as_str(),
+            body["S3Key"].as_str(),
+        ) {
+            (Some(bucket), Some(key)) if new_zip.is_none() && new_image_uri.is_none() => {
+                if let Some(s3) = &self.s3_delivery {
+                    match s3.get_object(&req.account_id, bucket, key) {
+                        Ok(bytes) => Some(bytes),
+                        Err(e) => {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "InvalidParameterValueException",
+                                format!("Error occurred while GetObject. S3 Error Code: NoSuchKey. S3 Error Message: {e}"),
+                            ));
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
         let new_s3_descriptor: Option<Vec<u8>> =
             match (body["S3Bucket"].as_str(), body["S3Key"].as_str()) {
-                (Some(bucket), Some(key)) if new_zip.is_none() && new_image_uri.is_none() => {
+                (Some(bucket), Some(key))
+                    if new_zip.is_none() && new_image_uri.is_none() && s3_fetched_zip.is_none() =>
+                {
                     let mut descriptor = serde_json::Map::new();
                     descriptor.insert("S3Bucket".to_string(), Value::String(bucket.to_string()));
                     descriptor.insert("S3Key".to_string(), Value::String(key.to_string()));
@@ -472,6 +501,7 @@ impl LambdaService {
                 }
                 _ => None,
             };
+        let new_zip = new_zip.or(s3_fetched_zip);
         let supplied_signing_profile = body["SigningProfileVersionArn"].as_str().map(String::from);
         let supplied_revision_id = body["RevisionId"].as_str().map(String::from);
         let new_architectures: Option<Vec<String>> = body["Architectures"].as_array().map(|arr| {

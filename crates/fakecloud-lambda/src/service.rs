@@ -595,6 +595,7 @@ pub struct LambdaService {
     snapshot_lock: Arc<AsyncMutex<()>>,
     pub(crate) delivery_bus: Option<Arc<fakecloud_core::delivery::DeliveryBus>>,
     pub(crate) role_trust_validator: Option<Arc<dyn fakecloud_core::auth::RoleTrustValidator>>,
+    pub(crate) s3_delivery: Option<Arc<dyn fakecloud_core::delivery::S3Delivery>>,
     /// Per-account-per-function in-flight invocation count, used to
     /// gate `Invoke` against `PutFunctionConcurrency`'s
     /// `ReservedConcurrentExecutions` ceiling. Keyed by
@@ -613,8 +614,14 @@ impl LambdaService {
             snapshot_lock: Arc::new(AsyncMutex::new(())),
             delivery_bus: None,
             role_trust_validator: None,
+            s3_delivery: None,
             inflight_invocations: Arc::new(parking_lot::RwLock::new(BTreeMap::new())),
         }
+    }
+
+    pub fn with_s3_delivery(mut self, s3: Arc<dyn fakecloud_core::delivery::S3Delivery>) -> Self {
+        self.s3_delivery = Some(s3);
+        self
     }
 
     pub fn with_runtime(mut self, runtime: Arc<ContainerRuntime>) -> Self {

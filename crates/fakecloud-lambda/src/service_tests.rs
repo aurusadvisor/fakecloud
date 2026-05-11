@@ -1353,6 +1353,75 @@ async fn create_event_source_mapping_round_trips_advanced_fields() {
     assert_eq!(v["Topics"][0], "t1");
 }
 
+struct StubS3 {
+    object: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+}
+impl fakecloud_core::delivery::S3Delivery for StubS3 {
+    fn put_object(
+        &self,
+        _account_id: &str,
+        bucket: &str,
+        key: &str,
+        body: Vec<u8>,
+        _content_type: Option<&str>,
+    ) -> Result<(), String> {
+        self.object
+            .lock()
+            .unwrap()
+            .insert(format!("{bucket}/{key}"), body);
+        Ok(())
+    }
+    fn get_object(&self, _account_id: &str, bucket: &str, key: &str) -> Result<Vec<u8>, String> {
+        self.object
+            .lock()
+            .unwrap()
+            .get(&format!("{bucket}/{key}"))
+            .cloned()
+            .ok_or_else(|| "missing".to_string())
+    }
+}
+
+#[tokio::test]
+async fn update_function_code_fetches_real_bytes_from_s3() {
+    let stub = std::sync::Arc::new(StubS3 {
+        object: std::sync::Mutex::new(std::collections::HashMap::new()),
+    });
+    let payload = b"real-zip-bytes-from-s3-bucket";
+    stub.object
+        .lock()
+        .unwrap()
+        .insert("my-bucket/lambda.zip".to_string(), payload.to_vec());
+
+    let svc = LambdaService::new(make_state()).with_s3_delivery(stub);
+    let body = json!({
+        "FunctionName": "fromzip",
+        "Runtime": "python3.12",
+        "Role": "arn:aws:iam::123456789012:role/r",
+        "Handler": "index.handler",
+        "Code": {"ZipFile": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"seed")},
+    });
+    let req = make_request(Method::POST, "/2015-03-31/functions", &body.to_string());
+    svc.handle(req).await.unwrap();
+
+    let body = json!({"S3Bucket": "my-bucket", "S3Key": "lambda.zip"});
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/fromzip/code",
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let post: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(payload);
+    let expected = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        hasher.finalize(),
+    );
+    assert_eq!(post["CodeSha256"].as_str().unwrap(), expected);
+    assert_eq!(post["CodeSize"].as_i64().unwrap(), payload.len() as i64);
+}
+
 // ── UpdateFunctionCode behavior tests (D1) ──
 
 #[tokio::test]
