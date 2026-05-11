@@ -393,6 +393,26 @@ impl SesV2Service {
             crate::fanout::process_send_events(ctx, &mut sent, config_set_name.as_deref());
         }
 
+        // Opt-in SMTP relay: when FAKECLOUD_SES_SMTP_RELAY is set, fire a
+        // best-effort send to the configured MTA (e.g. Mailpit) so dev
+        // setups see real mail in their inbox. Failures are logged and
+        // don't fail the SES call — the in-memory store is the source
+        // of truth for tests.
+        if let Ok(relay_url) = std::env::var("FAKECLOUD_SES_SMTP_RELAY") {
+            let outbound = crate::smtp_relay::OutboundMail {
+                from: &sent.from,
+                to: &sent.to,
+                cc: &sent.cc,
+                bcc: &sent.bcc,
+                subject: sent.subject.as_deref(),
+                text_body: sent.text_body.as_deref(),
+                html_body: sent.html_body.as_deref(),
+            };
+            if let Err(err) = crate::smtp_relay::relay(&relay_url, &outbound) {
+                tracing::warn!(relay = %relay_url, error = %err, "SES SMTP relay failed");
+            }
+        }
+
         self.state
             .write()
             .get_or_create(&req.account_id)

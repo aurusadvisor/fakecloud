@@ -2,6 +2,7 @@ pub mod dkim;
 pub mod fanout;
 pub mod mime;
 pub(crate) mod service;
+pub mod smtp_relay;
 pub mod state;
 pub mod v1;
 
