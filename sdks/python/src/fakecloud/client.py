@@ -17,6 +17,8 @@ from fakecloud.types import (
     BedrockModelResponseConfig,
     BedrockResponseRule,
     BedrockStatusResponse,
+    CompromisedPasswordsRequest,
+    CompromisedPasswordsResponse,
     ConfirmationCodesResponse,
     ConfirmSubscriptionRequest,
     ConfirmSubscriptionResponse,
@@ -55,9 +57,6 @@ from fakecloud.types import (
     LifecycleTickResponse,
     MintAuthorizationCodeRequest,
     MintAuthorizationCodeResponse,
-    CompromisedPasswordsRequest,
-    CompromisedPasswordsResponse,
-    WebAuthnCredentialsResponse,
     PendingConfirmationsResponse,
     RdsInstancesResponse,
     ResetResponse,
@@ -73,6 +72,7 @@ from fakecloud.types import (
     TtlTickResponse,
     UserConfirmationCodes,
     WarmContainersResponse,
+    WebAuthnCredentialsResponse,
 )
 
 
@@ -1171,9 +1171,7 @@ class _SyncCognitoClient:
         return CompromisedPasswordsResponse.from_dict(resp.json())
 
     def get_webauthn_credentials(self) -> WebAuthnCredentialsResponse:
-        resp = self._client.get(
-            f"{self._base}/_fakecloud/cognito/webauthn-credentials"
-        )
+        resp = self._client.get(f"{self._base}/_fakecloud/cognito/webauthn-credentials")
         _check(resp)
         return WebAuthnCredentialsResponse.from_dict(resp.json())
 
