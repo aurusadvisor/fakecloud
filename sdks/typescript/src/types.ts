@@ -169,11 +169,7 @@ export interface SesMetrics {
   suppressedDropsTotal: number;
 }
 
-export type SesMailFromStatus =
-  | "NotStarted"
-  | "Pending"
-  | "Success"
-  | "Failed";
+export type SesMailFromStatus = "NotStarted" | "Pending" | "Success" | "Failed";
 
 export interface SesMailFromStatusResponse {
   identity: string;

@@ -223,14 +223,11 @@ export class SesClient {
   }
 
   async setSandbox(sandbox: boolean): Promise<SesSandboxResponse> {
-    const resp = await fetch(
-      `${this.baseUrl}/_fakecloud/ses/account/sandbox`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sandbox }),
-      },
-    );
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/ses/account/sandbox`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sandbox }),
+    });
     return parse(resp);
   }
 }
