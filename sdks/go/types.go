@@ -493,6 +493,20 @@ type StepFunctionsExecutionsResponse struct {
 	Executions []StepFunctionsExecution `json:"executions"`
 }
 
+// SfnEnqueueActivityTaskRequest queues a task for an activity worker without
+// running an ASL execution.
+type SfnEnqueueActivityTaskRequest struct {
+	ActivityARN      string  `json:"activityArn"`
+	Input            *string `json:"input,omitempty"`
+	HeartbeatSeconds *int64  `json:"heartbeatSeconds,omitempty"`
+	TimeoutSeconds   *int64  `json:"timeoutSeconds,omitempty"`
+}
+
+// SfnEnqueueActivityTaskResponse carries the synthesized task token.
+type SfnEnqueueActivityTaskResponse struct {
+	TaskToken string `json:"taskToken"`
+}
+
 // ── Bedrock ───────────────────────────────────────────────────────
 
 // BedrockInvocation represents a recorded Bedrock model invocation.

@@ -17,3 +17,14 @@ func (c *StepFunctionsClient) GetExecutions(ctx context.Context) (*StepFunctions
 	}
 	return &out, nil
 }
+
+// EnqueueActivityTask inserts a pending task into an activity's worker queue
+// without running an ASL execution. Useful for testing activity worker clients
+// (GetActivityTask / SendTaskSuccess / SendTaskFailure) in isolation.
+func (c *StepFunctionsClient) EnqueueActivityTask(ctx context.Context, req SfnEnqueueActivityTaskRequest) (*SfnEnqueueActivityTaskResponse, error) {
+	var out SfnEnqueueActivityTaskResponse
+	if err := c.fc.doPost(ctx, "/_fakecloud/stepfunctions/enqueue-activity-task", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

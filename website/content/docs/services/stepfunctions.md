@@ -8,17 +8,18 @@ fakecloud implements **37 of 37** Step Functions operations at 100% Smithy confo
 
 ## Supported features
 
-- **State machines** — CRUD, versions, aliases, tags
-- **Executions** — StartExecution, StartSyncExecution, StopExecution, DescribeExecution, GetExecutionHistory
+- **State machines** — CRUD, versions, aliases, tags. Both `STANDARD` and `EXPRESS` types.
+- **Executions** — `StartExecution` (async), `StartSyncExecution` (real synchronous Express runner that blocks until the state machine terminates and returns the final output), `StopExecution`, `DescribeExecution`, `GetExecutionHistory`.
 - **ASL states** — Pass, Task, Choice, Wait, Parallel, Map, Succeed, Fail
 - **Retry and Catch** — full retry logic with exponential backoff, catch clauses with error filters
 - **JSONPath and JSONata** — both query languages for state input/output
-- **Task integrations** — Lambda (invoke, invoke.waitForTaskToken), SQS (sendMessage), SNS (publish), EventBridge (putEvents), DynamoDB (getItem/putItem/updateItem/deleteItem)
-- **Map state** — parallel item processing with concurrency control
+- **Task integrations** — Lambda (`invoke`, `invoke.waitForTaskToken`), SQS (`sendMessage`), SNS (`publish`), EventBridge (`putEvents`), DynamoDB (`getItem` / `putItem` / `updateItem` / `deleteItem`), and **nested Step Functions** (`states:startExecution` async + `states:startExecution.sync` blocking) — `.sync` waits for the child execution to terminate and propagates its output or failure to the parent.
+- **Map state** — parallel item processing with concurrency control. Supports **distributed mode** (`ItemProcessor.ProcessorConfig.Mode=DISTRIBUTED`) with `MaxConcurrency`, `ToleratedFailurePercentage`, and `ItemReader` over S3 (JSON/JSONL/CSV manifests).
 - **Parallel state** — concurrent branch execution
-- **Activities** — real worker pool. A `Task` state with an activity ARN inserts a pending task; `GetActivityTask` long-polls (up to `FAKECLOUD_SFN_GET_ACTIVITY_TIMEOUT_SECS`, default 5s) for the next pending task; `SendTaskSuccess` / `SendTaskFailure` resolve the workflow. `HeartbeatSeconds` and `TimeoutSeconds` are enforced.
+- **Activities** — real worker pool. A `Task` state with an activity ARN inserts a pending task; `GetActivityTask` long-polls (up to `FAKECLOUD_SFN_GET_ACTIVITY_TIMEOUT_SECS`, default 5s) for the next pending task; `SendTaskSuccess` / `SendTaskFailure` resolve the workflow. `HeartbeatSeconds` and `TimeoutSeconds` are enforced, and tasks dispatched past their timeout are reaped automatically.
+- **Express logging** — `EXPRESS` state machines with `LoggingConfiguration.Level=ALL|ERROR|FATAL` emit `ExecutionStarted` / `ExecutionSucceeded` / `ExecutionFailed` events into the configured CloudWatch Logs destination.
 - **State machine execution history** — full event log per execution
-- **Error handling** — states.ALL, states.TaskFailed, custom error names
+- **Error handling** — `States.ALL`, `States.TaskFailed`, `States.Timeout`, `States.HeartbeatTimeout`, custom error names
 
 ## Protocol
 
@@ -32,6 +33,8 @@ JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 ## Cross-service delivery
 
 - **Step Functions -> Lambda / SQS / SNS / EventBridge / DynamoDB** — Task states invoke functions, send messages, publish events, and read/write items
+- **Step Functions -> Step Functions** — Nested executions via `states:startExecution` and `states:startExecution.sync`. The `.sync` variant blocks the parent until the child reaches a terminal state, surfacing the child's output or failure (`States.TaskFailed` with child error/cause) back to the parent task.
+- **Step Functions -> CloudWatch Logs** — Express state machine execution events stream to the configured log group.
 
 ## Why this matters
 

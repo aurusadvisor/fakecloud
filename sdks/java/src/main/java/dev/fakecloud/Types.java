@@ -370,6 +370,16 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record StepFunctionsExecutionsResponse(List<StepFunctionsExecution> executions) {}
 
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record SfnEnqueueActivityTaskRequest(
+            String activityArn,
+            String input,
+            Long heartbeatSeconds,
+            Long timeoutSeconds) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SfnEnqueueActivityTaskResponse(String taskToken) {}
+
     // ── Bedrock ────────────────────────────────────────────────────
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record BedrockInvocation(
