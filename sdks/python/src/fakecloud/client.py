@@ -207,9 +207,7 @@ class EcsClient:
         return EcsTasksResponse.from_dict(resp.json())
 
     async def get_task(self, task_id: str) -> EcsTask:
-        resp = await self._client.get(
-            f"{self._base}/_fakecloud/ecs/tasks/{task_id}"
-        )
+        resp = await self._client.get(f"{self._base}/_fakecloud/ecs/tasks/{task_id}")
         _check(resp)
         return EcsTask.from_dict(resp.json())
 
