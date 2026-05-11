@@ -89,23 +89,57 @@ fn missing(field: &str) -> AwsServiceError {
     )
 }
 
-fn parse_s3_destination(val: &Value) -> Option<S3Destination> {
+fn parse_s3_destination(val: &Value) -> Result<Option<S3Destination>, AwsServiceError> {
     if !val.is_object() {
-        return None;
+        return Ok(None);
     }
-    let role_arn = val["RoleARN"].as_str()?.to_string();
-    let bucket_arn = val["BucketARN"].as_str()?.to_string();
+    let Some(role_arn) = val["RoleARN"].as_str().map(|s| s.to_string()) else {
+        return Ok(None);
+    };
+    let Some(bucket_arn) = val["BucketARN"].as_str().map(|s| s.to_string()) else {
+        return Ok(None);
+    };
     let buf = &val["BufferingHints"];
-    Some(S3Destination {
+    let buffering_size_mb = buf["SizeInMBs"].as_i64();
+    let buffering_interval_seconds = buf["IntervalInSeconds"].as_i64();
+    validate_buffering(buffering_size_mb, buffering_interval_seconds)?;
+    Ok(Some(S3Destination {
         destination_id: format!("destinationId-{}", Uuid::new_v4()),
         role_arn,
         bucket_arn,
         prefix: val["Prefix"].as_str().map(|s| s.to_string()),
         error_output_prefix: val["ErrorOutputPrefix"].as_str().map(|s| s.to_string()),
-        buffering_size_mb: buf["SizeInMBs"].as_i64(),
-        buffering_interval_seconds: buf["IntervalInSeconds"].as_i64(),
+        buffering_size_mb,
+        buffering_interval_seconds,
         compression_format: val["CompressionFormat"].as_str().map(|s| s.to_string()),
-    })
+    }))
+}
+
+fn invalid_argument(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidArgumentException", msg)
+}
+
+/// AWS limits per Firehose docs: SizeInMBs in [1,128], IntervalInSeconds
+/// either 0 (immediate) or in [60,900].
+fn validate_buffering(
+    size_mb: Option<i64>,
+    interval_s: Option<i64>,
+) -> Result<(), AwsServiceError> {
+    if let Some(s) = size_mb {
+        if !(1..=128).contains(&s) {
+            return Err(invalid_argument(format!(
+                "BufferingHints.SizeInMBs must be between 1 and 128, got {s}"
+            )));
+        }
+    }
+    if let Some(i) = interval_s {
+        if i != 0 && !(60..=900).contains(&i) {
+            return Err(invalid_argument(format!(
+                "BufferingHints.IntervalInSeconds must be 0 or between 60 and 900, got {i}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn s3_destination_json(dest: &S3Destination) -> Value {
@@ -155,8 +189,10 @@ impl FirehoseService {
             .unwrap_or("DirectPut")
             .to_string();
 
-        let s3_dest = parse_s3_destination(&body["S3DestinationConfiguration"])
-            .or_else(|| parse_s3_destination(&body["ExtendedS3DestinationConfiguration"]));
+        let s3_dest = match parse_s3_destination(&body["S3DestinationConfiguration"])? {
+            Some(d) => Some(d),
+            None => parse_s3_destination(&body["ExtendedS3DestinationConfiguration"])?,
+        };
 
         let now = Utc::now();
         let mut accounts = self.state.write();
@@ -430,9 +466,11 @@ impl FirehoseService {
             .streams_mut(&req.region)
             .get_mut(name)
             .ok_or_else(|| not_found(name))?;
-        if let Some(d) = parse_s3_destination(&body["S3DestinationUpdate"])
-            .or_else(|| parse_s3_destination(&body["ExtendedS3DestinationUpdate"]))
-        {
+        let updated = match parse_s3_destination(&body["S3DestinationUpdate"])? {
+            Some(d) => Some(d),
+            None => parse_s3_destination(&body["ExtendedS3DestinationUpdate"])?,
+        };
+        if let Some(d) = updated {
             stream.destination = Some(d);
         }
         stream.last_update = Utc::now();
@@ -532,4 +570,39 @@ fn not_found(name: &str) -> AwsServiceError {
         "ResourceNotFoundException",
         format!("DeliveryStream {name} not found"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buffering_size_within_range_ok() {
+        assert!(validate_buffering(Some(64), Some(300)).is_ok());
+    }
+
+    #[test]
+    fn buffering_size_too_small_rejected() {
+        assert!(validate_buffering(Some(0), None).is_err());
+    }
+
+    #[test]
+    fn buffering_size_too_large_rejected() {
+        assert!(validate_buffering(Some(200), None).is_err());
+    }
+
+    #[test]
+    fn buffering_interval_zero_ok() {
+        assert!(validate_buffering(None, Some(0)).is_ok());
+    }
+
+    #[test]
+    fn buffering_interval_below_60_rejected() {
+        assert!(validate_buffering(None, Some(30)).is_err());
+    }
+
+    #[test]
+    fn buffering_interval_above_900_rejected() {
+        assert!(validate_buffering(None, Some(1200)).is_err());
+    }
 }
