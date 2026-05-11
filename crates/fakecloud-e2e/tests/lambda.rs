@@ -578,7 +578,11 @@ async fn lambda_update_function_code_with_s3_descriptor_rotates_hash() {
     let lambda = server.lambda_client().await;
     let s3 = server.s3_client().await;
 
-    s3.create_bucket().bucket("deploy-bucket").send().await.unwrap();
+    s3.create_bucket()
+        .bucket("deploy-bucket")
+        .send()
+        .await
+        .unwrap();
     let v1 = make_python_zip();
     s3.put_object()
         .bucket("deploy-bucket")
