@@ -224,6 +224,75 @@ mod tests {
     }
 
     #[test]
+    fn publish_email_invokes_smtp_relay_when_env_set() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut log = Vec::new();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            stream.write_all(b"220 stub\r\n").unwrap();
+            let mut in_data = false;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let trimmed = line.trim_end().to_string();
+                log.push(trimmed.clone());
+                if in_data {
+                    if trimmed == "." {
+                        stream.write_all(b"250 ok\r\n").unwrap();
+                        in_data = false;
+                    }
+                    continue;
+                }
+                let up = trimmed.to_uppercase();
+                if up.starts_with("HELO") || up.starts_with("EHLO") {
+                    stream.write_all(b"250 hello\r\n").unwrap();
+                } else if up.starts_with("MAIL FROM") || up.starts_with("RCPT TO") {
+                    stream.write_all(b"250 ok\r\n").unwrap();
+                } else if up == "DATA" {
+                    stream.write_all(b"354 send data\r\n").unwrap();
+                    in_data = true;
+                } else if up == "QUIT" {
+                    stream.write_all(b"221 bye\r\n").unwrap();
+                    break;
+                } else {
+                    stream.write_all(b"250 ok\r\n").unwrap();
+                }
+            }
+            tx.send(log).ok();
+        });
+        // SAFETY: tests in the same process share env; setting and
+        // unsetting around the call is OK because the publish path is
+        // synchronous.
+        std::env::set_var(
+            "FAKECLOUD_SES_SMTP_RELAY",
+            format!("smtp://127.0.0.1:{port}"),
+        );
+        let (topic, arn) = make_topic("t1");
+        let sub = make_subscription(&arn, "email", "user@example.com", true);
+        let state = make_state(vec![topic], vec![sub]);
+        let bus = Arc::new(DeliveryBus::new());
+        let delivery = SnsDeliveryImpl::new(state.clone(), bus);
+        delivery.publish_to_topic(&arn, "greetings", Some("subj"));
+        std::env::remove_var("FAKECLOUD_SES_SMTP_RELAY");
+        let log = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("smtp stub did not receive mail");
+        assert!(log
+            .iter()
+            .any(|l| l.starts_with("RCPT TO:<user@example.com>")));
+        assert!(log.iter().any(|l| l == "Subject: subj"));
+        assert!(log.iter().any(|l| l == "greetings"));
+    }
+
+    #[test]
     fn publish_records_sms_delivery() {
         let (topic, arn) = make_topic("t1");
         let sub = make_subscription(&arn, "sms", "+14155550199", true);

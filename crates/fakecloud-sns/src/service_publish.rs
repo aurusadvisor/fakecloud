@@ -800,23 +800,67 @@ pub(crate) fn deliver_to_email_subscribers(
     }
     let now = Utc::now();
     let subject_owned = ctx.subject.map(|s| s.to_string());
+    let topic_arn = ctx.topic_arn.to_string();
+    let body = ctx.default_message.to_string();
     let acct = ctx.topic_arn.split(':').nth(4).unwrap_or("");
-    let mut accounts = state.write();
-    let state = accounts.get_or_create(acct);
-    for email_address in subs {
-        tracing::info!(
-            email = %email_address,
-            topic_arn = %ctx.topic_arn,
-            "SNS delivering to email (stub)"
-        );
-        state.sent_emails.push(crate::state::SentEmail {
-            email_address: email_address.clone(),
-            message: ctx.default_message.to_string(),
-            subject: subject_owned.clone(),
-            topic_arn: ctx.topic_arn.to_string(),
-            timestamp: now,
-        });
+    {
+        let mut accounts = state.write();
+        let state = accounts.get_or_create(acct);
+        for email_address in subs {
+            tracing::info!(
+                email = %email_address,
+                topic_arn = %topic_arn,
+                "SNS delivering to email"
+            );
+            state.sent_emails.push(crate::state::SentEmail {
+                email_address: email_address.clone(),
+                message: body.clone(),
+                subject: subject_owned.clone(),
+                topic_arn: topic_arn.clone(),
+                timestamp: now,
+            });
+        }
     }
+
+    // Opt-in SMTP relay: when FAKECLOUD_SES_SMTP_RELAY is set, fire the
+    // notification via plain SMTP so dev setups receive real mail in
+    // their MTA (Mailpit / MailHog). Reuses the SES helper so the
+    // behavior matches SES SendEmail.
+    if let Ok(relay_url) = std::env::var("FAKECLOUD_SES_SMTP_RELAY") {
+        let subject = subject_owned
+            .clone()
+            .unwrap_or_else(|| format!("AWS Notification - {topic_arn}"));
+        let from = format!("no-reply@sns.{}.amazonaws.com", default_region(&topic_arn));
+        for email_address in subs {
+            let to = [email_address.clone()];
+            let mail = fakecloud_ses::smtp_relay::OutboundMail {
+                from: &from,
+                to: &to,
+                cc: &[],
+                bcc: &[],
+                subject: Some(&subject),
+                text_body: Some(&body),
+                html_body: None,
+            };
+            if let Err(err) = fakecloud_ses::smtp_relay::relay(&relay_url, &mail) {
+                tracing::warn!(
+                    relay = %relay_url,
+                    email = %email_address,
+                    error = %err,
+                    "SNS email SMTP relay failed"
+                );
+            }
+        }
+    }
+}
+
+fn default_region(topic_arn: &str) -> String {
+    topic_arn
+        .split(':')
+        .nth(3)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("us-east-1")
+        .to_string()
 }
 
 pub(crate) fn deliver_to_sms_subscribers(
