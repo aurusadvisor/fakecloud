@@ -12,12 +12,13 @@ REST APIs (v1) and HTTP APIs (v2) are independent AWS services. The v2 (HTTP API
 
 - **REST APIs** — CreateRestApi, GetRestApi(s), UpdateRestApi, PutRestApi (OpenAPI overwrite/merge), ImportRestApi, DeleteRestApi
 - **Resources & methods** — full CRUD; nested paths; method requests/responses
-- **Integrations** — `MOCK`, `HTTP`/`HTTP_PROXY`, `AWS_PROXY` (Lambda); integration responses
-- **Deployments & stages** — CreateDeployment auto-creates a stage when `stageName` is set; cache flush operations
-- **Models & request validators** — schema management; validator CRUD
-- **Authorizers** — TOKEN, REQUEST, COGNITO_USER_POOLS shapes
+- **Integrations** — `MOCK`, `HTTP`/`HTTP_PROXY`, `AWS_PROXY` (Lambda), AWS direct service integrations (`AWS`), `VPC_LINK`; request + response templates with VTL evaluation; integration responses
+- **Deployments & stages** — CreateDeployment auto-creates a stage when `stageName` is set; cache flush operations; stage variables
+- **Models & request validators** — schema management; validator CRUD; body/parameter validation enforced at the data plane
+- **Authorizers** — TOKEN and REQUEST invoke real Lambda authorizer functions; COGNITO_USER_POOLS validates real RS256 JWTs against the user pool's JWKS (issuer, expiry, audience, signature)
 - **API keys & usage plans** — CRUD + association via `usage_plan_keys`; data plane enforces `apiKeyRequired`, plan-level `throttle` (token-bucket per key+plan), method-level overrides under `apiStages[].throttle["{path}/{HTTP_METHOD}"]` (including the `/*/*` wildcard), and `quota` (DAY/WEEK/MONTH counters)
-- **VPC links, domain names, base path mappings, client certificates** — full CRUD
+- **VPC links, domain names, base path mappings, client certificates** — full CRUD; custom domains route to APIs via base path mapping
+- **Binary media types** — request/response bodies for configured `binaryMediaTypes` are base64-encoded into the Lambda proxy event and decoded from the integration response
 - **Documentation parts/versions** — full CRUD
 - **Gateway responses** — full CRUD
 - **Tags** — TagResource/UntagResource/GetTags
@@ -28,9 +29,13 @@ REST APIs (v1) and HTTP APIs (v2) are independent AWS services. The v2 (HTTP API
 
 When a request arrives at a deployed stage URL (`/restapis/{api_id}/{stage}/{path...}` or via the configured stage), fakecloud walks the resource tree, picks the matching method/integration, and dispatches:
 
-- `AWS_PROXY` — invokes the target Lambda via the same `DeliveryBus` used elsewhere; builds the v1.0 Lambda proxy event envelope (`event.version = "1.0"`, `requestContext.identity`, `multiValueHeaders`, `multiValueQueryStringParameters`, `pathParameters`, `stageVariables`, base64 body when binary).
+- `AWS_PROXY` — invokes the target Lambda via the same `DeliveryBus` used elsewhere; builds the v1.0 Lambda proxy event envelope (`event.version = "1.0"`, `requestContext.identity`, `multiValueHeaders`, `multiValueQueryStringParameters`, `pathParameters`, `stageVariables`, base64 body when the request content-type matches a configured `binaryMediaType`).
 - `HTTP` / `HTTP_PROXY` — forwards via `reqwest` to the configured URI.
-- `MOCK` — returns an empty JSON body unless an integration response template overrides it.
+- `AWS` — direct AWS service integration; the URI is parsed for service/action and dispatched to the in-process service handler (no SigV4 round-trip).
+- `VPC_LINK` — connection ID resolves to the configured VPC link target URL; request is forwarded the same way `HTTP` is, with the VPC link as the backend.
+- `MOCK` — request template selects the integration response; response templates apply VTL substitution over `$input`, `$context`, and `$stageVariables` to build the body.
+
+Request validators (`validateRequestBody`, `validateRequestParameters`) run before the integration: missing required headers/query parameters and JSON bodies that fail the attached model schema short-circuit with `400 BadRequestException`. Stage variables are exposed to integration URIs (`${stageVariables.name}`) and to VTL templates. TOKEN/REQUEST authorizers invoke the configured Lambda and cache the policy by `identitySource` for `authorizerResultTtlInSeconds`; COGNITO_USER_POOLS authorizers fetch the user pool's JWKS, verify the JWT's RS256 signature, issuer, expiry, and (if configured) audience, and expose claims under `requestContext.authorizer.claims`.
 
 Before the integration runs, methods with `apiKeyRequired = true` go through the API key + usage plan gate: an `x-api-key` header is required, the value is matched against `state.api_keys` (must be enabled), and the first usage plan whose `apiStages[]` contains `(api_id, stage)` is selected. Throttle resolution prefers the matched apiStage's `throttle["{resource_path}/{HTTP_METHOD}"]` override (with `/*/*` honored as the catch-all) over the plan-level `throttle`; the chosen `(rateLimit, burstLimit)` drives a token-bucket whose meter key includes the override path so per-method buckets stay segregated. The plan's `quota` (DAY/WEEK/MONTH counter against `limit`, with `offset` shifting the period boundary) is enforced after throttle. Failures return `403 ForbiddenException` and `429 LimitExceededException` respectively, matching the AWS wire shape.
 
@@ -45,6 +50,9 @@ REST-style URL dispatch. fakecloud's facade routes `/restapis/...`, `/apikeys`, 
 ## Cross-service delivery
 
 - **API Gateway v1 -> Lambda** — REST API methods with `AWS_PROXY` integrations invoke Lambda functions with proxy event v1.0 format
+- **API Gateway v1 -> Lambda (authorizers)** — TOKEN and REQUEST authorizers invoke real Lambda functions and honor the returned IAM policy + context
+- **API Gateway v1 -> Cognito** — COGNITO_USER_POOLS authorizers fetch the configured user pool's JWKS and verify caller JWTs end-to-end
+- **API Gateway v1 -> AWS services** — `AWS` integrations dispatch to in-process service handlers (SQS, SNS, DynamoDB, S3, ...) without leaving the process
 
 ## Why this matters
 
@@ -58,7 +66,7 @@ LocalStack paywalls API Gateway v1. fakecloud implements the full REST API surfa
 
 ## Limitations
 
-- The data plane is partially implemented. `MOCK`, `HTTP`/`HTTP_PROXY`, and `AWS_PROXY` (Lambda) integrations work. AWS direct service integrations, VTL templates, VPC_LINK resolution, binary media types, and gateway response customization are either stubbed or not yet implemented.
+- Gateway response customization (per-`responseType` template overrides) renders the default response body; the AWS catalog of templated error shapes is not yet substituted.
 
 ## Source
 
