@@ -610,6 +610,65 @@ export interface EcsClustersResponse {
   clusters: EcsCluster[];
 }
 
+export interface EcsTaskContainer {
+  name: string;
+  image: string;
+  lastStatus: string;
+  exitCode?: number | null;
+  runtimeId?: string | null;
+  essential: boolean;
+}
+
+export interface EcsTask {
+  taskArn: string;
+  taskId: string;
+  clusterArn: string;
+  clusterName: string;
+  taskDefinitionArn: string;
+  family: string;
+  revision: number;
+  lastStatus: string;
+  desiredStatus: string;
+  launchType: string;
+  createdAt: string;
+  startedAt?: string | null;
+  stoppingAt?: string | null;
+  stoppedAt?: string | null;
+  stopCode?: string | null;
+  stoppedReason?: string | null;
+  containers: EcsTaskContainer[];
+  capturedLogBytes: number;
+}
+
+export interface EcsTasksResponse {
+  tasks: EcsTask[];
+}
+
+export interface EcsTaskLogsResponse {
+  taskArn: string;
+  logs: string;
+  lastStatus: string;
+  exitCode?: number | null;
+}
+
+export interface EcsMarkFailedRequest {
+  exitCode?: number | null;
+  reason?: string | null;
+}
+
+export interface EcsLifecycleEvent {
+  at: string;
+  eventType: string;
+  taskArn?: string | null;
+  clusterArn?: string | null;
+  lastStatus?: string | null;
+  detail: unknown;
+}
+
+export interface EcsEventsResponse {
+  events: EcsLifecycleEvent[];
+}
+
 // ── ELBv2 ───────────────────────────────────────────────────────────
 
 export interface Elbv2Tag {

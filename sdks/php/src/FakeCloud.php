@@ -568,6 +568,75 @@ final class EcsClient
             $this->http->get('/_fakecloud/ecs/clusters')
         );
     }
+
+    /**
+     * List every task fakecloud is tracking. Pass null to skip a filter;
+     * both parameters map to the server's `cluster` and `status` query args.
+     */
+    public function getTasks(?string $cluster = null, ?string $status = null): EcsTasksResponse
+    {
+        $path = '/_fakecloud/ecs/tasks';
+        $params = [];
+        if ($cluster !== null && $cluster !== '') {
+            $params['cluster'] = $cluster;
+        }
+        if ($status !== null && $status !== '') {
+            $params['status'] = $status;
+        }
+        if ($params !== []) {
+            $path .= '?' . http_build_query($params);
+        }
+        return EcsTasksResponse::fromArray($this->http->get($path));
+    }
+
+    /** Fetch a single task snapshot by task ID. */
+    public function getTask(string $taskId): EcsTask
+    {
+        return EcsTask::fromArray(
+            $this->http->get('/_fakecloud/ecs/tasks/' . HttpTransport::encodePath($taskId))
+        );
+    }
+
+    /** Captured docker stdout/stderr for a task plus its exit code if known. */
+    public function getTaskLogs(string $taskId): EcsTaskLogsResponse
+    {
+        return EcsTaskLogsResponse::fromArray(
+            $this->http->get('/_fakecloud/ecs/tasks/' . HttpTransport::encodePath($taskId) . '/logs')
+        );
+    }
+
+    /**
+     * SIGTERM (then SIGKILL after 10s) the task's running container via the
+     * runtime. Returns the updated task snapshot.
+     */
+    public function forceStopTask(string $taskId): EcsTask
+    {
+        return EcsTask::fromArray(
+            $this->http->postEmpty('/_fakecloud/ecs/tasks/' . HttpTransport::encodePath($taskId) . '/force-stop')
+        );
+    }
+
+    /**
+     * Flip a task to STOPPED without killing the container — useful for
+     * simulating failed tasks deterministically in tests.
+     */
+    public function markTaskFailed(string $taskId, EcsMarkFailedRequest $req): EcsTask
+    {
+        return EcsTask::fromArray(
+            $this->http->postJson(
+                '/_fakecloud/ecs/tasks/' . HttpTransport::encodePath($taskId) . '/mark-failed',
+                $req->toArray()
+            )
+        );
+    }
+
+    /** Replay the lifecycle event log. */
+    public function getEvents(): EcsEventsResponse
+    {
+        return EcsEventsResponse::fromArray(
+            $this->http->get('/_fakecloud/ecs/events')
+        );
+    }
 }
 
 final class Elbv2Client

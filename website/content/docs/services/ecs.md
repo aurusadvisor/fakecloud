@@ -4,9 +4,9 @@ description = "Elastic Container Service — full API: clusters, task definition
 weight = 22
 +++
 
-fakecloud implements Amazon Elastic Container Service (ECS) with full API coverage. 60 operations.
+fakecloud implements Amazon Elastic Container Service (ECS) with full API coverage. 76 operations.
 
-**Status: full API.** Covers clusters, task definitions, real Fargate-style task execution, services with rolling deployments, task sets, container instances, capacity providers, attributes, task protection, ECS Exec, and the agent-side `Submit*` / `DiscoverPollEndpoint` surface.
+**Status: full API.** Covers clusters, task definitions, real Fargate-style task execution, services with rolling deployments + CODE_DEPLOY blue/green task sets, daemons, ExpressGatewayService, task sets, container instances, capacity providers, attributes, task protection, ECS Exec, placement constraints / strategies, awsvpc ENI binding, and the agent-side `Submit*` / `DiscoverPollEndpoint` surface.
 
 ## Supported today (full API)
 
@@ -24,6 +24,8 @@ fakecloud implements Amazon Elastic Container Service (ECS) with full API covera
 - **Agent surface** — `SubmitContainerStateChange`, `SubmitTaskStateChange`, `SubmitAttachmentStateChanges`, `DiscoverPollEndpoint`
 - **Tagging** — `TagResource`, `UntagResource`, `ListTagsForResource` (clusters and task definitions)
 - **Account settings** — `PutAccountSetting`, `PutAccountSettingDefault`, `DeleteAccountSetting`, `ListAccountSettings`
+- **Daemons** — `RegisterDaemonTaskDefinition`, `DescribeDaemonTaskDefinition`, `DeleteDaemonTaskDefinition`, `ListDaemonTaskDefinitions`, `CreateDaemon`, `DescribeDaemon`, `UpdateDaemon`, `DeleteDaemon`, `ListDaemons`, `DescribeDaemonDeployments`, `ListDaemonDeployments`, `DescribeDaemonRevisions`. `CreateDaemon` spawns one task per matching capacity-provider host so the daemon scales with the cluster.
+- **Express gateway services** — `CreateExpressGatewayService`, `DescribeExpressGatewayService`, `UpdateExpressGatewayService`, `DeleteExpressGatewayService` (2026 ECS Express deployment controller)
 
 ### Services + rolling deployments
 
@@ -33,6 +35,18 @@ fakecloud implements Amazon Elastic Container Service (ECS) with full API covera
 - **Rolling deployment** — pass a new `taskDefinition`. The service marks the previous PRIMARY deployment as `ACTIVE`, creates a new `PRIMARY` deployment for the target revision, and drains tasks on the old task definition while new ones come up. Deployment circuit breaker + `minimumHealthyPercent` / `maximumPercent` are honoured in `deploymentConfiguration`.
 
 `DeleteService` refuses while `desiredCount > 0` unless `force=true`; the forced path scales to 0 and stops every running task under the service before removing it.
+
+#### Placement constraints + strategies
+
+Both `RunTask` and `CreateService` honour `placementConstraints[]` (`distinctInstance`, `memberOf <expression>` against container-instance attributes) and `placementStrategy[]` (`random`, `spread` by attribute, `binpack` by `cpu` / `memory`). The scheduler ranks eligible container instances per strategy before launching; tasks fail with `unable to place a task` when no instance satisfies the constraints, matching real ECS.
+
+#### awsvpc networking
+
+Task definitions with `networkMode=awsvpc` allocate a per-task ENI from the subnet supplied via `networkConfiguration.awsvpcConfiguration.subnets[]`. The ENI is recorded on the task's `attachments[]` (`type=ElasticNetworkInterface`) with `privateIPv4Address`, `subnetId`, and `securityGroups[]` filled in. `assignPublicIp=ENABLED` flags the ENI as having a public address. Tasks sharing the same `awsvpc` network mode each get a distinct ENI; subnet exhaustion fails the task with `stopCode=TaskFailedToStart`.
+
+#### CODE_DEPLOY blue/green task sets
+
+Services declared with `deploymentController.type=CODE_DEPLOY` skip the in-line rolling deployment and require external task-set churn. `CreateTaskSet` registers a non-primary (`BLUE`) set, `UpdateServicePrimaryTaskSet` flips traffic, and the old set is drained on `DeleteTaskSet`. This matches the AWS deployment pattern CodeDeploy uses to drive blue/green cutovers.
 
 Task-definition families track revisions monotonically; `DeleteTaskDefinitions` requires `DeregisterTaskDefinition` first (real AWS behaviour), and the result flips status to `DELETE_IN_PROGRESS`.
 
@@ -46,7 +60,26 @@ Task-definition families track revisions monotonically; `DeleteTaskDefinitions` 
 4. `docker logs <id>` (captured stdout/stderr stored on the task + exposed via the introspection endpoint)
 5. `docker rm <id>` (cleanup)
 
-Environment variables from the task definition are forwarded with `localhost` / `127.0.0.1` rewritten to `host.docker.internal` so containers reach fakecloud itself the same way Lambda does.
+Environment variables from the task definition are forwarded with `localhost` / `127.0.0.1` rewritten to `host.docker.internal` so containers reach fakecloud itself the same way Lambda does. `ECS_CONTAINER_METADATA_URI` and `ECS_CONTAINER_METADATA_URI_V4` are also injected, pointing at fakecloud's task-metadata endpoint (`/_fakecloud/ecs/v3/{task_id}` and `/_fakecloud/ecs/v4/{task_id}`) so SDKs and sidecars that read task metadata work out of the box.
+
+### Container definition fidelity
+
+The runtime translates the following task-definition fields straight into `docker run` flags so containers see the same shape they would on real ECS:
+
+- `linuxParameters.capabilities.add[]` / `drop[]` -> `--cap-add` / `--cap-drop`
+- `linuxParameters.initProcessEnabled=true` -> `--init`
+- `linuxParameters.sharedMemorySize` -> `--shm-size <MiB>m`
+- `linuxParameters.tmpfs[]` -> `--tmpfs <containerPath>:size=<size>,...`
+- `ulimits[]` -> `--ulimit <name>=<soft>:<hard>`
+- `user` -> `--user`
+- `readonlyRootFilesystem=true` -> `--read-only`
+- `pseudoTerminal=true` -> `--tty`
+- `stopTimeout` -> `--stop-timeout` (also bounds the SIGTERM→SIGKILL grace inside force-stop)
+- `volumeConfigurations[]` (per-task EBS attachments) -> volume per task with size, encryption, and FS type recorded on the task's `attachments[]` and bind-mounted at the declared `mountPoint`
+
+### awslogs flush before STOPPED
+
+Before a task transitions to `STOPPED`, the runtime drains any buffered `awslogs` events for that task synchronously, so `GetLogEvents` immediately after a `DescribeTasks` STOPPED response sees every line the container emitted. No probabilistic delay, no flake-prone polling in tests.
 
 Without a container runtime (docker/podman missing), `RunTask` still returns tasks but they immediately transition to `STOPPED` with `stopCode=TaskFailedToStart`. This keeps the API surface shape-correct so tests on CI agents without Docker can still drive the control-plane surface.
 
@@ -73,6 +106,10 @@ Container definitions that declare the `awslogs` log driver get their captured s
 ```
 
 The runtime creates the log group on demand when `awslogs-create-group=true`, creates a stream named `<prefix>/<container-name>/<task-id>`, and appends one `LogEvent` per captured line. The usual fakecloud-logs API (`DescribeLogStreams`, `GetLogEvents`, subscription filters) then sees the container's output with no additional wiring.
+
+### loadBalancers -> ELBv2 RegisterTargets
+
+Services declared with `loadBalancers[]` register each task's primary IP (awsvpc) or container-instance/container-port pair (bridge/host) into the matching ELBv2 target group via `RegisterTargets` when the task transitions to `RUNNING`, and `DeregisterTargets` when it drains. The cutover happens inline as part of the rolling deployment so health-check and target-state assertions on the target group match what real ECS would produce.
 
 ### EventBridge task state change events
 

@@ -42,6 +42,16 @@ func (c *ECSClient) GetTasks(ctx context.Context, cluster, status string) (*EcsT
 	return &out, nil
 }
 
+// GetTask returns a single task snapshot by task ID. Returns 404 if the
+// task is unknown.
+func (c *ECSClient) GetTask(ctx context.Context, taskID string) (*EcsTask, error) {
+	var out EcsTask
+	if err := c.fc.doGet(ctx, fmt.Sprintf("/_fakecloud/ecs/tasks/%s", taskID), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // GetTaskLogs returns the captured docker stdout/stderr for a task.
 func (c *ECSClient) GetTaskLogs(ctx context.Context, taskID string) (*EcsTaskLogsResponse, error) {
 	var out EcsTaskLogsResponse
