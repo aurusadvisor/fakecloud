@@ -510,6 +510,28 @@ export class BedrockClient {
   }
 }
 
+/**
+ * Bedrock Agent (control plane) sub-client.
+ *
+ * The fakecloud Bedrock Agent service has no admin/introspection endpoints
+ * today; this client exists so callers can hold a typed handle alongside the
+ * other Bedrock sub-clients and so future helpers can land here without an
+ * API break.
+ */
+export class BedrockAgentClient {
+  constructor(private readonly baseUrl: string) {}
+}
+
+/**
+ * Bedrock Agent Runtime (data plane) sub-client.
+ *
+ * Placeholder for future introspection helpers around InvokeAgent, Retrieve,
+ * and RetrieveAndGenerate.
+ */
+export class BedrockAgentRuntimeClient {
+  constructor(private readonly baseUrl: string) {}
+}
+
 // ── Main client ────────────────────────────────────────────────────
 
 export class FakeCloud {
@@ -531,6 +553,8 @@ export class FakeCloud {
   private readonly _apigatewayv2: ApiGatewayV2Client;
   private readonly _stepfunctions: StepFunctionsClient;
   private readonly _bedrock: BedrockClient;
+  private readonly _bedrockAgent: BedrockAgentClient;
+  private readonly _bedrockAgentRuntime: BedrockAgentRuntimeClient;
   private readonly _ecs: EcsClient;
   private readonly _elbv2: Elbv2Client;
   private readonly _route53: Route53Client;
@@ -556,6 +580,8 @@ export class FakeCloud {
     this._apigatewayv2 = new ApiGatewayV2Client(this.baseUrl);
     this._stepfunctions = new StepFunctionsClient(this.baseUrl);
     this._bedrock = new BedrockClient(this.baseUrl);
+    this._bedrockAgent = new BedrockAgentClient(this.baseUrl);
+    this._bedrockAgentRuntime = new BedrockAgentRuntimeClient(this.baseUrl);
     this._ecs = new EcsClient(this.baseUrl);
     this._elbv2 = new Elbv2Client(this.baseUrl);
     this._route53 = new Route53Client(this.baseUrl);
@@ -663,6 +689,14 @@ export class FakeCloud {
 
   get bedrock(): BedrockClient {
     return this._bedrock;
+  }
+
+  get bedrockAgent(): BedrockAgentClient {
+    return this._bedrockAgent;
+  }
+
+  get bedrockAgentRuntime(): BedrockAgentRuntimeClient {
+    return this._bedrockAgentRuntime;
   }
 
   get ecs(): EcsClient {

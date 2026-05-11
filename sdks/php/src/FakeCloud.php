@@ -34,6 +34,8 @@ final class FakeCloud
     private ApiGatewayV2Client $apigatewayv2;
     private StepFunctionsClient $stepfunctions;
     private BedrockClient $bedrock;
+    private BedrockAgentClient $bedrockAgent;
+    private BedrockAgentRuntimeClient $bedrockAgentRuntime;
     private EcsClient $ecs;
     private Elbv2Client $elbv2;
     private Route53Client $route53;
@@ -59,6 +61,8 @@ final class FakeCloud
         $this->apigatewayv2 = new ApiGatewayV2Client($this->http);
         $this->stepfunctions = new StepFunctionsClient($this->http);
         $this->bedrock = new BedrockClient($this->http);
+        $this->bedrockAgent = new BedrockAgentClient($this->http);
+        $this->bedrockAgentRuntime = new BedrockAgentRuntimeClient($this->http);
         $this->ecs = new EcsClient($this->http);
         $this->elbv2 = new Elbv2Client($this->http);
         $this->route53 = new Route53Client($this->http);
@@ -121,6 +125,8 @@ final class FakeCloud
     public function apigatewayv2(): ApiGatewayV2Client { return $this->apigatewayv2; }
     public function stepfunctions(): StepFunctionsClient { return $this->stepfunctions; }
     public function bedrock(): BedrockClient { return $this->bedrock; }
+    public function bedrockAgent(): BedrockAgentClient { return $this->bedrockAgent; }
+    public function bedrockAgentRuntime(): BedrockAgentRuntimeClient { return $this->bedrockAgentRuntime; }
     public function ecs(): EcsClient { return $this->ecs; }
     public function elbv2(): Elbv2Client { return $this->elbv2; }
     public function route53(): Route53Client { return $this->route53; }
@@ -556,6 +562,28 @@ final class BedrockClient
             $this->http->delete('/_fakecloud/bedrock/faults')
         );
     }
+}
+
+/**
+ * Bedrock Agent (control plane) sub-client.
+ *
+ * The fakecloud Bedrock Agent service has no admin/introspection endpoints
+ * today; this client exists so callers can hold a typed handle alongside the
+ * other Bedrock sub-clients and so future helpers can land here without an
+ * API break.
+ */
+final class BedrockAgentClient
+{
+    public function __construct(private readonly HttpTransport $http) {}
+}
+
+/**
+ * Bedrock Agent Runtime (data plane) sub-client. Placeholder for future
+ * introspection helpers around InvokeAgent, Retrieve, and RetrieveAndGenerate.
+ */
+final class BedrockAgentRuntimeClient
+{
+    public function __construct(private readonly HttpTransport $http) {}
 }
 
 final class EcsClient
