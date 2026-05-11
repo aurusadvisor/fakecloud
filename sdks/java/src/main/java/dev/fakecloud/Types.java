@@ -153,6 +153,28 @@ public final class Types {
             List<String> matchedRules,
             List<InboundActionExecuted> actionsExecuted) {}
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SesMetrics(long suppressedDropsTotal) {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record SesMailFromStatusRequest(String status) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SesMailFromStatusResponse(String identity, String mailFromDomainStatus) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SesDkimPublicKey(
+            String identity,
+            String selector,
+            String publicKeyBase64,
+            boolean signingEnabled) {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record SesSandboxRequest(boolean sandbox) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SesSandboxResponse(boolean sandbox, boolean productionAccessEnabled) {}
+
     // ── SNS ────────────────────────────────────────────────────────
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record SnsMessage(

@@ -260,6 +260,39 @@ final class SesClient
             $this->http->postJson('/_fakecloud/ses/inbound', $req->toArray())
         );
     }
+
+    public function getMetrics(): SesMetrics
+    {
+        return SesMetrics::fromArray(
+            $this->http->get('/_fakecloud/ses/metrics')
+        );
+    }
+
+    public function setMailFromStatus(string $identity, string $status): SesMailFromStatusResponse
+    {
+        return SesMailFromStatusResponse::fromArray(
+            $this->http->postJson(
+                '/_fakecloud/ses/identities/' . rawurlencode($identity) . '/mail-from-status',
+                ['status' => $status],
+            )
+        );
+    }
+
+    public function getDkimPublicKey(string $identity): SesDkimPublicKey
+    {
+        return SesDkimPublicKey::fromArray(
+            $this->http->get(
+                '/_fakecloud/ses/identities/' . rawurlencode($identity) . '/dkim-public-key'
+            )
+        );
+    }
+
+    public function setSandbox(bool $sandbox): SesSandboxResponse
+    {
+        return SesSandboxResponse::fromArray(
+            $this->http->postJson('/_fakecloud/ses/account/sandbox', ['sandbox' => $sandbox])
+        );
+    }
 }
 
 final class SnsClient

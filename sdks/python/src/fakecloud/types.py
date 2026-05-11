@@ -373,6 +373,62 @@ class InboundEmailResponse:
         )
 
 
+@dataclass
+class SesMetrics:
+    suppressed_drops_total: int
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SesMetrics:
+        d = _convert_keys(data)
+        return cls(suppressed_drops_total=int(d.get("suppressed_drops_total", 0)))
+
+
+@dataclass
+class SesMailFromStatusResponse:
+    identity: str
+    mail_from_domain_status: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SesMailFromStatusResponse:
+        d = _convert_keys(data)
+        return cls(
+            identity=d["identity"],
+            mail_from_domain_status=d["mail_from_domain_status"],
+        )
+
+
+@dataclass
+class SesDkimPublicKey:
+    identity: str
+    selector: Optional[str]
+    public_key_base64: Optional[str]
+    signing_enabled: bool
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SesDkimPublicKey:
+        d = _convert_keys(data)
+        return cls(
+            identity=d["identity"],
+            selector=d.get("selector"),
+            public_key_base64=d.get("public_key_base64"),
+            signing_enabled=bool(d.get("signing_enabled", False)),
+        )
+
+
+@dataclass
+class SesSandboxResponse:
+    sandbox: bool
+    production_access_enabled: bool
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SesSandboxResponse:
+        d = _convert_keys(data)
+        return cls(
+            sandbox=bool(d["sandbox"]),
+            production_access_enabled=bool(d["production_access_enabled"]),
+        )
+
+
 # ── SNS ─────────────────────────────────────────────────────────────
 
 

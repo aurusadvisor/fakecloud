@@ -62,7 +62,13 @@ import dev.fakecloud.Types.ResetResponse;
 import dev.fakecloud.Types.ResetServiceResponse;
 import dev.fakecloud.Types.RotationTickResponse;
 import dev.fakecloud.Types.S3NotificationsResponse;
+import dev.fakecloud.Types.SesDkimPublicKey;
 import dev.fakecloud.Types.SesEmailsResponse;
+import dev.fakecloud.Types.SesMailFromStatusRequest;
+import dev.fakecloud.Types.SesMailFromStatusResponse;
+import dev.fakecloud.Types.SesMetrics;
+import dev.fakecloud.Types.SesSandboxRequest;
+import dev.fakecloud.Types.SesSandboxResponse;
 import dev.fakecloud.Types.SetCertificateStatusRequest;
 import dev.fakecloud.Types.SetHealthCheckStatusRequest;
 import dev.fakecloud.Types.SnsMessagesResponse;
@@ -308,6 +314,30 @@ public final class FakeCloud {
 
         public InboundEmailResponse simulateInbound(InboundEmailRequest req) {
             return http.postJson("/_fakecloud/ses/inbound", req, InboundEmailResponse.class);
+        }
+
+        public SesMetrics getMetrics() {
+            return http.get("/_fakecloud/ses/metrics", SesMetrics.class);
+        }
+
+        public SesMailFromStatusResponse setMailFromStatus(String identity, String status) {
+            return http.postJson(
+                    "/_fakecloud/ses/identities/" + identity + "/mail-from-status",
+                    new SesMailFromStatusRequest(status),
+                    SesMailFromStatusResponse.class);
+        }
+
+        public SesDkimPublicKey getDkimPublicKey(String identity) {
+            return http.get(
+                    "/_fakecloud/ses/identities/" + identity + "/dkim-public-key",
+                    SesDkimPublicKey.class);
+        }
+
+        public SesSandboxResponse setSandbox(boolean sandbox) {
+            return http.postJson(
+                    "/_fakecloud/ses/account/sandbox",
+                    new SesSandboxRequest(sandbox),
+                    SesSandboxResponse.class);
         }
     }
 

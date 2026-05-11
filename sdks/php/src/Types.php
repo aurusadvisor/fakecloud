@@ -433,6 +433,67 @@ final class InboundEmailResponse
     }
 }
 
+final class SesMetrics
+{
+    public function __construct(
+        public readonly int $suppressedDropsTotal,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self((int) ($data['suppressedDropsTotal'] ?? 0));
+    }
+}
+
+final class SesMailFromStatusResponse
+{
+    public function __construct(
+        public readonly string $identity,
+        public readonly string $mailFromDomainStatus,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self($data['identity'], $data['mailFromDomainStatus']);
+    }
+}
+
+final class SesDkimPublicKey
+{
+    public function __construct(
+        public readonly string $identity,
+        public readonly ?string $selector,
+        public readonly ?string $publicKeyBase64,
+        public readonly bool $signingEnabled,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['identity'],
+            $data['selector'] ?? null,
+            $data['publicKeyBase64'] ?? null,
+            (bool) ($data['signingEnabled'] ?? false),
+        );
+    }
+}
+
+final class SesSandboxResponse
+{
+    public function __construct(
+        public readonly bool $sandbox,
+        public readonly bool $productionAccessEnabled,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (bool) $data['sandbox'],
+            (bool) $data['productionAccessEnabled'],
+        );
+    }
+}
+
 // ── SNS ────────────────────────────────────────────────────────
 
 final class SnsMessage

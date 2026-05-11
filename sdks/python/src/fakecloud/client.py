@@ -66,7 +66,11 @@ from fakecloud.types import (
     RotationTickResponse,
     S3NotificationsResponse,
     SchedulerSchedulesResponse,
+    SesDkimPublicKey,
     SesEmailsResponse,
+    SesMailFromStatusResponse,
+    SesMetrics,
+    SesSandboxResponse,
     SfnEnqueueActivityTaskRequest,
     SfnEnqueueActivityTaskResponse,
     SnsMessagesResponse,
@@ -561,6 +565,36 @@ class SesClient:
         _check(resp)
         return InboundEmailResponse.from_dict(resp.json())
 
+    async def get_metrics(self) -> SesMetrics:
+        resp = await self._client.get(f"{self._base}/_fakecloud/ses/metrics")
+        _check(resp)
+        return SesMetrics.from_dict(resp.json())
+
+    async def set_mail_from_status(
+        self, identity: str, status: str
+    ) -> SesMailFromStatusResponse:
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/ses/identities/{identity}/mail-from-status",
+            json={"status": status},
+        )
+        _check(resp)
+        return SesMailFromStatusResponse.from_dict(resp.json())
+
+    async def get_dkim_public_key(self, identity: str) -> SesDkimPublicKey:
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/ses/identities/{identity}/dkim-public-key"
+        )
+        _check(resp)
+        return SesDkimPublicKey.from_dict(resp.json())
+
+    async def set_sandbox(self, sandbox: bool) -> SesSandboxResponse:
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/ses/account/sandbox",
+            json={"sandbox": sandbox},
+        )
+        _check(resp)
+        return SesSandboxResponse.from_dict(resp.json())
+
 
 class SnsClient:
     """Async SNS introspection client."""
@@ -1046,6 +1080,36 @@ class _SyncSesClient:
         )
         _check(resp)
         return InboundEmailResponse.from_dict(resp.json())
+
+    def get_metrics(self) -> SesMetrics:
+        resp = self._client.get(f"{self._base}/_fakecloud/ses/metrics")
+        _check(resp)
+        return SesMetrics.from_dict(resp.json())
+
+    def set_mail_from_status(
+        self, identity: str, status: str
+    ) -> SesMailFromStatusResponse:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/ses/identities/{identity}/mail-from-status",
+            json={"status": status},
+        )
+        _check(resp)
+        return SesMailFromStatusResponse.from_dict(resp.json())
+
+    def get_dkim_public_key(self, identity: str) -> SesDkimPublicKey:
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/ses/identities/{identity}/dkim-public-key"
+        )
+        _check(resp)
+        return SesDkimPublicKey.from_dict(resp.json())
+
+    def set_sandbox(self, sandbox: bool) -> SesSandboxResponse:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/ses/account/sandbox",
+            json={"sandbox": sandbox},
+        )
+        _check(resp)
+        return SesSandboxResponse.from_dict(resp.json())
 
 
 class _SyncSnsClient:
