@@ -948,6 +948,73 @@ class MintAuthorizationCodeResponse:
         return cls(code=data["code"])
 
 
+@dataclass
+class CompromisedPasswordsRequest:
+    """Payload for `POST /_fakecloud/cognito/compromised-passwords`.
+
+    Each plaintext is SHA-256 hashed server-side and added to the
+    per-account compromised-password set; subsequent `SignUp` /
+    `AdminInitiateAuth` calls fail with `InvalidPasswordException` on
+    any pool whose
+    `CompromisedCredentialsRiskConfiguration.Actions.EventAction` is
+    `BLOCK`.
+    """
+
+    passwords: List[str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"passwords": list(self.passwords)}
+
+
+@dataclass
+class CompromisedPasswordsResponse:
+    added: int
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> CompromisedPasswordsResponse:
+        return cls(added=int(data["added"]))
+
+
+@dataclass
+class WebAuthnCredential:
+    """Registered WebAuthn credential surfaced by introspection.
+
+    `attestation_info` is the parsed-attestation JSON object (packed
+    format details, AAGUID, certificate chain summary, signature
+    counter); its shape depends on the attestation format so it is
+    surfaced as an opaque mapping.
+    """
+
+    account_id: str
+    pool_user: str
+    credential_id: str
+    relying_party_id: str
+    attestation_info: Any
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> WebAuthnCredential:
+        return cls(
+            account_id=data["account_id"],
+            pool_user=data["pool_user"],
+            credential_id=data["credential_id"],
+            relying_party_id=data["relying_party_id"],
+            attestation_info=data.get("attestation_info"),
+        )
+
+
+@dataclass
+class WebAuthnCredentialsResponse:
+    credentials: List[WebAuthnCredential]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> WebAuthnCredentialsResponse:
+        return cls(
+            credentials=[
+                WebAuthnCredential.from_dict(c) for c in data.get("credentials", [])
+            ],
+        )
+
+
 # ── Step Functions ──────────────────────────────────────────────────
 
 

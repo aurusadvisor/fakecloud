@@ -469,6 +469,24 @@ final class CognitoClient
             )
         );
     }
+
+    public function setCompromisedPasswords(
+        CompromisedPasswordsRequest $req
+    ): CompromisedPasswordsResponse {
+        return CompromisedPasswordsResponse::fromArray(
+            $this->http->postJson(
+                '/_fakecloud/cognito/compromised-passwords',
+                $req->toArray()
+            )
+        );
+    }
+
+    public function getWebAuthnCredentials(): WebAuthnCredentialsResponse
+    {
+        return WebAuthnCredentialsResponse::fromArray(
+            $this->http->get('/_fakecloud/cognito/webauthn-credentials')
+        );
+    }
 }
 
 final class ApiGatewayV2Client

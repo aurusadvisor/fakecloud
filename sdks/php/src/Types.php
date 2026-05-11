@@ -1088,6 +1088,79 @@ final class MintAuthorizationCodeResponse
     }
 }
 
+/**
+ * Payload for `POST /_fakecloud/cognito/compromised-passwords`. Each
+ * plaintext is SHA-256 hashed server-side and added to the per-account
+ * compromised-password set; subsequent `SignUp` / `AdminInitiateAuth`
+ * fail with `InvalidPasswordException` on any pool whose
+ * `CompromisedCredentialsRiskConfiguration.Actions.EventAction` is
+ * `BLOCK`.
+ */
+final class CompromisedPasswordsRequest
+{
+    public function __construct(
+        /** @var string[] */
+        public readonly array $passwords,
+    ) {}
+
+    public function toArray(): array
+    {
+        return ['passwords' => $this->passwords];
+    }
+}
+
+final class CompromisedPasswordsResponse
+{
+    public function __construct(public readonly int $added) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self((int) $data['added']);
+    }
+}
+
+/**
+ * Registered WebAuthn credential surfaced by
+ * `GET /_fakecloud/cognito/webauthn-credentials`. `$attestationInfo`
+ * is the parsed-attestation associative array (packed format details,
+ * AAGUID, certificate chain summary, signature counter); its shape
+ * depends on the attestation format so it stays untyped.
+ */
+final class WebAuthnCredential
+{
+    public function __construct(
+        public readonly string $accountId,
+        public readonly string $poolUser,
+        public readonly string $credentialId,
+        public readonly string $relyingPartyId,
+        public readonly mixed $attestationInfo,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['account_id'],
+            $data['pool_user'],
+            $data['credential_id'],
+            $data['relying_party_id'],
+            $data['attestation_info'] ?? null,
+        );
+    }
+}
+
+final class WebAuthnCredentialsResponse
+{
+    public function __construct(
+        /** @var WebAuthnCredential[] */
+        public readonly array $credentials,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(WebAuthnCredential::fromArray(...), $data['credentials'] ?? []));
+    }
+}
+
 // ── Step Functions ─────────────────────────────────────────────
 
 final class StepFunctionsExecution

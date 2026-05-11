@@ -55,6 +55,9 @@ from fakecloud.types import (
     LifecycleTickResponse,
     MintAuthorizationCodeRequest,
     MintAuthorizationCodeResponse,
+    CompromisedPasswordsRequest,
+    CompromisedPasswordsResponse,
+    WebAuthnCredentialsResponse,
     PendingConfirmationsResponse,
     RdsInstancesResponse,
     ResetResponse,
@@ -767,6 +770,23 @@ class CognitoClient:
         _check(resp)
         return MintAuthorizationCodeResponse.from_dict(resp.json())
 
+    async def set_compromised_passwords(
+        self, req: CompromisedPasswordsRequest
+    ) -> CompromisedPasswordsResponse:
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/cognito/compromised-passwords",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return CompromisedPasswordsResponse.from_dict(resp.json())
+
+    async def get_webauthn_credentials(self) -> WebAuthnCredentialsResponse:
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/cognito/webauthn-credentials"
+        )
+        _check(resp)
+        return WebAuthnCredentialsResponse.from_dict(resp.json())
+
 
 class ApiGatewayV2Client:
     """Async API Gateway v2 introspection client."""
@@ -1139,6 +1159,23 @@ class _SyncCognitoClient:
         )
         _check(resp)
         return MintAuthorizationCodeResponse.from_dict(resp.json())
+
+    def set_compromised_passwords(
+        self, req: CompromisedPasswordsRequest
+    ) -> CompromisedPasswordsResponse:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/cognito/compromised-passwords",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return CompromisedPasswordsResponse.from_dict(resp.json())
+
+    def get_webauthn_credentials(self) -> WebAuthnCredentialsResponse:
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/cognito/webauthn-credentials"
+        )
+        _check(resp)
+        return WebAuthnCredentialsResponse.from_dict(resp.json())
 
 
 class _SyncApiGatewayV2Client:

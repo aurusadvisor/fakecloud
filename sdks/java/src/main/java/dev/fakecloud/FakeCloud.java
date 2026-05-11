@@ -8,6 +8,9 @@ import dev.fakecloud.Types.AppAsTickResponse;
 import dev.fakecloud.Types.AuthEventsResponse;
 import dev.fakecloud.Types.MintAuthorizationCodeRequest;
 import dev.fakecloud.Types.MintAuthorizationCodeResponse;
+import dev.fakecloud.Types.CompromisedPasswordsRequest;
+import dev.fakecloud.Types.CompromisedPasswordsResponse;
+import dev.fakecloud.Types.WebAuthnCredentialsResponse;
 import dev.fakecloud.Types.BedrockFaultRule;
 import dev.fakecloud.Types.BedrockFaultsResponse;
 import dev.fakecloud.Types.BedrockInvocationsResponse;
@@ -477,6 +480,20 @@ public final class FakeCloud {
                     "/_fakecloud/cognito/authorization-codes",
                     req,
                     MintAuthorizationCodeResponse.class);
+        }
+
+        public CompromisedPasswordsResponse setCompromisedPasswords(
+                CompromisedPasswordsRequest req) {
+            return http.postJson(
+                    "/_fakecloud/cognito/compromised-passwords",
+                    req,
+                    CompromisedPasswordsResponse.class);
+        }
+
+        public WebAuthnCredentialsResponse getWebAuthnCredentials() {
+            return http.get(
+                    "/_fakecloud/cognito/webauthn-credentials",
+                    WebAuthnCredentialsResponse.class);
         }
     }
 

@@ -116,3 +116,28 @@ func (c *CognitoClient) MintAuthorizationCode(ctx context.Context, req *MintAuth
 	}
 	return &out, nil
 }
+
+// SetCompromisedPasswords registers plaintext passwords as compromised.
+// Each is SHA-256 hashed server-side and added to the per-account
+// compromised-password set, after which `SignUp` / `AdminInitiateAuth`
+// will fail with `InvalidPasswordException` on any pool whose
+// `CompromisedCredentialsRiskConfiguration.Actions.EventAction` is
+// `BLOCK`.
+func (c *CognitoClient) SetCompromisedPasswords(ctx context.Context, req *CompromisedPasswordsRequest) (*CompromisedPasswordsResponse, error) {
+	var out CompromisedPasswordsResponse
+	if err := c.fc.doPost(ctx, "/_fakecloud/cognito/compromised-passwords", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetWebAuthnCredentials lists every registered WebAuthn credential
+// across pools and users, including the parsed packed-attestation
+// info captured at registration time.
+func (c *CognitoClient) GetWebAuthnCredentials(ctx context.Context) (*WebAuthnCredentialsResponse, error) {
+	var out WebAuthnCredentialsResponse
+	if err := c.fc.doGet(ctx, "/_fakecloud/cognito/webauthn-credentials", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
