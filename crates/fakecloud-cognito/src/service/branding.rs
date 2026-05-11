@@ -499,6 +499,44 @@ impl CognitoService {
             ));
         }
 
+        if let Some(att_b64) = credential["response"]["attestationObject"].as_str() {
+            use base64::Engine;
+            match crate::webauthn::parse_packed_attestation(att_b64) {
+                Ok(parsed) => {
+                    if let Some(cd_b64) = credential["response"]["clientDataJSON"].as_str() {
+                        let cd_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                            .decode(cd_b64.trim_end_matches('='))
+                            .or_else(|_| base64::engine::general_purpose::STANDARD.decode(cd_b64));
+                        if let Ok(cd_bytes) = cd_bytes {
+                            if let Err(e) =
+                                crate::webauthn::verify_packed_attestation(&parsed, &cd_bytes)
+                            {
+                                return Err(AwsServiceError::aws_error(
+                                    StatusCode::BAD_REQUEST,
+                                    "InvalidParameterException",
+                                    format!("WebAuthn attestation invalid: {e}").as_str(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                Err(crate::webauthn::AttestationError::UnsupportedFormat(fmt)) => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "UnsupportedAttestationFormatException",
+                        format!("Unsupported WebAuthn attestation format: {fmt}").as_str(),
+                    ));
+                }
+                Err(e) => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterException",
+                        format!("WebAuthn attestationObject invalid: {e}").as_str(),
+                    ));
+                }
+            }
+        }
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
