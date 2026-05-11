@@ -8,10 +8,12 @@ fakecloud implements **53 of 53** KMS operations at 100% Smithy conformance.
 
 ## Supported features
 
-- **Symmetric keys** — CreateKey, Encrypt, Decrypt, GenerateDataKey, ReEncrypt
-- **Asymmetric keys** — Sign, Verify, GetPublicKey
+- **Symmetric keys** — CreateKey, Encrypt, Decrypt, GenerateDataKey, ReEncrypt. Real AES-256-GCM envelope encryption with AWS-shaped ciphertext blobs (key id header + IV + ciphertext + tag).
+- **Asymmetric keys** — Sign, Verify, GetPublicKey across:
+  - **RSA** — RSA_2048, RSA_3072, RSA_4096 with real RSA Sign/Verify/GetPublicKey
+  - **ECC** — ECC_NIST_P256, ECC_NIST_P384, ECC_NIST_P521, and ECC_SECG_P256K1 with real ECDSA Sign/Verify/GetPublicKey
 - **Key management** — DescribeKey, EnableKey, DisableKey, ScheduleKeyDeletion, CancelKeyDeletion
-- **Aliases** — CRUD with `alias/` prefix validation
+- **Aliases** — CRUD with `alias/` prefix validation. Accepted anywhere a key id/ARN is accepted (Encrypt, Decrypt, Sign, Verify, GenerateDataKey, ReEncrypt, grants, key policies, cross-service KmsKeyId).
 - **Grants** — CreateGrant, RetireGrant, RevokeGrant, ListGrants
 - **Key rotation** — automatic rotation flag (tracked), on-demand rotation
 - **Key policies** — PutKeyPolicy, GetKeyPolicy, ListKeyPolicies
@@ -20,7 +22,7 @@ fakecloud implements **53 of 53** KMS operations at 100% Smithy conformance.
 - **Key import** — GetParametersForImport, ImportKeyMaterial with real key material handling
 - **Custom key stores** — CRUD (records only)
 - **Key replica** — ReplicateKey
-- **Cross-service KMS hook** — services that accept a `KmsKeyId` (Secrets Manager today, SSM SecureString / S3 SSE-KMS / SQS / SNS / DynamoDB rolling out in follow-up PRs) call into KMS for real encrypt/decrypt and the calls are recorded at `/_fakecloud/kms/usage` so test code can assert which service principal triggered which operation on which key with which encryption context. AWS-managed aliases (`aws/secretsmanager`, etc.) auto-provision on first use.
+- **Cross-service KMS hook** — S3 (SSE-KMS), SQS, SNS, DynamoDB, Secrets Manager, and SSM SecureString call into KMS for real encrypt/decrypt under the hood. Every call is recorded at `/_fakecloud/kms/usage` so test code can assert which service principal triggered which operation on which key with which encryption context. AWS-managed aliases (`aws/s3`, `aws/sqs`, `aws/sns`, `aws/dynamodb`, `aws/secretsmanager`, `aws/ssm`, ...) auto-provision on first use.
 
 ## Introspection
 
@@ -32,7 +34,7 @@ JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 
 ## Gotchas
 
-- **Encryption is real but deterministic.** fakecloud uses a stable in-memory key derivation so encrypted values round-trip correctly across Encrypt/Decrypt calls in the same process, but the ciphertext is not compatible with real AWS KMS.
+- **Real AES-256-GCM, AWS-shaped ciphertext.** Encrypt/Decrypt round-trip across process restarts as long as the same key material is available. Ciphertext layout mimics AWS (key id header, IV, ciphertext, GCM tag) so length and shape match what real callers expect, but blobs are not interchangeable with real AWS KMS.
 
 ## Source
 

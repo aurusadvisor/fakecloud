@@ -16,7 +16,9 @@ Point your AWS SDK at `http://localhost:4566`.
 ## Why fakecloud for KMS
 
 - **53 KMS operations** at 100% conformance — symmetric and asymmetric keys, encrypt/decrypt, aliases, grants, data key generation, real ECDH, key import, multi-region keys, key policies.
-- **Real cryptography.** Encrypt/decrypt operations use real AES-GCM / RSA / ECDSA / ECDH primitives. Output ciphertexts are cryptographically meaningful, not opaque stubs.
+- **Real cryptography.** Symmetric Encrypt/Decrypt/GenerateDataKey use real AES-256-GCM envelope encryption with AWS-shaped ciphertext blobs. Asymmetric Sign/Verify/GetPublicKey use real RSA (RSA_2048/3072/4096) and real ECDSA (ECC_NIST_P256/P384/P521, ECC_SECG_P256K1). DeriveSharedSecret performs real ECDH. Output ciphertexts and signatures are cryptographically meaningful, not opaque stubs.
+- **Aliases everywhere.** `alias/...` works anywhere a key id is accepted — Encrypt, Decrypt, Sign, Verify, GenerateDataKey, ReEncrypt, grants, key policies, and cross-service `KmsKeyId` parameters.
+- **Cross-service KMS hook.** S3 (SSE-KMS), SQS, SNS, DynamoDB, Secrets Manager, and SSM SecureString call into KMS for real encrypt/decrypt. Every call is recorded at `/_fakecloud/kms/usage` so tests can assert which service triggered which KMS operation on which key.
 - **Any AWS SDK in any language.** Real HTTP server on port 4566.
 - **KMS key policies enforced.** Opt-in `--iam strict` mode validates key-policy Principal/Condition semantics with AWS's cross-account combining rules.
 - **No account, no auth token, no paid tier.** AGPL-3.0.
@@ -72,8 +74,14 @@ Used in envelope-encryption flows. Real AES-GCM throughout.
 ## Asymmetric + ECDH
 
 ```python
+# Real RSA Sign/Verify (RSA_2048 / RSA_3072 / RSA_4096)
+rsa = kms.create_key(KeySpec='RSA_2048', KeyUsage='SIGN_VERIFY')
+
+# Real ECDSA Sign/Verify (P-256, P-384, P-521, secp256k1)
+ec = kms.create_key(KeySpec='ECC_NIST_P521', KeyUsage='SIGN_VERIFY')
+
+# Real ECDH key agreement
 asym = kms.create_key(KeySpec='ECC_NIST_P256', KeyUsage='KEY_AGREEMENT')
-# Real ECDH key agreement for end-to-end tests
 ```
 
 ## SSE-KMS on S3
