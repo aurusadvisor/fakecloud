@@ -55,6 +55,11 @@ import type {
   MintAuthorizationCodeResponse,
   StepFunctionsExecutionsResponse,
   EcsClustersResponse,
+  EcsTask,
+  EcsTasksResponse,
+  EcsTaskLogsResponse,
+  EcsMarkFailedRequest,
+  EcsEventsResponse,
   Elbv2LoadBalancersResponse,
   Elbv2TargetGroupsResponse,
   Elbv2ListenersResponse,
@@ -752,6 +757,77 @@ export class EcsClient {
   /** List every ECS cluster fakecloud has seen, across every account. */
   async getClusters(): Promise<EcsClustersResponse> {
     const resp = await fetch(`${this.baseUrl}/_fakecloud/ecs/clusters`);
+    return parse(resp);
+  }
+
+  /**
+   * List every task fakecloud is tracking. Pass `cluster` and/or `status`
+   * to narrow the result set; both filters match the server's query params.
+   */
+  async getTasks(opts?: {
+    cluster?: string;
+    status?: string;
+  }): Promise<EcsTasksResponse> {
+    const params = new URLSearchParams();
+    if (opts?.cluster) params.set("cluster", opts.cluster);
+    if (opts?.status) params.set("status", opts.status);
+    const qs = params.toString();
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ecs/tasks${qs ? `?${qs}` : ""}`,
+    );
+    return parse(resp);
+  }
+
+  /** Fetch a single task snapshot by task ID. */
+  async getTask(taskId: string): Promise<EcsTask> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ecs/tasks/${encodeURIComponent(taskId)}`,
+    );
+    return parse(resp);
+  }
+
+  /** Captured docker stdout/stderr for a task plus its exit code if known. */
+  async getTaskLogs(taskId: string): Promise<EcsTaskLogsResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ecs/tasks/${encodeURIComponent(taskId)}/logs`,
+    );
+    return parse(resp);
+  }
+
+  /**
+   * SIGTERM (then SIGKILL after 10s) the task's running container via the
+   * runtime. Returns the updated task snapshot.
+   */
+  async forceStopTask(taskId: string): Promise<EcsTask> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ecs/tasks/${encodeURIComponent(taskId)}/force-stop`,
+      { method: "POST" },
+    );
+    return parse(resp);
+  }
+
+  /**
+   * Flip a task to STOPPED without killing the container — useful for
+   * simulating failed tasks deterministically in tests.
+   */
+  async markTaskFailed(
+    taskId: string,
+    req: EcsMarkFailedRequest,
+  ): Promise<EcsTask> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ecs/tasks/${encodeURIComponent(taskId)}/mark-failed`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      },
+    );
+    return parse(resp);
+  }
+
+  /** Replay the lifecycle event log. */
+  async getEvents(): Promise<EcsEventsResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/ecs/events`);
     return parse(resp);
   }
 }

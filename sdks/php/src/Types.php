@@ -1549,6 +1549,169 @@ final class EcsClustersResponse
     }
 }
 
+final class EcsTaskContainer
+{
+    public function __construct(
+        public readonly string $name,
+        public readonly string $image,
+        public readonly string $lastStatus,
+        public readonly ?int $exitCode,
+        public readonly ?string $runtimeId,
+        public readonly bool $essential,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['name'] ?? '',
+            $data['image'] ?? '',
+            $data['lastStatus'] ?? '',
+            isset($data['exitCode']) ? (int) $data['exitCode'] : null,
+            $data['runtimeId'] ?? null,
+            (bool) ($data['essential'] ?? false),
+        );
+    }
+}
+
+final class EcsTask
+{
+    public function __construct(
+        public readonly string $taskArn,
+        public readonly string $taskId,
+        public readonly string $clusterArn,
+        public readonly string $clusterName,
+        public readonly string $taskDefinitionArn,
+        public readonly string $family,
+        public readonly int $revision,
+        public readonly string $lastStatus,
+        public readonly string $desiredStatus,
+        public readonly string $launchType,
+        public readonly string $createdAt,
+        public readonly ?string $startedAt,
+        public readonly ?string $stoppingAt,
+        public readonly ?string $stoppedAt,
+        public readonly ?string $stopCode,
+        public readonly ?string $stoppedReason,
+        /** @var EcsTaskContainer[] */
+        public readonly array $containers,
+        public readonly int $capturedLogBytes,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['taskArn'] ?? '',
+            $data['taskId'] ?? '',
+            $data['clusterArn'] ?? '',
+            $data['clusterName'] ?? '',
+            $data['taskDefinitionArn'] ?? '',
+            $data['family'] ?? '',
+            (int) ($data['revision'] ?? 0),
+            $data['lastStatus'] ?? '',
+            $data['desiredStatus'] ?? '',
+            $data['launchType'] ?? '',
+            $data['createdAt'] ?? '',
+            $data['startedAt'] ?? null,
+            $data['stoppingAt'] ?? null,
+            $data['stoppedAt'] ?? null,
+            $data['stopCode'] ?? null,
+            $data['stoppedReason'] ?? null,
+            array_map(EcsTaskContainer::fromArray(...), $data['containers'] ?? []),
+            (int) ($data['capturedLogBytes'] ?? 0),
+        );
+    }
+}
+
+final class EcsTasksResponse
+{
+    public function __construct(
+        /** @var EcsTask[] */
+        public readonly array $tasks,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(EcsTask::fromArray(...), $data['tasks'] ?? []));
+    }
+}
+
+final class EcsTaskLogsResponse
+{
+    public function __construct(
+        public readonly string $taskArn,
+        public readonly string $logs,
+        public readonly string $lastStatus,
+        public readonly ?int $exitCode,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['taskArn'] ?? '',
+            $data['logs'] ?? '',
+            $data['lastStatus'] ?? '',
+            isset($data['exitCode']) ? (int) $data['exitCode'] : null,
+        );
+    }
+}
+
+final class EcsMarkFailedRequest
+{
+    public function __construct(
+        public readonly ?int $exitCode = null,
+        public readonly ?string $reason = null,
+    ) {}
+
+    public function toArray(): array
+    {
+        $out = [];
+        if ($this->exitCode !== null) {
+            $out['exitCode'] = $this->exitCode;
+        }
+        if ($this->reason !== null) {
+            $out['reason'] = $this->reason;
+        }
+        return $out;
+    }
+}
+
+final class EcsLifecycleEvent
+{
+    public function __construct(
+        public readonly string $at,
+        public readonly string $eventType,
+        public readonly ?string $taskArn,
+        public readonly ?string $clusterArn,
+        public readonly ?string $lastStatus,
+        public readonly mixed $detail,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['at'] ?? '',
+            $data['eventType'] ?? '',
+            $data['taskArn'] ?? null,
+            $data['clusterArn'] ?? null,
+            $data['lastStatus'] ?? null,
+            $data['detail'] ?? null,
+        );
+    }
+}
+
+final class EcsEventsResponse
+{
+    public function __construct(
+        /** @var EcsLifecycleEvent[] */
+        public readonly array $events,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(EcsLifecycleEvent::fromArray(...), $data['events'] ?? []));
+    }
+}
+
 // ── ELBv2 ──────────────────────────────────────────────────────
 
 final class Elbv2Tag

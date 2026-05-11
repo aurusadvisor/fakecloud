@@ -25,6 +25,11 @@ import dev.fakecloud.Types.EcrImagesResponse;
 import dev.fakecloud.Types.EcrPullThroughRulesResponse;
 import dev.fakecloud.Types.EcrRepositoriesResponse;
 import dev.fakecloud.Types.EcsClustersResponse;
+import dev.fakecloud.Types.EcsEventsResponse;
+import dev.fakecloud.Types.EcsMarkFailedRequest;
+import dev.fakecloud.Types.EcsTask;
+import dev.fakecloud.Types.EcsTaskLogsResponse;
+import dev.fakecloud.Types.EcsTasksResponse;
 import dev.fakecloud.Types.Elbv2FlushAccessLogsResponse;
 import dev.fakecloud.Types.Elbv2ListenersResponse;
 import dev.fakecloud.Types.Elbv2LoadBalancersResponse;
@@ -595,6 +600,61 @@ public final class FakeCloud {
 
         public EcsClustersResponse getClusters() {
             return http.get("/_fakecloud/ecs/clusters", EcsClustersResponse.class);
+        }
+
+        /** List every task fakecloud is tracking, optionally filtered by cluster and status. */
+        public EcsTasksResponse getTasks(String cluster, String status) {
+            StringBuilder path = new StringBuilder("/_fakecloud/ecs/tasks");
+            StringBuilder qs = new StringBuilder();
+            if (cluster != null && !cluster.isEmpty()) {
+                qs.append("cluster=").append(encodePath(cluster));
+            }
+            if (status != null && !status.isEmpty()) {
+                if (qs.length() > 0) qs.append('&');
+                qs.append("status=").append(encodePath(status));
+            }
+            if (qs.length() > 0) {
+                path.append('?').append(qs);
+            }
+            return http.get(path.toString(), EcsTasksResponse.class);
+        }
+
+        /** Fetch a single task snapshot by task ID. */
+        public EcsTask getTask(String taskId) {
+            return http.get("/_fakecloud/ecs/tasks/" + encodePath(taskId), EcsTask.class);
+        }
+
+        /** Captured docker stdout/stderr for a task plus its exit code if known. */
+        public EcsTaskLogsResponse getTaskLogs(String taskId) {
+            return http.get(
+                    "/_fakecloud/ecs/tasks/" + encodePath(taskId) + "/logs",
+                    EcsTaskLogsResponse.class);
+        }
+
+        /**
+         * SIGTERM (then SIGKILL after 10s) the task's running container via
+         * the runtime. Returns the updated task snapshot.
+         */
+        public EcsTask forceStopTask(String taskId) {
+            return http.postEmpty(
+                    "/_fakecloud/ecs/tasks/" + encodePath(taskId) + "/force-stop",
+                    EcsTask.class);
+        }
+
+        /**
+         * Flip a task to STOPPED without killing the container — useful for
+         * simulating failed tasks deterministically in tests.
+         */
+        public EcsTask markTaskFailed(String taskId, EcsMarkFailedRequest req) {
+            return http.postJson(
+                    "/_fakecloud/ecs/tasks/" + encodePath(taskId) + "/mark-failed",
+                    req,
+                    EcsTask.class);
+        }
+
+        /** Replay the lifecycle event log. */
+        public EcsEventsResponse getEvents() {
+            return http.get("/_fakecloud/ecs/events", EcsEventsResponse.class);
         }
     }
 

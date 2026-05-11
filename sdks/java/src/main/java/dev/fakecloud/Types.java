@@ -510,6 +510,60 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record EcsClustersResponse(List<EcsCluster> clusters) {}
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcsTaskContainer(
+            String name,
+            String image,
+            String lastStatus,
+            Long exitCode,
+            String runtimeId,
+            boolean essential) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcsTask(
+            String taskArn,
+            String taskId,
+            String clusterArn,
+            String clusterName,
+            String taskDefinitionArn,
+            String family,
+            int revision,
+            String lastStatus,
+            String desiredStatus,
+            String launchType,
+            String createdAt,
+            String startedAt,
+            String stoppingAt,
+            String stoppedAt,
+            String stopCode,
+            String stoppedReason,
+            List<EcsTaskContainer> containers,
+            long capturedLogBytes) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcsTasksResponse(List<EcsTask> tasks) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcsTaskLogsResponse(
+            String taskArn,
+            String logs,
+            String lastStatus,
+            Long exitCode) {}
+
+    public record EcsMarkFailedRequest(Long exitCode, String reason) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcsLifecycleEvent(
+            String at,
+            String eventType,
+            String taskArn,
+            String clusterArn,
+            String lastStatus,
+            Object detail) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcsEventsResponse(List<EcsLifecycleEvent> events) {}
+
     // ── ELBv2 ─────────────────────────────────────────────────────
 
     @JsonIgnoreProperties(ignoreUnknown = true)
