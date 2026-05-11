@@ -46,6 +46,8 @@ import dev.fakecloud.Types.InboundEmailRequest;
 import dev.fakecloud.Types.InboundEmailResponse;
 import dev.fakecloud.Types.LambdaInvocationsResponse;
 import dev.fakecloud.Types.LifecycleTickResponse;
+import dev.fakecloud.Types.LogsAnomalyInjectRequest;
+import dev.fakecloud.Types.LogsAnomalyInjectResponse;
 import dev.fakecloud.Types.PendingConfirmationsResponse;
 import dev.fakecloud.Types.RdsInstancesResponse;
 import dev.fakecloud.Types.ResetResponse;
@@ -86,6 +88,7 @@ public final class FakeCloud {
     private final RdsClient rds;
     private final ElastiCacheClient elasticache;
     private final EcrClient ecr;
+    private final LogsClient logs;
     private final SesClient ses;
     private final SnsClient sns;
     private final SqsClient sqs;
@@ -116,6 +119,7 @@ public final class FakeCloud {
         this.rds = new RdsClient(http);
         this.elasticache = new ElastiCacheClient(http);
         this.ecr = new EcrClient(http);
+        this.logs = new LogsClient(http);
         this.ses = new SesClient(http);
         this.sns = new SnsClient(http);
         this.sqs = new SqsClient(http);
@@ -178,6 +182,7 @@ public final class FakeCloud {
     public RdsClient rds() { return rds; }
     public ElastiCacheClient elasticache() { return elasticache; }
     public EcrClient ecr() { return ecr; }
+    public LogsClient logs() { return logs; }
     public SesClient ses() { return ses; }
     public SnsClient sns() { return sns; }
     public SqsClient sqs() { return sqs; }
@@ -272,6 +277,16 @@ public final class FakeCloud {
         public EcrPullThroughRulesResponse getPullThroughRules() {
             return http.get(
                     "/_fakecloud/ecr/pull-through-rules", EcrPullThroughRulesResponse.class);
+        }
+    }
+
+    public static final class LogsClient {
+        private final HttpTransport http;
+        LogsClient(HttpTransport http) { this.http = http; }
+
+        public LogsAnomalyInjectResponse injectAnomaly(LogsAnomalyInjectRequest req) {
+            return http.postJson(
+                    "/_fakecloud/logs/anomalies/inject", req, LogsAnomalyInjectResponse.class);
         }
     }
 

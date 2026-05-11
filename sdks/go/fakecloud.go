@@ -134,6 +134,9 @@ func (fc *FakeCloud) Route53() *Route53Client { return &Route53Client{fc: fc} }
 // ACM returns the ACM admin sub-client.
 func (fc *FakeCloud) ACM() *ACMClient { return &ACMClient{fc: fc} }
 
+// Logs returns the CloudWatch Logs admin/introspection sub-client.
+func (fc *FakeCloud) Logs() *LogsClient { return &LogsClient{fc: fc} }
+
 // ApplicationAutoScaling returns the Application Auto Scaling watcher sub-client.
 func (fc *FakeCloud) ApplicationAutoScaling() *ApplicationAutoScalingClient {
 	return &ApplicationAutoScalingClient{fc: fc}

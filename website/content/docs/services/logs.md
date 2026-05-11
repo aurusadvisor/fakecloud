@@ -8,17 +8,23 @@ fakecloud implements **113 of 113** CloudWatch Logs operations at 100% Smithy co
 
 ## Supported features
 
-- **Log groups** — CRUD, retention, tags, KMS association, data protection
+- **Log groups** — CRUD, retention (enforced — expired events purged on read/query), tags, KMS association, data protection
 - **Log streams** — CRUD, log events, sequence token management
-- **Log events** — PutLogEvents, GetLogEvents, FilterLogEvents
+- **Log events** — PutLogEvents, GetLogEvents, FilterLogEvents (supports array-pattern syntax, e.g. `?ERROR ?WARN`, quoted phrases, `-exclude` terms)
+- **GetLogRecord** — real pointer resolution: pointers minted by `GetQueryResults` / `FilterLogEvents` round-trip back to the original event with parsed `@message` fields
+- **Field indexes** — `DescribeFieldIndexes` returns fields parsed from indexed log events, not stubs
+- **GetLogGroupFields** — real field discovery from indexed events
+- **ListLogGroupsForQuery** — real list filtered by query string
 - **Subscription filters** — delivery to Lambda, Kinesis, SQS
 - **Query language** — StartQuery, GetQueryResults with full Insights query syntax
 - **Metric filters** — CRUD, extraction patterns
 - **Resource policies** — CRUD
 - **Export tasks** — S3 exports (recorded)
 - **Destinations** — cross-account destinations
-- **Anomaly detectors** — CRUD, training state, configuration
-- **Log deliveries** — CRUD for enhanced metrics/logs delivery
+- **Anomaly detectors** — CRUD, training state, configuration; `ListAnomalies` / `UpdateAnomaly` operate on anomalies seeded via the admin endpoint below
+- **Log deliveries** — CRUD plus delivery configuration and standard delivery templates
+- **Live Tail** — real `StartLiveTail` streaming with filter-pattern matching against live `PutLogEvents`
+- **GetLogObject / GetLogFields** — real responses backed by the indexed log store
 - **Transformers** — log transformation configurations
 
 ## Protocol
@@ -29,14 +35,24 @@ JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 
 - **CloudWatch Logs -> Lambda / Kinesis / SQS** — Subscription filters deliver log events
 
+## Admin / introspection
+
+- `POST /_fakecloud/logs/anomalies/inject` — Seed a synthetic anomaly so tests can exercise `ListAnomalies` / `UpdateAnomaly` deterministically. Body:
+
+  ```json
+  {
+    "anomalyDetectorArn": "arn:aws:logs:us-east-1:000000000000:anomaly-detector:my-detector",
+    "patternString": "ERROR connection refused <*>",
+    "logGroupArns": ["arn:aws:logs:us-east-1:000000000000:log-group:/app/web"],
+    "priority": "HIGH"
+  }
+  ```
+
+  Returns `{ "anomalyId": "<uuid>" }`. Available on every fakecloud SDK as `fc.logs().injectAnomaly(...)`.
+
 ## Gotchas
 
-- **Anomaly detection is managed but doesn't run.** You can create, update, list, and delete anomaly detectors — they all conform to AWS — but no actual anomaly analysis happens. `ListAnomalies` returns an empty list. If your code depends on detections, fake them another way.
-
-## Limitations
-
-- `StartLiveTail`, `GetLogObject`, and `GetLogFields` return shape-correct stub responses. No real streaming tail or structured log-object indexing is implemented.
-- Anomaly detection is managed but does not run. You can create, update, list, and delete anomaly detectors, but `ListAnomalies` always returns an empty list.
+- Anomaly *detection* (pattern mining) does not run. Anomalies appear in `ListAnomalies` only after being seeded through the admin endpoint above.
 
 ## Source
 

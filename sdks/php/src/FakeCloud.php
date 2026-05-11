@@ -22,6 +22,7 @@ final class FakeCloud
     private RdsClient $rds;
     private ElastiCacheClient $elasticache;
     private EcrClient $ecr;
+    private LogsClient $logs;
     private SesClient $ses;
     private SnsClient $sns;
     private SqsClient $sqs;
@@ -49,6 +50,7 @@ final class FakeCloud
         $this->rds = new RdsClient($this->http);
         $this->elasticache = new ElastiCacheClient($this->http);
         $this->ecr = new EcrClient($this->http);
+        $this->logs = new LogsClient($this->http);
         $this->ses = new SesClient($this->http);
         $this->sns = new SnsClient($this->http);
         $this->sqs = new SqsClient($this->http);
@@ -112,6 +114,7 @@ final class FakeCloud
     public function rds(): RdsClient { return $this->rds; }
     public function elasticache(): ElastiCacheClient { return $this->elasticache; }
     public function ecr(): EcrClient { return $this->ecr; }
+    public function logs(): LogsClient { return $this->logs; }
     public function ses(): SesClient { return $this->ses; }
     public function sns(): SnsClient { return $this->sns; }
     public function sqs(): SqsClient { return $this->sqs; }
@@ -224,6 +227,18 @@ final class EcrClient
     {
         return EcrPullThroughRulesResponse::fromArray(
             $this->http->get('/_fakecloud/ecr/pull-through-rules')
+        );
+    }
+}
+
+final class LogsClient
+{
+    public function __construct(private readonly HttpTransport $http) {}
+
+    public function injectAnomaly(LogsAnomalyInjectRequest $req): LogsAnomalyInjectResponse
+    {
+        return LogsAnomalyInjectResponse::fromArray(
+            $this->http->postJson('/_fakecloud/logs/anomalies/inject', $req->toArray())
         );
     }
 }

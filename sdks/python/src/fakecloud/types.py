@@ -1616,3 +1616,40 @@ class Elbv2RulesResponse:
         return cls(
             rules=[Elbv2Rule.from_dict(r) for r in data.get("rules", [])],
         )
+
+
+# ── CloudWatch Logs ─────────────────────────────────────────────────
+
+
+@dataclass
+class LogsAnomalyInjectRequest:
+    """Admin payload for `/_fakecloud/logs/anomalies/inject`.
+
+    Lets tests seed synthetic CloudWatch Logs anomalies so they can
+    exercise `ListAnomalies`/`UpdateAnomaly` deterministically.
+    """
+
+    anomaly_detector_arn: str
+    pattern_string: str
+    log_group_arns: List[str] = field(default_factory=list)
+    priority: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {
+            "anomalyDetectorArn": self.anomaly_detector_arn,
+            "patternString": self.pattern_string,
+            "logGroupArns": list(self.log_group_arns),
+        }
+        if self.priority is not None:
+            d["priority"] = self.priority
+        return d
+
+
+@dataclass
+class LogsAnomalyInjectResponse:
+    anomaly_id: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> LogsAnomalyInjectResponse:
+        d = _convert_keys(data)
+        return cls(**d)
