@@ -1368,6 +1368,42 @@ fn get_object_nonexistent_bucket() {
     );
 }
 
+#[tokio::test]
+async fn get_object_blocked_by_pab_ignore_public_acls() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+
+    let mut put_req = make_request(Method::PUT, "/b/k", &[], b"hello");
+    put_req
+        .headers
+        .insert("x-amz-acl", "public-read".parse().unwrap());
+    svc.put_object("123456789012", &put_req, "b", "k")
+        .await
+        .unwrap();
+
+    // Anonymous GET works before PAB is enabled.
+    let get_req = make_request(Method::GET, "/b/k", &[], b"");
+    svc.get_object("123456789012", &get_req, "b", "k").unwrap();
+
+    // Enable PAB with IgnorePublicAcls=true.
+    let pab_xml = br#"<PublicAccessBlockConfiguration><IgnorePublicAcls>true</IgnorePublicAcls></PublicAccessBlockConfiguration>"#;
+    let pab_req = make_request(Method::PUT, "/b", &[("publicAccessBlock", "")], pab_xml);
+    svc.put_public_access_block("123456789012", &pab_req, "b")
+        .unwrap();
+
+    // Anonymous GET now rejected.
+    let get_req = make_request(Method::GET, "/b/k", &[], b"");
+    assert_aws_err(
+        svc.get_object("123456789012", &get_req, "b", "k"),
+        "AccessDenied",
+    );
+
+    // Authenticated GET still allowed.
+    let mut authed = make_request(Method::GET, "/b/k", &[], b"");
+    authed.access_key_id = Some("AKIA-TEST".to_string());
+    svc.get_object("123456789012", &authed, "b", "k").unwrap();
+}
+
 #[test]
 fn get_object_nonexistent_key() {
     let svc = make_service();

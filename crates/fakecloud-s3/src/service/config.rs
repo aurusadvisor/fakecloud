@@ -36,7 +36,7 @@ pub(crate) struct PublicAccessBlockFlags {
 }
 
 impl PublicAccessBlockFlags {
-    fn parse(xml: &str) -> Self {
+    pub(crate) fn parse(xml: &str) -> Self {
         fn flag(xml: &str, name: &str) -> bool {
             let open = format!("<{name}>");
             let close = format!("</{name}>");
