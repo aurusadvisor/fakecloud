@@ -133,6 +133,27 @@ pub struct WebAuthnCredential {
     pub authenticator_attachment: Option<String>,
     pub authenticator_transport: Vec<String>,
     pub created_at: DateTime<Utc>,
+    /// Parsed attestation introspection. `None` when the client did not
+    /// send `attestationObject` (some flows ship only the credential id).
+    #[serde(default)]
+    pub attestation_info: Option<WebAuthnAttestationInfo>,
+}
+
+/// What fakecloud saw when it parsed the WebAuthn `attestationObject`.
+/// Surfaced via `/_fakecloud/cognito/webauthn-credentials` so tests can
+/// assert what we accepted — including the deliberate emulator gap that
+/// `x5c` chains are taken structurally without anchoring to a real root.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebAuthnAttestationInfo {
+    pub fmt: String,
+    pub alg: i64,
+    pub signature_len: usize,
+    pub x5c_chain_len: usize,
+    pub cose_public_key_present: bool,
+    /// `true` when we ran real RS256/ES256 verification against the
+    /// COSE public key; `false` when x5c was present (structurally
+    /// accepted, no PKI anchoring).
+    pub self_attest_verified: bool,
 }
 
 /// Linked external provider for a user

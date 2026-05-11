@@ -99,6 +99,42 @@ impl AcmService {
         self.set_certificate_status(arn_or_id, "ISSUED", None)
     }
 
+    /// Return parsed-on-best-effort structural info about an imported
+    /// certificate + chain, surfaced via
+    /// `/_fakecloud/acm/certificates/{arn-or-id}/chain-info` so tests can
+    /// assert what fakecloud actually accepted at ImportCertificate.
+    ///
+    /// We deliberately do **not** anchor the chain to a real root —
+    /// fakecloud is not a PKI. The returned JSON exposes the PEM block
+    /// counts and byte lengths so callers can confirm we received the
+    /// chain they expected, plus an `external_ca_validated: false`
+    /// marker that documents the emulator gap.
+    pub fn chain_info(&self, arn_or_id: &str) -> Option<serde_json::Value> {
+        let state = self.state.read();
+        for account in state.accounts.values() {
+            let key = account
+                .certificates
+                .keys()
+                .find(|k| k.as_str() == arn_or_id || cert_id_from_arn(k) == arn_or_id)
+                .cloned()?;
+            if let Some(cert) = account.certificates.get(&key) {
+                let pem = cert.certificate_pem.as_deref().unwrap_or("");
+                let chain = cert.certificate_chain_pem.as_deref().unwrap_or("");
+                return Some(serde_json::json!({
+                    "certificate_arn": key,
+                    "certificate_pem_bytes": pem.len(),
+                    "certificate_pem_blocks": pem.matches("-----BEGIN CERTIFICATE-----").count(),
+                    "chain_pem_bytes": chain.len(),
+                    "chain_pem_blocks": chain.matches("-----BEGIN CERTIFICATE-----").count(),
+                    "external_ca_validated": false,
+                    "status": cert.status,
+                    "cert_type": cert.cert_type,
+                }));
+            }
+        }
+        None
+    }
+
     /// Flip a stored certificate's status (and optionally a failure
     /// reason). Returns `false` if no certificate matches `arn_or_id`
     /// across any account. The admin endpoint `POST

@@ -2379,7 +2379,8 @@ async fn main() {
     if let Some(store) = apigw_snapshot_store {
         apigw_service = apigw_service.with_snapshot_store(store);
     }
-    let v2_arc: Arc<dyn fakecloud_core::service::AwsService> = Arc::new(apigw_service);
+    let apigatewayv2_service = Arc::new(apigw_service);
+    let v2_arc: Arc<dyn fakecloud_core::service::AwsService> = apigatewayv2_service.clone();
 
     // v1 (REST APIs) shares the SigV4 service identifier `apigateway`
     // with v2; the registry is keyed by that identifier so we wrap
@@ -6202,6 +6203,63 @@ async fn main() {
                         } else {
                             axum::http::StatusCode::NOT_FOUND
                         }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/acm/certificates/{arn_or_id}/chain-info",
+            axum::routing::get({
+                let svc = acm_service.clone();
+                move |axum::extract::Path(arn_or_id): axum::extract::Path<String>| {
+                    let svc = svc.clone();
+                    async move {
+                        match svc.chain_info(&arn_or_id) {
+                            Some(v) => (axum::http::StatusCode::OK, axum::Json(v)).into_response(),
+                            None => axum::http::StatusCode::NOT_FOUND.into_response(),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/apigatewayv2/domain-names/{name}/mtls-info",
+            axum::routing::get({
+                let svc = apigatewayv2_service.clone();
+                move |axum::extract::Path(name): axum::extract::Path<String>| {
+                    let svc = svc.clone();
+                    async move {
+                        match svc.mtls_info(&name) {
+                            Some(v) => (axum::http::StatusCode::OK, axum::Json(v)).into_response(),
+                            None => axum::http::StatusCode::NOT_FOUND.into_response(),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/cognito/webauthn-credentials",
+            axum::routing::get({
+                let cs = cognito_state.clone();
+                move || {
+                    let cs = cs.clone();
+                    async move {
+                        let accounts = cs.read();
+                        let mut out = Vec::new();
+                        for (account_id, state) in accounts.iter() {
+                            for (pool_user_key, creds) in &state.webauthn_credentials {
+                                for c in creds {
+                                    out.push(serde_json::json!({
+                                        "account_id": account_id,
+                                        "pool_user": pool_user_key,
+                                        "credential_id": c.credential_id,
+                                        "relying_party_id": c.relying_party_id,
+                                        "attestation_info": c.attestation_info,
+                                    }));
+                                }
+                            }
+                        }
+                        axum::Json(serde_json::json!({ "credentials": out }))
                     }
                 }
             }),

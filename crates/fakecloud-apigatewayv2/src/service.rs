@@ -177,6 +177,29 @@ impl ApiGatewayV2Service {
         self
     }
 
+    /// Return the stored `MutualTlsAuthentication` block for a custom
+    /// domain name, plus a marker that fakecloud accepted the trust
+    /// store URI structurally without anchoring it to a real CA.
+    ///
+    /// Surfaced via
+    /// `/_fakecloud/apigatewayv2/domain-names/{name}/mtls-info` so tests
+    /// can assert what trust store URI we received and confirm the
+    /// expected emulator gap (no external PKI validation).
+    pub fn mtls_info(&self, domain_name: &str) -> Option<serde_json::Value> {
+        let accounts = self.state.read();
+        for (_, state) in accounts.iter() {
+            if let Some(domain) = state.domain_names.get(domain_name) {
+                let mtls = domain.get("MutualTlsAuthentication").cloned();
+                return Some(serde_json::json!({
+                    "domain_name": domain_name,
+                    "mutual_tls_authentication": mtls,
+                    "external_ca_validated": false,
+                }));
+            }
+        }
+        None
+    }
+
     /// Snapshot of the WAF Count-action metrics. Keyed by
     /// `"<webacl-arn>|<rule-name>"`. Returns an empty map when WAF
     /// inspection is disabled.

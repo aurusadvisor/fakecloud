@@ -499,26 +499,39 @@ impl CognitoService {
             ));
         }
 
+        let mut attestation_info: Option<crate::state::WebAuthnAttestationInfo> = None;
         if let Some(att_b64) = credential["response"]["attestationObject"].as_str() {
             use base64::Engine;
             match crate::webauthn::parse_packed_attestation(att_b64) {
                 Ok(parsed) => {
+                    let mut self_attest_verified = false;
                     if let Some(cd_b64) = credential["response"]["clientDataJSON"].as_str() {
                         let cd_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
                             .decode(cd_b64.trim_end_matches('='))
                             .or_else(|_| base64::engine::general_purpose::STANDARD.decode(cd_b64));
                         if let Ok(cd_bytes) = cd_bytes {
-                            if let Err(e) =
-                                crate::webauthn::verify_packed_attestation(&parsed, &cd_bytes)
-                            {
-                                return Err(AwsServiceError::aws_error(
-                                    StatusCode::BAD_REQUEST,
-                                    "InvalidParameterException",
-                                    format!("WebAuthn attestation invalid: {e}").as_str(),
-                                ));
+                            match crate::webauthn::verify_packed_attestation(&parsed, &cd_bytes) {
+                                Ok(()) => {
+                                    self_attest_verified = parsed.x5c.is_empty();
+                                }
+                                Err(e) => {
+                                    return Err(AwsServiceError::aws_error(
+                                        StatusCode::BAD_REQUEST,
+                                        "InvalidParameterException",
+                                        format!("WebAuthn attestation invalid: {e}").as_str(),
+                                    ));
+                                }
                             }
                         }
                     }
+                    attestation_info = Some(crate::state::WebAuthnAttestationInfo {
+                        fmt: "packed".to_string(),
+                        alg: parsed.alg,
+                        signature_len: parsed.sig.len(),
+                        x5c_chain_len: parsed.x5c.len(),
+                        cose_public_key_present: parsed.cose_public_key.is_some(),
+                        self_attest_verified,
+                    });
                 }
                 Err(crate::webauthn::AttestationError::UnsupportedFormat(fmt)) => {
                     return Err(AwsServiceError::aws_error(
@@ -595,6 +608,7 @@ impl CognitoService {
             authenticator_attachment,
             authenticator_transport,
             created_at: now,
+            attestation_info,
         };
 
         let key = format!("{pool_id}:{username}");
