@@ -154,6 +154,26 @@ pub struct SesSandboxRequest {
     pub sandbox: bool,
 }
 
+/// Admin payload for `/_fakecloud/logs/anomalies/inject`. Lets tests
+/// seed synthetic CloudWatch Logs anomalies so they can exercise
+/// `ListAnomalies` / `UpdateAnomaly` deterministically.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogsAnomalyInjectRequest {
+    pub anomaly_detector_arn: String,
+    #[serde(default)]
+    pub log_group_arns: Vec<String>,
+    pub pattern_string: String,
+    #[serde(default)]
+    pub priority: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogsAnomalyInjectResponse {
+    pub anomaly_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InboundEmailRequest {

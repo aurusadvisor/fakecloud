@@ -1393,6 +1393,7 @@ async fn main() {
         } else {
             None
         };
+    let logs_anomalies_state = logs_state.clone();
     let mut logs_service = LogsService::new(logs_state.clone(), delivery_for_logs);
     if let Some(store) = logs_snapshot_store {
         logs_service = logs_service.with_snapshot_store(store);
@@ -3461,6 +3462,38 @@ async fn main() {
                         })
                         .collect();
                     axum::Json(types::SnsSmsResponse { messages })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/logs/anomalies/inject",
+            axum::routing::post({
+                let ls = logs_anomalies_state.clone();
+                move |axum::Json(body): axum::Json<types::LogsAnomalyInjectRequest>| async move {
+                    let now = chrono::Utc::now().timestamp_millis();
+                    let anomaly_id = uuid::Uuid::new_v4().to_string();
+                    let pattern_id = format!("{:032x}", uuid::Uuid::new_v4().as_u128());
+                    let mut accounts = ls.write();
+                    let state = accounts.default_mut();
+                    state.anomalies.insert(
+                        anomaly_id.clone(),
+                        fakecloud_logs::LogAnomaly {
+                            anomaly_id: anomaly_id.clone(),
+                            anomaly_detector_arn: body.anomaly_detector_arn,
+                            log_group_arn_list: body.log_group_arns,
+                            pattern_id,
+                            pattern_string: body.pattern_string,
+                            first_seen: now,
+                            last_seen: now,
+                            priority: body.priority.unwrap_or_else(|| "MEDIUM".to_string()),
+                            state: "ACTIVE".to_string(),
+                            suppressed: false,
+                        },
+                    );
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(types::LogsAnomalyInjectResponse { anomaly_id }),
+                    )
                 }
             }),
         )
