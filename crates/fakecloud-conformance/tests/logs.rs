@@ -1628,5 +1628,5 @@ async fn logs_describe_configuration_templates() {
         .send()
         .await
         .unwrap();
-    assert!(resp.configuration_templates().is_empty());
+    assert!(!resp.configuration_templates().is_empty());
 }
