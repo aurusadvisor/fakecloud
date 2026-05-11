@@ -174,6 +174,18 @@ pub struct LogsAnomalyInjectResponse {
     pub anomaly_id: String,
 }
 
+/// Admin payload for `/_fakecloud/cognito/compromised-passwords`.
+/// Plaintext passwords are hashed (sha256) and added to the
+/// compromised-credentials set consulted by `InitiateAuth` /
+/// `AdminInitiateAuth` when the pool's
+/// `CompromisedCredentialsRiskConfiguration.Actions.EventAction` is
+/// `BLOCK`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CognitoCompromisedPasswordsRequest {
+    pub passwords: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InboundEmailRequest {

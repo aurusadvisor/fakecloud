@@ -4089,6 +4089,30 @@ async fn main() {
             }),
         )
         .route(
+            "/_fakecloud/cognito/compromised-passwords",
+            axum::routing::post({
+                let cs = cognito_state.clone();
+                move |axum::Json(body): axum::Json<types::CognitoCompromisedPasswordsRequest>| {
+                    let cs = cs.clone();
+                    async move {
+                        use sha2::{Digest, Sha256};
+                        let mut mas = cs.write();
+                        let state = mas.default_mut();
+                        let mut added = 0usize;
+                        for p in body.passwords {
+                            let mut hasher = Sha256::new();
+                            hasher.update(p.as_bytes());
+                            let hash = format!("{:x}", hasher.finalize());
+                            if state.compromised_password_hashes.insert(hash) {
+                                added += 1;
+                            }
+                        }
+                        axum::Json(serde_json::json!({ "added": added }))
+                    }
+                }
+            }),
+        )
+        .route(
             "/{pool_id}/.well-known/openid-configuration",
             axum::routing::get({
                 let cs = cognito_oidc_state;
