@@ -15,7 +15,7 @@ Point your AWS SDK at `http://localhost:4566`.
 
 ## Why fakecloud for S3
 
-- **107 S3 operations** at 100% conformance — buckets, objects, multipart uploads, versioning, lifecycle, CORS, notifications, object lock, replication, website hosting.
+- **107 S3 operations** at 100% conformance — buckets, objects, multipart uploads, versioning, lifecycle, CORS, notifications, object lock, replication, website hosting, access points, S3 Select, Object Lambda.
 - **Real cross-service triggers.** S3 notifications fire SNS, SQS, and Lambda for real. `PutObject` -> Lambda invocation happens end-to-end.
 - **Any AWS SDK in any language.** Real HTTP server on port 4566 — Python boto3, Node aws-sdk, Go aws-sdk-go-v2, Java, Kotlin, Rust, PHP, AWS CLI all work.
 - **No Docker required** for S3 itself (binary runs the storage engine in-process).
@@ -121,7 +121,15 @@ aws --endpoint-url http://localhost:4566 s3api put-bucket-notification-configura
   }'
 ```
 
-Now `PutObject` fires the Lambda for real — not a stub. fakecloud runs Lambda code in real runtime containers across 23 runtimes.
+Now `PutObject` fires the Lambda for real — not a stub. fakecloud runs Lambda code in real runtime containers across 23 runtimes. `CompleteMultipartUpload` fires its own `s3:ObjectCreated:CompleteMultipartUpload` event with the full-object checksum attached.
+
+## Access Points, S3 Select, Object Lambda
+
+- **Access Points.** Create via `s3-control.<region>` host, then read/write via `s3-accesspoint.<region>` — fakecloud resolves the alias to the underlying bucket so any AWS SDK that targets access point endpoints works unchanged.
+- **S3 Select.** `SelectObjectContent` over CSV/JSON returns a real EventStream (`Records`/`Stats`/`End` frames), not a stubbed full-object download.
+- **Object Lambda.** `WriteGetObjectResponse` stores the transformed body and metadata against the request token; the next `GetObject` on the access point serves the transformed payload.
+- **Public Access Block.** `IgnorePublicAcls` is enforced on `GetObject` so misconfigured public ACLs stop being readable the moment you set the bucket-level block.
+- **BucketOwnerEnforced.** ACLs can be turned off entirely; ACL writes are rejected and reads return owner-only, matching real S3.
 
 ## How it differs from alternatives
 
