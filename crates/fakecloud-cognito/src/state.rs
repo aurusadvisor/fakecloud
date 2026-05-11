@@ -104,6 +104,13 @@ pub struct CognitoState {
     /// have to walk every pool.
     #[serde(default)]
     pub federated_identities: BTreeMap<String, FederatedIdentity>,
+    /// Set of compromised-password hashes (sha256 hex of plaintext).
+    /// Populated via the `/_fakecloud/cognito/compromised-passwords`
+    /// admin endpoint and consulted on `InitiateAuth`/`AdminInitiateAuth`
+    /// when a pool has CompromisedCredentialsRiskConfiguration with
+    /// `EventAction = BLOCK`.
+    #[serde(default)]
+    pub compromised_password_hashes: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -165,6 +172,7 @@ impl CognitoState {
             identity_pools: BTreeMap::new(),
             identity_pool_role_attachments: BTreeMap::new(),
             federated_identities: BTreeMap::new(),
+            compromised_password_hashes: std::collections::BTreeSet::new(),
         }
     }
 

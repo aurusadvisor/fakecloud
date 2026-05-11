@@ -100,6 +100,52 @@ enum AdminAuthOutcome {
 }
 
 impl CognitoService {
+    /// CompromisedCredentialsRiskConfiguration enforcement.
+    /// Returns `Err(NotAuthorizedException)` when the pool's risk
+    /// config has `Actions.EventAction = BLOCK` and the password
+    /// matches a known compromised hash.
+    pub(super) fn evaluate_compromised_credentials(
+        &self,
+        account_id: &str,
+        pool_id: &str,
+        client_id: &str,
+        password: &str,
+    ) -> Result<(), AwsServiceError> {
+        use sha2::{Digest, Sha256};
+        let accounts = self.state.read();
+        let Some(state) = accounts.get(account_id) else {
+            return Ok(());
+        };
+        // Risk config keyed by (pool, client) with a fallback to (pool, "").
+        let pool_key = format!("{pool_id}:{client_id}");
+        let pool_default = format!("{pool_id}:");
+        let cfg = state
+            .risk_configurations
+            .get(&pool_key)
+            .or_else(|| state.risk_configurations.get(&pool_default));
+        let Some(cfg) = cfg else {
+            return Ok(());
+        };
+        let action = cfg["CompromisedCredentialsRiskConfiguration"]["Actions"]["EventAction"]
+            .as_str()
+            .unwrap_or("");
+        if !action.eq_ignore_ascii_case("BLOCK") {
+            return Ok(());
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(password.as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
+        if state.compromised_password_hashes.contains(&hash) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Password has been found in a previous data breach. \
+                 This password cannot be used. Please use a different password.",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) async fn admin_initiate_auth(
         &self,
         req: &AwsRequest,
@@ -261,6 +307,13 @@ impl CognitoService {
         region: &str,
         req: &AwsRequest,
     ) -> Result<AdminAuthOutcome, AwsServiceError> {
+        self.evaluate_compromised_credentials(
+            &req.account_id,
+            &input.pool_id,
+            &input.client_id,
+            &input.password,
+        )?;
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
@@ -469,6 +522,14 @@ impl CognitoService {
                     "PASSWORD is required in AuthParameters",
                 )
             })?;
+
+        // CompromisedCredentialsRiskConfiguration: when the pool has a
+        // risk config with `EventAction = BLOCK` for sign-in events and
+        // the password is in the compromised-password hash set, reject
+        // with NotAuthorizedException. The hash set is populated via
+        // `/_fakecloud/cognito/compromised-passwords` for deterministic
+        // tests.
+        self.evaluate_compromised_credentials(&req.account_id, pool_id, client_id, password)?;
 
         let (user_attrs, region, account_id) = {
             let accounts = self.state.read();
@@ -2304,5 +2365,108 @@ impl CognitoService {
             .retain(|_, v| !(v.user_pool_id == pool_id && v.username == username));
 
         Ok(AwsResponse::ok_json(json!({})))
+    }
+}
+
+#[cfg(test)]
+mod risk_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_service() -> CognitoService {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        CognitoService::new(state)
+    }
+
+    fn seed_compromised(svc: &CognitoService, password: &str) {
+        use sha2::{Digest, Sha256};
+        let mut accounts = svc.state.write();
+        let s = accounts.get_or_create("123456789012");
+        let mut hasher = Sha256::new();
+        hasher.update(password.as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
+        s.compromised_password_hashes.insert(hash);
+    }
+
+    fn seed_risk_block(svc: &CognitoService, pool_id: &str, client_id: &str) {
+        let mut accounts = svc.state.write();
+        let s = accounts.get_or_create("123456789012");
+        let key = format!("{pool_id}:{client_id}");
+        s.risk_configurations.insert(
+            key,
+            json!({
+                "CompromisedCredentialsRiskConfiguration": {
+                    "Actions": {"EventAction": "BLOCK"}
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn no_risk_config_passes() {
+        let svc = make_service();
+        seed_compromised(&svc, "Password123!");
+        let res = svc.evaluate_compromised_credentials(
+            "123456789012",
+            "pool-x",
+            "client-x",
+            "Password123!",
+        );
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn block_rejects_compromised_password() {
+        let svc = make_service();
+        seed_compromised(&svc, "Password123!");
+        seed_risk_block(&svc, "pool-x", "client-x");
+        let err = svc
+            .evaluate_compromised_credentials("123456789012", "pool-x", "client-x", "Password123!")
+            .unwrap_err();
+        match err {
+            AwsServiceError::AwsError { code, .. } => assert_eq!(code, "NotAuthorizedException"),
+            other => panic!("expected AwsError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_accepts_clean_password() {
+        let svc = make_service();
+        seed_compromised(&svc, "Password123!");
+        seed_risk_block(&svc, "pool-x", "client-x");
+        let res = svc.evaluate_compromised_credentials(
+            "123456789012",
+            "pool-x",
+            "client-x",
+            "DifferentPassword!",
+        );
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn audit_only_does_not_block() {
+        let svc = make_service();
+        seed_compromised(&svc, "Password123!");
+        {
+            let mut accounts = svc.state.write();
+            let s = accounts.get_or_create("123456789012");
+            s.risk_configurations.insert(
+                "pool-x:client-x".to_string(),
+                json!({
+                    "CompromisedCredentialsRiskConfiguration": {
+                        "Actions": {"EventAction": "NO_ACTION"}
+                    }
+                }),
+            );
+        }
+        let res = svc.evaluate_compromised_credentials(
+            "123456789012",
+            "pool-x",
+            "client-x",
+            "Password123!",
+        );
+        assert!(res.is_ok());
     }
 }

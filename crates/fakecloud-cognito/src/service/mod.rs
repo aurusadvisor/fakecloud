@@ -37,7 +37,7 @@ use crate::state::{
 use crate::triggers::CognitoDeliveryContext;
 
 pub struct CognitoService {
-    state: SharedCognitoState,
+    pub(crate) state: SharedCognitoState,
     delivery_ctx: Option<CognitoDeliveryContext>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
