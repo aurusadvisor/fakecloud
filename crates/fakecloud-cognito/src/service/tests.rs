@@ -6925,3 +6925,95 @@ fn id_token_verifies_against_jwks_public_key() {
         .verify(signing_input.as_bytes(), &signature)
         .expect("ID token must verify against the JWKS-published public key");
 }
+
+#[test]
+fn pretoken_overrides_merge_into_id_and_access_tokens() {
+    use crate::service::generate_tokens_with_overrides;
+    use base64::Engine;
+
+    let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let overrides = serde_json::json!({
+        "claimsAndScopeOverrideDetails": {
+            "idTokenGeneration": {
+                "claimsToAddOrOverride": {"custom:tier": "gold", "email": "x@y.z"},
+                "claimsToSuppress": ["jti"],
+            },
+            "accessTokenGeneration": {
+                "claimsToAddOrOverride": {"custom:tier": "gold"},
+                "scopesToAdd": ["openid", "email"],
+            },
+            "groupOverrideDetails": {
+                "groupsToOverride": ["admins", "beta"],
+            },
+        }
+    });
+
+    let tokens = generate_tokens_with_overrides(
+        "us-east-1_abc",
+        "client1",
+        "sub-1",
+        "alice",
+        "us-east-1",
+        None,
+        None,
+        None,
+        Some(&overrides),
+    );
+
+    let parts: Vec<&str> = tokens.id_token.split('.').collect();
+    let id_payload: serde_json::Value =
+        serde_json::from_slice(&b64url.decode(parts[1]).unwrap()).unwrap();
+    assert_eq!(id_payload["custom:tier"], "gold");
+    assert_eq!(id_payload["email"], "x@y.z");
+    assert!(id_payload.get("jti").is_none(), "jti should be suppressed");
+    assert_eq!(
+        id_payload["cognito:groups"],
+        serde_json::json!(["admins", "beta"])
+    );
+
+    let parts: Vec<&str> = tokens.access_token.split('.').collect();
+    let access_payload: serde_json::Value =
+        serde_json::from_slice(&b64url.decode(parts[1]).unwrap()).unwrap();
+    assert_eq!(access_payload["custom:tier"], "gold");
+    let scope = access_payload["scope"].as_str().unwrap();
+    assert!(scope.contains("openid"));
+    assert!(scope.contains("email"));
+    assert_eq!(
+        access_payload["cognito:groups"],
+        serde_json::json!(["admins", "beta"])
+    );
+}
+
+#[test]
+fn pretoken_v1_claims_override_details_shape() {
+    use crate::service::generate_tokens_with_overrides;
+    use base64::Engine;
+
+    let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let overrides = serde_json::json!({
+        "claimsOverrideDetails": {
+            "claimsToAddOrOverride": {"custom:plan": "pro"},
+            "claimsToSuppress": ["aud"],
+            "groupOverrideDetails": {"groupsToOverride": ["g1"]},
+        }
+    });
+
+    let tokens = generate_tokens_with_overrides(
+        "us-east-1_abc",
+        "client1",
+        "sub-1",
+        "alice",
+        "us-east-1",
+        None,
+        None,
+        None,
+        Some(&overrides),
+    );
+
+    let parts: Vec<&str> = tokens.id_token.split('.').collect();
+    let id_payload: serde_json::Value =
+        serde_json::from_slice(&b64url.decode(parts[1]).unwrap()).unwrap();
+    assert_eq!(id_payload["custom:plan"], "pro");
+    assert!(id_payload.get("aud").is_none());
+    assert_eq!(id_payload["cognito:groups"], serde_json::json!(["g1"]));
+}

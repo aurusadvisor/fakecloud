@@ -1560,6 +1560,31 @@ fn generate_tokens_with_scope(
     scope: Option<&str>,
     nonce: Option<&str>,
 ) -> TokenSet {
+    generate_tokens_with_overrides(
+        pool_id, client_id, sub, username, region, signing, scope, nonce, None,
+    )
+}
+
+/// Like [`generate_tokens_with_scope`] but accepts a
+/// `claimsAndScopeOverrideDetails`-shaped JSON value from a
+/// PreTokenGeneration trigger response.
+///
+/// - `idTokenGeneration.claimsToAddOrOverride` -> merged into id token
+/// - `idTokenGeneration.claimsToSuppress` -> removed from id token
+/// - `accessTokenGeneration.claimsToAddOrOverride` -> merged into access token
+/// - `groupOverrideDetails.groupsToOverride` -> set as `cognito:groups`
+#[allow(clippy::too_many_arguments)]
+fn generate_tokens_with_overrides(
+    pool_id: &str,
+    client_id: &str,
+    sub: &str,
+    username: &str,
+    region: &str,
+    signing: Option<(&str, &str)>,
+    scope: Option<&str>,
+    nonce: Option<&str>,
+    overrides: Option<&Value>,
+) -> TokenSet {
     let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let now = Utc::now().timestamp();
     let jti = Uuid::new_v4().to_string();
@@ -1592,14 +1617,13 @@ fn generate_tokens_with_scope(
             .expect("id_payload is always a JSON object")
             .insert("nonce".to_string(), Value::String(n.to_string()));
     }
-    let id_token = sign_jwt(&id_header, &id_payload, pem);
 
     let access_jti = Uuid::new_v4().to_string();
     let access_header = json!({"kid": kid, "alg": "RS256", "typ": "JWT"});
     let access_scope = scope
         .filter(|s| !s.is_empty())
         .unwrap_or("aws.cognito.signin.user.admin");
-    let access_payload = json!({
+    let mut access_payload = json!({
         "sub": sub,
         "iss": iss,
         "client_id": client_id,
@@ -1609,6 +1633,54 @@ fn generate_tokens_with_scope(
         "exp": now + 3600,
         "iat": now,
     });
+
+    // PreTokenGeneration trigger merge. Schema (v2):
+    //   claimsAndScopeOverrideDetails: {
+    //     idTokenGeneration:    { claimsToAddOrOverride, claimsToSuppress },
+    //     accessTokenGeneration:{ claimsToAddOrOverride, claimsToSuppress, scopesToAdd, scopesToSuppress },
+    //     groupOverrideDetails: { groupsToOverride, preferredRole, iamRolesToOverride },
+    //   }
+    // Real Cognito also accepts the v1 flat `claimsOverrideDetails` shape.
+    if let Some(ov) = overrides {
+        let v2 = &ov["claimsAndScopeOverrideDetails"];
+        let v1 = &ov["claimsOverrideDetails"];
+        let id_block = if !v2.is_null() {
+            &v2["idTokenGeneration"]
+        } else {
+            v1
+        };
+        let access_block = if !v2.is_null() {
+            &v2["accessTokenGeneration"]
+        } else {
+            v1
+        };
+        let group_block = if !v2.is_null() {
+            &v2["groupOverrideDetails"]
+        } else {
+            &v1["groupOverrideDetails"]
+        };
+        apply_claim_overrides(id_payload.as_object_mut().unwrap(), id_block);
+        apply_claim_overrides(access_payload.as_object_mut().unwrap(), access_block);
+        if let Some(arr) = group_block["groupsToOverride"].as_array() {
+            let groups: Vec<Value> = arr.iter().filter(|v| v.is_string()).cloned().collect();
+            if !groups.is_empty() {
+                id_payload["cognito:groups"] = Value::Array(groups.clone());
+                access_payload["cognito:groups"] = Value::Array(groups);
+            }
+        }
+        if let Some(arr) = access_block["scopesToAdd"].as_array() {
+            let extra: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            if !extra.is_empty() {
+                let merged = format!("{} {}", access_scope, extra.join(" "));
+                access_payload["scope"] = Value::String(merged);
+            }
+        }
+    }
+
+    let id_token = sign_jwt(&id_header, &id_payload, pem);
     let access_token = sign_jwt(&access_header, &access_payload, pem);
 
     let mut refresh_bytes = Vec::with_capacity(72);
@@ -1621,6 +1693,24 @@ fn generate_tokens_with_scope(
         id_token,
         access_token,
         refresh_token,
+    }
+}
+
+/// Merge a PreTokenGeneration claim block into a token payload.
+/// `claimsToAddOrOverride`: object whose entries are inserted (overwriting).
+/// `claimsToSuppress`: array of claim names to delete after the merge.
+fn apply_claim_overrides(map: &mut serde_json::Map<String, Value>, block: &Value) {
+    if let Some(adds) = block["claimsToAddOrOverride"].as_object() {
+        for (k, v) in adds {
+            map.insert(k.clone(), v.clone());
+        }
+    }
+    if let Some(suppress) = block["claimsToSuppress"].as_array() {
+        for v in suppress {
+            if let Some(k) = v.as_str() {
+                map.remove(k);
+            }
+        }
     }
 }
 
