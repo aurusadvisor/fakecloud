@@ -25,7 +25,11 @@ import type {
   LogsFieldIndexesResponse,
   WarmContainersResponse,
   EvictContainerResponse,
+  SesBouncesResponse,
   SesEmailsResponse,
+  SesEventDestinationDeliveriesResponse,
+  SesMessageInsightsResponse,
+  SesSmtpSubmissionsResponse,
   InboundEmailRequest,
   InboundEmailResponse,
   SesMetrics,
@@ -239,6 +243,32 @@ export class SesClient {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sandbox }),
     });
+    return parse(resp);
+  }
+
+  async getBounces(): Promise<SesBouncesResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/ses/bounces`);
+    return parse(resp);
+  }
+
+  async getMessageInsights(
+    messageId: string,
+  ): Promise<SesMessageInsightsResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ses/messages/${encodeURIComponent(messageId)}/insights`,
+    );
+    return parse(resp);
+  }
+
+  async getSmtpSubmissions(): Promise<SesSmtpSubmissionsResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/ses/smtp/submissions`);
+    return parse(resp);
+  }
+
+  async getEventDestinationDeliveries(): Promise<SesEventDestinationDeliveriesResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ses/event-destinations/deliveries`,
+    );
     return parse(resp);
   }
 }

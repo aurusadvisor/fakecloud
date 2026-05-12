@@ -78,6 +78,10 @@ For tests that want fakecloud to forward accepted messages out to a real SMTP se
 - `POST /_fakecloud/ses/identities/{name}/mail-from-status` — override an identity's MAIL FROM domain verification status (`NotStarted` / `Pending` / `Success` / `Failed`)
 - `POST /_fakecloud/ses/account/sandbox` — toggle account-level sandbox / production access state for sending checks
 - `POST /_fakecloud/ses/inbound` — simulate receiving an inbound email, trigger receipt rule evaluation
+- `GET /_fakecloud/ses/bounces` — list bounces queued via `SendBounce`, with full per-recipient DSN fields and optional explanation
+- `GET /_fakecloud/ses/messages/{message_id}/insights` — per-message delivery tracking (sends, deliveries, bounces, complaints) — local replacement for `GetMessageInsights`
+- `GET /_fakecloud/ses/smtp/submissions` — messages accepted by the SMTP submission listener (`FAKECLOUD_SES_SMTP_PORT`), including auth user and raw size
+- `GET /_fakecloud/ses/event-destinations/deliveries` — fanout log of every event dispatched to a configured event destination (kinesis / firehose / cloudwatch / sns / eventbridge)
 
 The introspection SDKs (Go/TypeScript/Python/Java/PHP) wrap each of these as a one-line helper, e.g. `fc.ses().getDkimPublicKey("example.com")`, `fc.ses().setSandbox(false)`.
 

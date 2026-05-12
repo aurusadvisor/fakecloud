@@ -141,6 +141,100 @@ pub struct SesMailFromStatusRequest {
     pub status: String,
 }
 
+// ── SES introspection: bounces / insights / SMTP submissions / event-dest ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SesBouncedRecipientInfo {
+    pub recipient: String,
+    pub bounce_type: String,
+    pub action: String,
+    pub status: String,
+    pub diagnostic_code: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SesBounce {
+    pub message_id: String,
+    pub bounce_type: String,
+    pub bounce_sub_type: String,
+    pub bounced_recipient_info: Vec<SesBouncedRecipientInfo>,
+    pub explanation: Option<String>,
+    pub timestamp: String,
+    pub original_message_id: String,
+    pub bounce_sender: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SesBouncesResponse {
+    pub bounces: Vec<SesBounce>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SesMessageInsightEvent {
+    pub destination: String,
+    pub timestamp: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounce_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounce_sub_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complaint_feedback_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SesMessageInsightsResponse {
+    pub message_id: String,
+    pub sends: Vec<SesMessageInsightEvent>,
+    pub deliveries: Vec<SesMessageInsightEvent>,
+    pub opens: Vec<SesMessageInsightEvent>,
+    pub clicks: Vec<SesMessageInsightEvent>,
+    pub bounces: Vec<SesMessageInsightEvent>,
+    pub complaints: Vec<SesMessageInsightEvent>,
+    pub rejects: Vec<SesMessageInsightEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SesSmtpSubmission {
+    pub message_id: String,
+    pub from: String,
+    pub to: Vec<String>,
+    pub subject: Option<String>,
+    pub raw_size_bytes: usize,
+    pub received_at: String,
+    pub auth_user: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SesSmtpSubmissionsResponse {
+    pub submissions: Vec<SesSmtpSubmission>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SesEventDestinationDelivery {
+    pub destination_name: String,
+    pub destination_type: String,
+    pub event_type: String,
+    pub message_id: String,
+    pub dispatched_at: String,
+    pub target_arn: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SesEventDestinationDeliveriesResponse {
+    pub deliveries: Vec<SesEventDestinationDelivery>,
+}
+
 /// Admin payload to flip the SES account-level `production_access_enabled`
 /// flag. fakecloud defaults to `production_access_enabled=true` so users
 /// don't have to verify recipients to send mail; flip this to `false` to

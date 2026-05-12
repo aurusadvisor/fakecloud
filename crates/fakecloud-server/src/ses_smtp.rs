@@ -21,7 +21,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
 
 use fakecloud_iam::SharedIamState;
-use fakecloud_ses::{SentEmail, SharedSesState};
+use fakecloud_ses::{SentEmail, SharedSesState, SmtpSubmission};
 
 const SES_SERVICE_NAME: &str = "ses.amazonaws.com";
 
@@ -85,6 +85,9 @@ struct Session {
 #[derive(Clone)]
 struct AuthIdent {
     account_id: String,
+    /// IAM service-specific credential username used to authenticate this
+    /// session. Recorded on each SMTP submission for introspection.
+    service_user_name: String,
 }
 
 enum AuthChallenge {
@@ -171,7 +174,17 @@ async fn handle(
             let data = read_data(&mut rd).await?;
             let from = s.mail_from.clone().unwrap_or_default();
             let to = std::mem::take(&mut s.rcpt_to);
-            let message_id = store_email(ses, &ident.account_id, from, to, data);
+            // Extract the auth user from IAM (the SMTP service-specific
+            // username) so the introspection endpoint can show which
+            // credential submitted the message.
+            let message_id = store_email(
+                ses,
+                &ident.account_id,
+                from,
+                to,
+                data,
+                &ident.service_user_name,
+            );
             s.mail_from = None;
             wr.write_all(format!("250 OK queued as {message_id}\r\n").as_bytes())
                 .await?;
@@ -312,6 +325,7 @@ fn lookup_credential(
                 {
                     return Some(AuthIdent {
                         account_id: account_id.to_string(),
+                        service_user_name: c.service_user_name.clone(),
                     });
                 }
             }
@@ -326,15 +340,19 @@ fn store_email(
     from: String,
     to: Vec<String>,
     data: String,
+    auth_user: &str,
 ) -> String {
     let message_id = format!("smtp-{:032x}", rand::random::<u128>());
+    let now = Utc::now();
+    let subject = parse_subject(&data);
+    let raw_size_bytes = data.len();
     let sent = SentEmail {
         message_id: message_id.clone(),
-        from,
-        to,
+        from: from.clone(),
+        to: to.clone(),
         cc: Vec::new(),
         bcc: Vec::new(),
-        subject: None,
+        subject: subject.clone(),
         html_body: None,
         text_body: None,
         raw_data: Some(data),
@@ -342,12 +360,41 @@ fn store_email(
         template_data: None,
         dkim_signature: None,
         headers: Vec::new(),
-        timestamp: Utc::now(),
+        timestamp: now,
         email_tags: Vec::new(),
         delivery_insights: Vec::new(),
     };
-    ses.write().get_or_create(account_id).sent_emails.push(sent);
+    let submission = SmtpSubmission {
+        message_id: message_id.clone(),
+        from,
+        to,
+        subject,
+        raw_size_bytes,
+        received_at: now,
+        auth_user: auth_user.to_string(),
+    };
+    let mut accounts = ses.write();
+    let state = accounts.get_or_create(account_id);
+    state.sent_emails.push(sent);
+    state.smtp_submissions.push(submission);
     message_id
+}
+
+/// Return the first `Subject:` header value in an RFC 5322 message blob,
+/// or `None` if no header is found. Folded continuation lines are not
+/// unfolded — fakecloud just keeps the first physical line, which is
+/// good enough for test assertions and matches the shape captured in
+/// `SentEmail::subject` for the v2 SDK path.
+fn parse_subject(raw: &str) -> Option<String> {
+    for line in raw.lines() {
+        if line.is_empty() {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("Subject:") {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
 }
 
 #[cfg(test)]

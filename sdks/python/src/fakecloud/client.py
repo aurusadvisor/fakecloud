@@ -73,11 +73,15 @@ from fakecloud.types import (
     RotationTickResponse,
     S3NotificationsResponse,
     SchedulerSchedulesResponse,
+    SesBouncesResponse,
     SesDkimPublicKey,
     SesEmailsResponse,
+    SesEventDestinationDeliveriesResponse,
     SesMailFromStatusResponse,
+    SesMessageInsightsResponse,
     SesMetrics,
     SesSandboxResponse,
+    SesSmtpSubmissionsResponse,
     SfnEnqueueActivityTaskRequest,
     SfnEnqueueActivityTaskResponse,
     SnsMessagesResponse,
@@ -650,6 +654,32 @@ class SesClient:
         _check(resp)
         return SesSandboxResponse.from_dict(resp.json())
 
+    async def get_bounces(self) -> SesBouncesResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/ses/bounces")
+        _check(resp)
+        return SesBouncesResponse.from_dict(resp.json())
+
+    async def get_message_insights(self, message_id: str) -> SesMessageInsightsResponse:
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/ses/messages/{message_id}/insights"
+        )
+        _check(resp)
+        return SesMessageInsightsResponse.from_dict(resp.json())
+
+    async def get_smtp_submissions(self) -> SesSmtpSubmissionsResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/ses/smtp/submissions")
+        _check(resp)
+        return SesSmtpSubmissionsResponse.from_dict(resp.json())
+
+    async def get_event_destination_deliveries(
+        self,
+    ) -> SesEventDestinationDeliveriesResponse:
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/ses/event-destinations/deliveries"
+        )
+        _check(resp)
+        return SesEventDestinationDeliveriesResponse.from_dict(resp.json())
+
 
 class SnsClient:
     """Async SNS introspection client."""
@@ -1216,6 +1246,32 @@ class _SyncSesClient:
         )
         _check(resp)
         return SesSandboxResponse.from_dict(resp.json())
+
+    def get_bounces(self) -> SesBouncesResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/ses/bounces")
+        _check(resp)
+        return SesBouncesResponse.from_dict(resp.json())
+
+    def get_message_insights(self, message_id: str) -> SesMessageInsightsResponse:
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/ses/messages/{message_id}/insights"
+        )
+        _check(resp)
+        return SesMessageInsightsResponse.from_dict(resp.json())
+
+    def get_smtp_submissions(self) -> SesSmtpSubmissionsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/ses/smtp/submissions")
+        _check(resp)
+        return SesSmtpSubmissionsResponse.from_dict(resp.json())
+
+    def get_event_destination_deliveries(
+        self,
+    ) -> SesEventDestinationDeliveriesResponse:
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/ses/event-destinations/deliveries"
+        )
+        _check(resp)
+        return SesEventDestinationDeliveriesResponse.from_dict(resp.json())
 
 
 class _SyncSnsClient:

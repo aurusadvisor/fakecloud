@@ -9,8 +9,8 @@ use std::sync::Arc;
 use fakecloud_core::delivery::DeliveryBus;
 
 use crate::state::{
-    DeliveryInsightEvent, EmailRecipientInsight, EventDestination, SentEmail, SharedSesState,
-    SuppressedDestination,
+    DeliveryInsightEvent, EmailRecipientInsight, EventDestination, EventDestinationDispatch,
+    SentEmail, SharedSesState, SuppressedDestination,
 };
 
 /// Shared references needed for cross-service event delivery.
@@ -251,6 +251,11 @@ fn deliver_event(
 ) {
     let destinations = get_matching_destinations(&ctx.ses_state, config_set_name, event_type);
 
+    let mut dispatches: Vec<EventDestinationDispatch> = Vec::new();
+    let message_id = event["mail"]["messageId"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
     for dest in destinations {
         // SNS destination
         if let Some(ref sns_dest) = dest.sns_destination {
@@ -266,11 +271,19 @@ fn deliver_event(
                     &message,
                     Some("Amazon SES Email Event"),
                 );
+                dispatches.push(EventDestinationDispatch {
+                    destination_name: dest.name.clone(),
+                    destination_type: "sns".to_string(),
+                    event_type: event_type.as_str().to_string(),
+                    message_id: message_id.clone(),
+                    dispatched_at: Utc::now(),
+                    target_arn: topic_arn.to_string(),
+                });
             }
         }
 
         // EventBridge destination
-        if dest.event_bridge_destination.is_some() {
+        if let Some(ref eb) = dest.event_bridge_destination {
             let detail = event.to_string();
             tracing::info!(
                 event_type = ?event_type,
@@ -282,6 +295,19 @@ fn deliver_event(
                 &detail,
                 "default",
             );
+            let target_arn = eb
+                .get("EventBusArn")
+                .and_then(|v| v.as_str())
+                .unwrap_or("default")
+                .to_string();
+            dispatches.push(EventDestinationDispatch {
+                destination_name: dest.name.clone(),
+                destination_type: "eventbridge".to_string(),
+                event_type: event_type.as_str().to_string(),
+                message_id: message_id.clone(),
+                dispatched_at: Utc::now(),
+                target_arn,
+            });
         }
 
         // Kinesis / Firehose destination
@@ -295,6 +321,14 @@ fn deliver_event(
                 );
                 ctx.delivery_bus
                     .put_record_to_firehose(ds_arn, event_json.as_bytes());
+                dispatches.push(EventDestinationDispatch {
+                    destination_name: dest.name.clone(),
+                    destination_type: "firehose".to_string(),
+                    event_type: event_type.as_str().to_string(),
+                    message_id: message_id.clone(),
+                    dispatched_at: Utc::now(),
+                    target_arn: ds_arn.to_string(),
+                });
             }
             if let Some(stream_arn) = kf.get("StreamARN").and_then(|v| v.as_str()) {
                 tracing::info!(
@@ -306,6 +340,14 @@ fn deliver_event(
                 let partition_key = event["mail"]["messageId"].as_str().unwrap_or("default");
                 ctx.delivery_bus
                     .put_record_to_kinesis(stream_arn, &data_b64, partition_key);
+                dispatches.push(EventDestinationDispatch {
+                    destination_name: dest.name.clone(),
+                    destination_type: "kinesis".to_string(),
+                    event_type: event_type.as_str().to_string(),
+                    message_id: message_id.clone(),
+                    dispatched_at: Utc::now(),
+                    target_arn: stream_arn.to_string(),
+                });
             }
         }
 
@@ -335,8 +377,21 @@ fn deliver_event(
                         Utc::now().timestamp_millis(),
                     );
                 }
+                dispatches.push(EventDestinationDispatch {
+                    destination_name: dest.name.clone(),
+                    destination_type: "cloudwatch".to_string(),
+                    event_type: event_type.as_str().to_string(),
+                    message_id: message_id.clone(),
+                    dispatched_at: Utc::now(),
+                    target_arn: String::new(),
+                });
             }
         }
+    }
+    if !dispatches.is_empty() {
+        let mut mas = ctx.ses_state.write();
+        let state = mas.default_mut();
+        state.event_destination_dispatches.extend(dispatches);
     }
 }
 

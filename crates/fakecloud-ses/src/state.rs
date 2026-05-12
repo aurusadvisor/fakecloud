@@ -142,6 +142,24 @@ pub struct SentBounce {
     pub bounce_sender: String,
     pub bounced_recipients: Vec<String>,
     pub timestamp: DateTime<Utc>,
+    /// Per-recipient bounce details captured from
+    /// `BouncedRecipientInfoList`. Empty for bounces queued before the
+    /// field was added (preserved via `#[serde(default)]`).
+    #[serde(default)]
+    pub bounced_recipient_info: Vec<BouncedRecipientInfo>,
+    /// Optional explanation extracted from the `Explanation` parameter
+    /// of `SendBounce`.
+    #[serde(default)]
+    pub explanation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BouncedRecipientInfo {
+    pub recipient: String,
+    pub bounce_type: String,
+    pub action: String,
+    pub status: String,
+    pub diagnostic_code: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -366,6 +384,39 @@ pub struct IpFilter {
     pub policy: String, // "Allow" or "Block"
 }
 
+/// One email accepted by the inbound SMTP listener
+/// (`ses_smtp.rs::store_email`). Captured alongside the
+/// matching `SentEmail` so tests can assert SMTP-specific facts
+/// (auth user, raw size) without re-deriving them from `raw_data`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmtpSubmission {
+    pub message_id: String,
+    pub from: String,
+    pub to: Vec<String>,
+    pub subject: Option<String>,
+    pub raw_size_bytes: usize,
+    pub received_at: DateTime<Utc>,
+    pub auth_user: String,
+}
+
+/// One event-destination dispatch logged by the SES fanout. Captured
+/// every time `fanout::deliver_event` actually hands an event off to
+/// SNS/EventBridge/Kinesis/Firehose/CloudWatch so tests can assert the
+/// downstream wiring without scraping the target service's introspection
+/// state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventDestinationDispatch {
+    pub destination_name: String,
+    /// One of `sns` | `eventbridge` | `kinesis` | `firehose` | `cloudwatch`.
+    pub destination_type: String,
+    pub event_type: String,
+    pub message_id: String,
+    pub dispatched_at: DateTime<Utc>,
+    /// ARN / target identifier of the downstream resource the event was
+    /// sent to. Empty for CloudWatch (uses metric namespace, not ARN).
+    pub target_arn: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboundEmail {
     pub message_id: String,
@@ -432,6 +483,17 @@ pub struct SesState {
     /// Inbound emails processed by the introspection endpoint.
     #[serde(default, skip_serializing)]
     pub inbound_emails: Vec<InboundEmail>,
+    /// Emails accepted via the SMTP submission listener
+    /// (`FAKECLOUD_SES_SMTP_PORT`).
+    #[serde(default, skip_serializing)]
+    pub smtp_submissions: Vec<SmtpSubmission>,
+    /// Log of every event-destination dispatch performed by the SES
+    /// fanout. Used by the
+    /// `/_fakecloud/ses/event-destinations/deliveries` introspection
+    /// endpoint to prove kinesis/firehose/cloudwatch wiring works without
+    /// having to peek into the downstream services' state.
+    #[serde(default, skip_serializing)]
+    pub event_destination_dispatches: Vec<EventDestinationDispatch>,
     /// Deliverability dashboard subscription state.
     #[serde(default)]
     pub deliverability_dashboard: DeliverabilityDashboard,
@@ -540,6 +602,8 @@ impl SesState {
             active_receipt_rule_set: None,
             receipt_filters: BTreeMap::new(),
             inbound_emails: Vec::new(),
+            smtp_submissions: Vec::new(),
+            event_destination_dispatches: Vec::new(),
             deliverability_dashboard: DeliverabilityDashboard::default(),
             deliverability_test_reports: BTreeMap::new(),
             vdm_recommendations: Vec::new(),
@@ -621,6 +685,52 @@ mod tests {
         assert!(state.identities.is_empty());
         assert!(state.configuration_sets.is_empty());
         assert!(state.account_settings.sending_enabled);
+    }
+
+    #[test]
+    fn new_initializes_introspection_buffers_empty() {
+        let state = SesState::new("123456789012", "us-east-1");
+        assert!(state.smtp_submissions.is_empty());
+        assert!(state.event_destination_dispatches.is_empty());
+    }
+
+    #[test]
+    fn smtp_submission_round_trips_through_state() {
+        let mut state = SesState::new("123456789012", "us-east-1");
+        state.smtp_submissions.push(SmtpSubmission {
+            message_id: "smtp-1".to_string(),
+            from: "src@example.com".to_string(),
+            to: vec!["dst@example.com".to_string()],
+            subject: Some("hi".to_string()),
+            raw_size_bytes: 42,
+            received_at: Utc::now(),
+            auth_user: "user".to_string(),
+        });
+        assert_eq!(state.smtp_submissions.len(), 1);
+        assert_eq!(state.smtp_submissions[0].auth_user, "user");
+        state.reset();
+        assert!(state.smtp_submissions.is_empty());
+    }
+
+    #[test]
+    fn event_destination_dispatch_round_trips() {
+        let mut state = SesState::new("123456789012", "us-east-1");
+        state
+            .event_destination_dispatches
+            .push(EventDestinationDispatch {
+                destination_name: "fh".to_string(),
+                destination_type: "firehose".to_string(),
+                event_type: "SEND".to_string(),
+                message_id: "msg-1".to_string(),
+                dispatched_at: Utc::now(),
+                target_arn: "arn:aws:firehose:us-east-1:123456789012:deliverystream/ds1"
+                    .to_string(),
+            });
+        assert_eq!(state.event_destination_dispatches.len(), 1);
+        assert_eq!(
+            state.event_destination_dispatches[0].destination_type,
+            "firehose"
+        );
     }
 
     #[test]

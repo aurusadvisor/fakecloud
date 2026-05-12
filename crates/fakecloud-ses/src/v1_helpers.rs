@@ -1647,6 +1647,7 @@ pub(crate) fn send_bounce(
 
     let mut recipients: Vec<String> = Vec::new();
     let mut recipient_xml = String::new();
+    let mut recipient_info: Vec<crate::state::BouncedRecipientInfo> = Vec::new();
     for i in 1.. {
         let prefix = format!("BouncedRecipientInfoList.member.{i}");
         let recipient = match req.query_params.get(&format!("{prefix}.Recipient")) {
@@ -1657,8 +1658,8 @@ pub(crate) fn send_bounce(
         let bounce_type = req
             .query_params
             .get(&format!("{prefix}.BounceType"))
-            .map(|s| s.as_str())
-            .unwrap_or("ContentRejected");
+            .cloned()
+            .unwrap_or_else(|| "ContentRejected".to_string());
         let action = req
             .query_params
             .get(&format!("{prefix}.RecipientDsnFields.Action"))
@@ -1683,6 +1684,13 @@ pub(crate) fn send_bounce(
              <BounceType>{bounce_type}</BounceType>\
              </member>"
         ));
+        recipient_info.push(crate::state::BouncedRecipientInfo {
+            recipient: recipient.clone(),
+            bounce_type,
+            action,
+            status,
+            diagnostic_code: diagnostic,
+        });
     }
     if recipients.is_empty() {
         return Err(AwsServiceError::aws_error(
@@ -1700,12 +1708,15 @@ pub(crate) fn send_bounce(
         rand_u16(),
     );
 
+    let explanation = req.query_params.get("Explanation").cloned();
     let bounce = crate::state::SentBounce {
         bounce_message_id: bounce_message_id.clone(),
         original_message_id: original_message_id.to_string(),
         bounce_sender: bounce_sender.to_string(),
         bounced_recipients: recipients,
         timestamp: Utc::now(),
+        bounced_recipient_info: recipient_info,
+        explanation,
     };
     state
         .write()

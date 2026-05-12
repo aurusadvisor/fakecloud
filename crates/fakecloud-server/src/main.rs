@@ -2913,6 +2913,172 @@ async fn main() {
             }),
         )
         .route(
+            "/_fakecloud/ses/bounces",
+            axum::routing::get({
+                let ss = ses_emails_state.clone();
+                move || async move {
+                    let mas = ss.read();
+                    let state = mas.default_ref();
+                    let bounces: Vec<types::SesBounce> = state
+                        .bounces
+                        .iter()
+                        .map(|b| {
+                            let infos: Vec<types::SesBouncedRecipientInfo> = if b
+                                .bounced_recipient_info
+                                .is_empty()
+                            {
+                                // Older snapshots store only addresses;
+                                // surface them with empty detail fields so
+                                // the response shape stays stable.
+                                b.bounced_recipients
+                                    .iter()
+                                    .map(|r| types::SesBouncedRecipientInfo {
+                                        recipient: r.clone(),
+                                        bounce_type: String::new(),
+                                        action: String::new(),
+                                        status: String::new(),
+                                        diagnostic_code: String::new(),
+                                    })
+                                    .collect()
+                            } else {
+                                b.bounced_recipient_info
+                                    .iter()
+                                    .map(|i| types::SesBouncedRecipientInfo {
+                                        recipient: i.recipient.clone(),
+                                        bounce_type: i.bounce_type.clone(),
+                                        action: i.action.clone(),
+                                        status: i.status.clone(),
+                                        diagnostic_code: i.diagnostic_code.clone(),
+                                    })
+                                    .collect()
+                            };
+                            let primary_type = b
+                                .bounced_recipient_info
+                                .first()
+                                .map(|i| i.bounce_type.clone())
+                                .unwrap_or_default();
+                            types::SesBounce {
+                                message_id: b.bounce_message_id.clone(),
+                                bounce_type: primary_type,
+                                bounce_sub_type: String::new(),
+                                bounced_recipient_info: infos,
+                                explanation: b.explanation.clone(),
+                                timestamp: b.timestamp.to_rfc3339(),
+                                original_message_id: b.original_message_id.clone(),
+                                bounce_sender: b.bounce_sender.clone(),
+                            }
+                        })
+                        .collect();
+                    axum::Json(types::SesBouncesResponse { bounces })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ses/messages/{message_id}/insights",
+            axum::routing::get({
+                let ss = ses_emails_state.clone();
+                move |axum::extract::Path(message_id): axum::extract::Path<String>| async move {
+                    let mas = ss.read();
+                    let state = mas.default_ref();
+                    let Some(email) = state
+                        .sent_emails
+                        .iter()
+                        .find(|e| e.message_id == message_id)
+                    else {
+                        return (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({"error": "message not found"})),
+                        )
+                            .into_response();
+                    };
+                    let mut sends: Vec<types::SesMessageInsightEvent> = Vec::new();
+                    let mut deliveries: Vec<types::SesMessageInsightEvent> = Vec::new();
+                    let opens: Vec<types::SesMessageInsightEvent> = Vec::new();
+                    let clicks: Vec<types::SesMessageInsightEvent> = Vec::new();
+                    let mut bounces: Vec<types::SesMessageInsightEvent> = Vec::new();
+                    let mut complaints: Vec<types::SesMessageInsightEvent> = Vec::new();
+                    let rejects: Vec<types::SesMessageInsightEvent> = Vec::new();
+                    for insight in &email.delivery_insights {
+                        for ev in &insight.events {
+                            let entry = types::SesMessageInsightEvent {
+                                destination: insight.destination.clone(),
+                                timestamp: ev.timestamp.to_rfc3339(),
+                                bounce_type: ev.bounce_type.clone(),
+                                bounce_sub_type: ev.bounce_sub_type.clone(),
+                                diagnostic_code: ev.diagnostic_code.clone(),
+                                complaint_feedback_type: ev.complaint_feedback_type.clone(),
+                            };
+                            match ev.event_type.as_str() {
+                                "SEND" => sends.push(entry),
+                                "DELIVERY" => deliveries.push(entry),
+                                "BOUNCE" => bounces.push(entry),
+                                "COMPLAINT" => complaints.push(entry),
+                                _ => {}
+                            }
+                        }
+                    }
+                    axum::Json(types::SesMessageInsightsResponse {
+                        message_id: email.message_id.clone(),
+                        sends,
+                        deliveries,
+                        opens,
+                        clicks,
+                        bounces,
+                        complaints,
+                        rejects,
+                    })
+                    .into_response()
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ses/smtp/submissions",
+            axum::routing::get({
+                let ss = ses_emails_state.clone();
+                move || async move {
+                    let mas = ss.read();
+                    let state = mas.default_ref();
+                    let submissions: Vec<types::SesSmtpSubmission> = state
+                        .smtp_submissions
+                        .iter()
+                        .map(|s| types::SesSmtpSubmission {
+                            message_id: s.message_id.clone(),
+                            from: s.from.clone(),
+                            to: s.to.clone(),
+                            subject: s.subject.clone(),
+                            raw_size_bytes: s.raw_size_bytes,
+                            received_at: s.received_at.to_rfc3339(),
+                            auth_user: s.auth_user.clone(),
+                        })
+                        .collect();
+                    axum::Json(types::SesSmtpSubmissionsResponse { submissions })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ses/event-destinations/deliveries",
+            axum::routing::get({
+                let ss = ses_emails_state.clone();
+                move || async move {
+                    let mas = ss.read();
+                    let state = mas.default_ref();
+                    let deliveries: Vec<types::SesEventDestinationDelivery> = state
+                        .event_destination_dispatches
+                        .iter()
+                        .map(|d| types::SesEventDestinationDelivery {
+                            destination_name: d.destination_name.clone(),
+                            destination_type: d.destination_type.clone(),
+                            event_type: d.event_type.clone(),
+                            message_id: d.message_id.clone(),
+                            dispatched_at: d.dispatched_at.to_rfc3339(),
+                            target_arn: d.target_arn.clone(),
+                        })
+                        .collect();
+                    axum::Json(types::SesEventDestinationDeliveriesResponse { deliveries })
+                }
+            }),
+        )
+        .route(
             "/_fakecloud/ses/identities/{name}/mail-from-status",
             axum::routing::post({
                 let ss = ses_emails_state.clone();

@@ -212,6 +212,76 @@ export interface SesSandboxResponse {
   productionAccessEnabled: boolean;
 }
 
+export interface SesBouncedRecipientInfo {
+  recipient: string;
+  bounceType: string;
+  action: string;
+  status: string;
+  diagnosticCode: string;
+}
+
+export interface SesBounce {
+  messageId: string;
+  bounceType: string;
+  bounceSubType: string;
+  bouncedRecipientInfo: SesBouncedRecipientInfo[];
+  explanation: string | null;
+  timestamp: string;
+  originalMessageId: string;
+  bounceSender: string;
+}
+
+export interface SesBouncesResponse {
+  bounces: SesBounce[];
+}
+
+export interface SesMessageInsightEvent {
+  destination: string;
+  timestamp: string;
+  bounceType?: string | null;
+  bounceSubType?: string | null;
+  diagnosticCode?: string | null;
+  complaintFeedbackType?: string | null;
+}
+
+export interface SesMessageInsightsResponse {
+  messageId: string;
+  sends: SesMessageInsightEvent[];
+  deliveries: SesMessageInsightEvent[];
+  opens: SesMessageInsightEvent[];
+  clicks: SesMessageInsightEvent[];
+  bounces: SesMessageInsightEvent[];
+  complaints: SesMessageInsightEvent[];
+  rejects: SesMessageInsightEvent[];
+}
+
+export interface SesSmtpSubmission {
+  messageId: string;
+  from: string;
+  to: string[];
+  subject: string | null;
+  rawSizeBytes: number;
+  receivedAt: string;
+  authUser: string;
+}
+
+export interface SesSmtpSubmissionsResponse {
+  submissions: SesSmtpSubmission[];
+}
+
+export interface SesEventDestinationDelivery {
+  destinationName: string;
+  destinationType: string;
+  eventType: string;
+  messageId: string;
+  dispatchedAt: string;
+  targetArn: string;
+}
+
+export interface SesEventDestinationDeliveriesResponse {
+  deliveries: SesEventDestinationDelivery[];
+}
+
 // ── SNS ────────────────────────────────────────────────────────────
 
 export interface SnsMessage {
