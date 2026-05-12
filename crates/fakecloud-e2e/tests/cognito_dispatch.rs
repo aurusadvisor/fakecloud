@@ -579,7 +579,7 @@ def handler(event, context):
     assert!(inv["durationMs"].is_number());
 
     // Confirm the SDK helper sees the same entry.
-    let sdk = fakecloud_sdk::FakeCloud::new(&server.endpoint());
+    let sdk = fakecloud_sdk::FakeCloud::new(server.endpoint());
     let sdk_resp = sdk
         .cognito()
         .get_pre_token_gen_invocations()
