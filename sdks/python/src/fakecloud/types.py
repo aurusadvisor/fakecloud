@@ -1394,9 +1394,12 @@ class BedrockAgentRow:
                 BedrockAgentCollaboratorSummary.from_dict(c)
                 for c in data.get("collaborators", [])
             ],
-            aliases=[BedrockAgentAliasSummary.from_dict(a) for a in data.get("aliases", [])],
+            aliases=[
+                BedrockAgentAliasSummary.from_dict(a) for a in data.get("aliases", [])
+            ],
             versions=[
-                BedrockAgentVersionSummary.from_dict(v) for v in data.get("versions", [])
+                BedrockAgentVersionSummary.from_dict(v)
+                for v in data.get("versions", [])
             ],
             prompt_overrides=data.get("promptOverrides"),
             created_at=data.get("createdAt", ""),
@@ -1410,7 +1413,9 @@ class BedrockAgentAgentsResponse:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> BedrockAgentAgentsResponse:
-        return cls(agents=[BedrockAgentRow.from_dict(a) for a in data.get("agents", [])])
+        return cls(
+            agents=[BedrockAgentRow.from_dict(a) for a in data.get("agents", [])]
+        )
 
 
 # ── Bedrock Agent Runtime (data plane) ────────────────────────────────
