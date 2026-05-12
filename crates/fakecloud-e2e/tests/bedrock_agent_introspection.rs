@@ -24,11 +24,7 @@ async fn bedrock_agent_introspection_lists_agents_with_aliases_and_versions() {
         .send()
         .await
         .expect("CreateAgent");
-    let agent_id = created
-        .agent()
-        .expect("agent")
-        .agent_id()
-        .to_string();
+    let agent_id = created.agent().expect("agent").agent_id().to_string();
 
     // Attach an alias so the introspection has something to flatten.
     let alias = agent_client
@@ -44,13 +40,15 @@ async fn bedrock_agent_introspection_lists_agents_with_aliases_and_versions() {
         .agent_alias_id()
         .to_string();
 
-    let resp: serde_json::Value =
-        reqwest::get(format!("{}/_fakecloud/bedrock-agent/agents", server.endpoint()))
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+    let resp: serde_json::Value = reqwest::get(format!(
+        "{}/_fakecloud/bedrock-agent/agents",
+        server.endpoint()
+    ))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
 
     let agents = resp["agents"].as_array().expect("agents array");
     let row = agents
@@ -139,5 +137,8 @@ async fn bedrock_agent_runtime_introspection_records_retrieve_and_rag() {
         !citations.is_empty(),
         "RetrieveAndGenerate should record at least one citation"
     );
-    assert!(rag_row["output"].as_str().unwrap().contains("intro rag query"));
+    assert!(rag_row["output"]
+        .as_str()
+        .unwrap()
+        .contains("intro rag query"));
 }

@@ -594,7 +594,10 @@ async fn handle_retrieve(
         .to_string();
 
     let start = std::time::Instant::now();
-    let result_text = format!("Retrieved result for query '{}' from knowledge base {}", query, kb_id);
+    let result_text = format!(
+        "Retrieved result for query '{}' from knowledge base {}",
+        query, kb_id
+    );
     {
         let mut accts = svc.state.write();
         let s = accts.get_or_create(&req.account_id);

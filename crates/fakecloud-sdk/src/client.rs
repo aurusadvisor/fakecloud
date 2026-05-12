@@ -883,9 +883,7 @@ pub struct BedrockAgentRuntimeClient<'a> {
 impl BedrockAgentRuntimeClient<'_> {
     /// List every recorded InvokeAgent / InvokeInlineAgent / InvokeFlow
     /// / Retrieve / RetrieveAndGenerate / CreateInvocation call.
-    pub async fn get_invocations(
-        &self,
-    ) -> Result<BedrockAgentRuntimeInvocationsResponse, Error> {
+    pub async fn get_invocations(&self) -> Result<BedrockAgentRuntimeInvocationsResponse, Error> {
         let resp = self
             .fc
             .client
