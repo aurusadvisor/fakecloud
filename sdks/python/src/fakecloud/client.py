@@ -58,6 +58,8 @@ from fakecloud.types import (
     LifecycleTickResponse,
     LogsAnomalyInjectRequest,
     LogsAnomalyInjectResponse,
+    LogsDeliveryConfigResponse,
+    LogsFieldIndexesResponse,
     MintAuthorizationCodeRequest,
     MintAuthorizationCodeResponse,
     PendingConfirmationsResponse,
@@ -571,6 +573,26 @@ class LogsClient:
         )
         _check(resp)
         return LogsAnomalyInjectResponse.from_dict(resp.json())
+
+    async def get_delivery_config(self) -> LogsDeliveryConfigResponse:
+        """Return persisted CloudWatch Logs delivery configurations."""
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/logs/delivery-config"
+        )
+        _check(resp)
+        return LogsDeliveryConfigResponse.from_dict(resp.json())
+
+    async def get_field_indexes(
+        self, log_group_name: str
+    ) -> LogsFieldIndexesResponse:
+        """Return parsed `Fields` from index policies on a log group."""
+        from urllib.parse import quote
+
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/logs/field-indexes/{quote(log_group_name, safe='')}"
+        )
+        _check(resp)
+        return LogsFieldIndexesResponse.from_dict(resp.json())
 
 
 class SesClient:
@@ -1089,6 +1111,22 @@ class _SyncLogsClient:
         )
         _check(resp)
         return LogsAnomalyInjectResponse.from_dict(resp.json())
+
+    def get_delivery_config(self) -> LogsDeliveryConfigResponse:
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/logs/delivery-config"
+        )
+        _check(resp)
+        return LogsDeliveryConfigResponse.from_dict(resp.json())
+
+    def get_field_indexes(self, log_group_name: str) -> LogsFieldIndexesResponse:
+        from urllib.parse import quote
+
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/logs/field-indexes/{quote(log_group_name, safe='')}"
+        )
+        _check(resp)
+        return LogsFieldIndexesResponse.from_dict(resp.json())
 
 
 class _SyncSesClient:

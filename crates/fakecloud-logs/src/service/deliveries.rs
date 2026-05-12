@@ -468,6 +468,13 @@ impl LogsService {
             state.region, state.account_id, name
         );
 
+        let created_at = state
+            .delivery_sources
+            .get(&name)
+            .map(|d| d.created_at)
+            .filter(|t| *t > 0)
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+
         let ds = DeliverySource {
             name: name.clone(),
             arn: arn.clone(),
@@ -475,6 +482,7 @@ impl LogsService {
             service: service.clone(),
             log_type: log_type.clone(),
             tags: tags.clone(),
+            created_at,
         };
 
         state.delivery_sources.insert(name.clone(), ds);
@@ -728,6 +736,7 @@ impl LogsService {
             } else {
                 Some(s3_delivery_config.clone())
             },
+            created_at: chrono::Utc::now().timestamp_millis(),
         };
 
         state.deliveries.insert(delivery_id.clone(), delivery);
@@ -1360,5 +1369,77 @@ mod tests {
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         let filtered = body["configurationTemplates"].as_array().unwrap();
         assert!(filtered.iter().all(|t| t["service"] == "AWS/Lambda"));
+    }
+
+    #[test]
+    fn delivery_and_source_record_created_at_for_introspection() {
+        let svc = make_service();
+        create_group(&svc, "intro-grp");
+
+        let req = make_request(
+            "DescribeLogGroups",
+            json!({ "logGroupNamePrefix": "intro-grp" }),
+        );
+        let resp = svc.describe_log_groups(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let group_arn = body["logGroups"][0]["arn"].as_str().unwrap().to_string();
+
+        // Source
+        let before = chrono::Utc::now().timestamp_millis();
+        let req = make_request(
+            "PutDeliverySource",
+            json!({
+                "name": "intro-src",
+                "resourceArn": group_arn,
+                "logType": "APPLICATION_LOGS",
+            }),
+        );
+        svc.put_delivery_source(&req).unwrap();
+
+        // Destination
+        let req = make_request(
+            "PutDeliveryDestination",
+            json!({
+                "name": "intro-dest",
+                "deliveryDestinationConfiguration": {
+                    "destinationResourceArn": "arn:aws:s3:::intro-bucket"
+                }
+            }),
+        );
+        svc.put_delivery_destination(&req).unwrap();
+        let req = make_request("GetDeliveryDestination", json!({ "name": "intro-dest" }));
+        let resp = svc.get_delivery_destination(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let dest_arn = body["deliveryDestination"]["arn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let req = make_request(
+            "CreateDelivery",
+            json!({
+                "deliverySourceName": "intro-src",
+                "deliveryDestinationArn": dest_arn,
+                "recordFields": ["timestamp", "message"],
+                "fieldDelimiter": "|",
+            }),
+        );
+        svc.create_delivery(&req).unwrap();
+
+        let accounts = svc.state.read();
+        let state = accounts
+            .get("123456789012")
+            .expect("default account state");
+        let src = state.delivery_sources.get("intro-src").unwrap();
+        assert!(
+            src.created_at >= before,
+            "delivery source created_at not populated (got {})",
+            src.created_at
+        );
+        let delivery = state.deliveries.values().next().unwrap();
+        assert!(delivery.created_at >= before);
+        assert_eq!(delivery.delivery_source_name, "intro-src");
+        assert_eq!(delivery.record_fields, vec!["timestamp", "message"]);
+        assert_eq!(delivery.field_delimiter.as_deref(), Some("|"));
     }
 }

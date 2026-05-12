@@ -174,6 +174,60 @@ pub struct LogsAnomalyInjectResponse {
     pub anomaly_id: String,
 }
 
+/// One entry in the `/_fakecloud/logs/delivery-config` introspection
+/// response. Combines a `Delivery` with the `log_type` from its
+/// associated `DeliverySource` so test code can assert end-to-end
+/// configuration without joining state manually.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogsDeliveryConfiguration {
+    pub id: String,
+    /// Delivery identifier (same value as `id`; mirrors AWS naming).
+    pub name: String,
+    pub delivery_destination_arn: String,
+    pub delivery_source_name: String,
+    /// Log type from the associated `DeliverySource` (e.g. `ACCESS_LOGS`).
+    /// Empty string when the source has been deleted out from under the
+    /// delivery.
+    pub log_type: String,
+    #[serde(default)]
+    pub record_fields: Vec<String>,
+    #[serde(default)]
+    pub field_delimiter: Option<String>,
+    #[serde(default)]
+    pub s3_delivery_configuration: Option<serde_json::Value>,
+    /// Unix-ms timestamp of `CreateDelivery`. `0` for deliveries
+    /// recovered from older snapshots without this field.
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogsDeliveryConfigResponse {
+    pub configurations: Vec<LogsDeliveryConfiguration>,
+}
+
+/// One `Fields` entry parsed from a log group's index policy document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogsFieldIndex {
+    /// Fields list from `IndexPolicy.policy_document.Fields`.
+    pub fields: Vec<String>,
+    /// Unix-ms when the policy was created. Mirrors `last_updated_time`
+    /// since fakecloud doesn't track a separate creation timestamp.
+    pub created_at: i64,
+    /// Unix-ms when the policy was last touched
+    /// (PutIndexPolicy updates).
+    pub last_used_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogsFieldIndexesResponse {
+    pub log_group_name: String,
+    pub indexes: Vec<LogsFieldIndex>,
+}
+
 /// Admin payload for `/_fakecloud/cognito/compromised-passwords`.
 /// Plaintext passwords are hashed (sha256) and added to the
 /// compromised-credentials set consulted by `InitiateAuth` /

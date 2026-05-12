@@ -56,6 +56,8 @@ import dev.fakecloud.Types.LambdaInvocationsResponse;
 import dev.fakecloud.Types.LifecycleTickResponse;
 import dev.fakecloud.Types.LogsAnomalyInjectRequest;
 import dev.fakecloud.Types.LogsAnomalyInjectResponse;
+import dev.fakecloud.Types.LogsDeliveryConfigResponse;
+import dev.fakecloud.Types.LogsFieldIndexesResponse;
 import dev.fakecloud.Types.PendingConfirmationsResponse;
 import dev.fakecloud.Types.RdsInstancesResponse;
 import dev.fakecloud.Types.ResetResponse;
@@ -301,6 +303,19 @@ public final class FakeCloud {
         public LogsAnomalyInjectResponse injectAnomaly(LogsAnomalyInjectRequest req) {
             return http.postJson(
                     "/_fakecloud/logs/anomalies/inject", req, LogsAnomalyInjectResponse.class);
+        }
+
+        /** Persisted CloudWatch Logs delivery configurations. */
+        public LogsDeliveryConfigResponse getDeliveryConfig() {
+            return http.get(
+                    "/_fakecloud/logs/delivery-config", LogsDeliveryConfigResponse.class);
+        }
+
+        /** Parsed {@code Fields} from index policies on the given log group. */
+        public LogsFieldIndexesResponse getFieldIndexes(String logGroupName) {
+            return http.get(
+                    "/_fakecloud/logs/field-indexes/" + encodePath(logGroupName),
+                    LogsFieldIndexesResponse.class);
         }
     }
 

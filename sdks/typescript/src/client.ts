@@ -20,6 +20,8 @@ import type {
   LambdaInvocationsResponse,
   LogsAnomalyInjectRequest,
   LogsAnomalyInjectResponse,
+  LogsDeliveryConfigResponse,
+  LogsFieldIndexesResponse,
   WarmContainersResponse,
   EvictContainerResponse,
   SesEmailsResponse,
@@ -245,6 +247,22 @@ export class LogsClient {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(req),
       },
+    );
+    return parse(resp);
+  }
+
+  /** Persisted CloudWatch Logs delivery configurations. */
+  async getDeliveryConfig(): Promise<LogsDeliveryConfigResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/logs/delivery-config`);
+    return parse(resp);
+  }
+
+  /** Parsed `Fields` from index policies on a log group. 404 on unknown group. */
+  async getFieldIndexes(
+    logGroupName: string,
+  ): Promise<LogsFieldIndexesResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/logs/field-indexes/${encodeURIComponent(logGroupName)}`,
     );
     return parse(resp);
   }

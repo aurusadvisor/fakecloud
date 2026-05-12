@@ -166,7 +166,9 @@ curl http://localhost:4566/_fakecloud/health
 
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
-| `/_fakecloud/logs/anomalies/inject` | POST | **NEW** -- Inject anomaly findings against a log group/anomaly detector. |
+| `/_fakecloud/logs/anomalies/inject` | POST | Inject anomaly findings against a log group/anomaly detector. |
+| `/_fakecloud/logs/delivery-config` | GET | **NEW** -- Persisted delivery configurations: `Delivery` joined with its `DeliverySource.logType`, plus `recordFields`, `fieldDelimiter`, `s3DeliveryConfiguration`, `createdAt`. |
+| `/_fakecloud/logs/field-indexes/{log_group_name}` | GET | **NEW** -- Parsed `Fields` from each index policy on a log group. 404 when the group does not exist. |
 
 ## RDS
 

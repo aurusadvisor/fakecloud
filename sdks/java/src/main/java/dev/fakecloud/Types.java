@@ -768,6 +768,36 @@ public final class Types {
     public record LogsAnomalyInjectResponse(String anomalyId) {}
 
     /**
+     * One entry of {@code GET /_fakecloud/logs/delivery-config}. Joins a
+     * delivery with the {@code logType} from its delivery source so test
+     * code does not have to re-query the AWS-shaped APIs.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record LogsDeliveryConfiguration(
+            String id,
+            String name,
+            String deliveryDestinationArn,
+            String deliverySourceName,
+            String logType,
+            List<String> recordFields,
+            String fieldDelimiter,
+            Object s3DeliveryConfiguration,
+            long createdAt) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record LogsDeliveryConfigResponse(
+            List<LogsDeliveryConfiguration> configurations) {}
+
+    /** One parsed {@code IndexPolicy} on a log group. */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record LogsFieldIndex(
+            List<String> fields, long createdAt, long lastUsedAt) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record LogsFieldIndexesResponse(
+            String logGroupName, List<LogsFieldIndex> indexes) {}
+
+    /**
      * Response from {@code GET /_fakecloud/acm/certificates/{arn-or-id}/chain-info}.
      *
      * <p>fakecloud is not a PKI: {@code externalCaValidated} is always

@@ -8181,6 +8181,7 @@ impl ResourceProvisioner {
             service,
             log_type,
             tags: BTreeMap::new(),
+            created_at: chrono::Utc::now().timestamp_millis(),
         };
 
         let mut logs_accounts = self.logs_state.write();
@@ -8236,6 +8237,7 @@ impl ResourceProvisioner {
             field_delimiter: None,
             record_fields: Vec::new(),
             s3_delivery_configuration: None,
+            created_at: chrono::Utc::now().timestamp_millis(),
         };
 
         let mut logs_accounts = self.logs_state.write();

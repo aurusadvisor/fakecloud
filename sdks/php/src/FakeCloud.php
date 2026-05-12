@@ -241,6 +241,20 @@ final class LogsClient
             $this->http->postJson('/_fakecloud/logs/anomalies/inject', $req->toArray())
         );
     }
+
+    public function getDeliveryConfig(): LogsDeliveryConfigResponse
+    {
+        return LogsDeliveryConfigResponse::fromArray(
+            $this->http->get('/_fakecloud/logs/delivery-config')
+        );
+    }
+
+    public function getFieldIndexes(string $logGroupName): LogsFieldIndexesResponse
+    {
+        return LogsFieldIndexesResponse::fromArray(
+            $this->http->get('/_fakecloud/logs/field-indexes/' . rawurlencode($logGroupName))
+        );
+    }
 }
 
 final class SesClient

@@ -2183,3 +2183,100 @@ final class LogsAnomalyInjectResponse
         return new self((string) $data['anomalyId']);
     }
 }
+
+/**
+ * One entry of GET /_fakecloud/logs/delivery-config. Joins a Delivery
+ * with the logType from its DeliverySource so test code can assert
+ * end-to-end wiring without re-querying the AWS-shaped APIs.
+ */
+final class LogsDeliveryConfiguration
+{
+    /**
+     * @param string[] $recordFields
+     * @param mixed $s3DeliveryConfiguration
+     */
+    public function __construct(
+        public readonly string $id,
+        public readonly string $name,
+        public readonly string $deliveryDestinationArn,
+        public readonly string $deliverySourceName,
+        public readonly string $logType,
+        public readonly int $createdAt,
+        public readonly array $recordFields = [],
+        public readonly ?string $fieldDelimiter = null,
+        public readonly mixed $s3DeliveryConfiguration = null,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['id'] ?? ''),
+            (string) ($data['name'] ?? ''),
+            (string) ($data['deliveryDestinationArn'] ?? ''),
+            (string) ($data['deliverySourceName'] ?? ''),
+            (string) ($data['logType'] ?? ''),
+            (int) ($data['createdAt'] ?? 0),
+            array_values(array_map('strval', $data['recordFields'] ?? [])),
+            isset($data['fieldDelimiter']) ? (string) $data['fieldDelimiter'] : null,
+            $data['s3DeliveryConfiguration'] ?? null,
+        );
+    }
+}
+
+final class LogsDeliveryConfigResponse
+{
+    /** @param LogsDeliveryConfiguration[] $configurations */
+    public function __construct(
+        public readonly array $configurations,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        $items = array_map(
+            static fn ($c) => LogsDeliveryConfiguration::fromArray($c),
+            $data['configurations'] ?? []
+        );
+        return new self(array_values($items));
+    }
+}
+
+/** One parsed IndexPolicy on a log group. */
+final class LogsFieldIndex
+{
+    /** @param string[] $fields */
+    public function __construct(
+        public readonly array $fields,
+        public readonly int $createdAt,
+        public readonly int $lastUsedAt,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            array_values(array_map('strval', $data['fields'] ?? [])),
+            (int) ($data['createdAt'] ?? 0),
+            (int) ($data['lastUsedAt'] ?? 0),
+        );
+    }
+}
+
+final class LogsFieldIndexesResponse
+{
+    /** @param LogsFieldIndex[] $indexes */
+    public function __construct(
+        public readonly string $logGroupName,
+        public readonly array $indexes,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        $indexes = array_map(
+            static fn ($i) => LogsFieldIndex::fromArray($i),
+            $data['indexes'] ?? []
+        );
+        return new self(
+            (string) ($data['logGroupName'] ?? ''),
+            array_values($indexes),
+        );
+    }
+}

@@ -3501,6 +3501,91 @@ async fn main() {
             }),
         )
         .route(
+            "/_fakecloud/logs/delivery-config",
+            axum::routing::get({
+                let ls = logs_state.clone();
+                move || {
+                    let ls = ls.clone();
+                    async move {
+                        let accounts = ls.read();
+                        let mut configurations: Vec<types::LogsDeliveryConfiguration> = Vec::new();
+                        for (_account, state) in accounts.iter() {
+                            for delivery in state.deliveries.values() {
+                                let log_type = state
+                                    .delivery_sources
+                                    .get(&delivery.delivery_source_name)
+                                    .map(|s| s.log_type.clone())
+                                    .unwrap_or_default();
+                                configurations.push(types::LogsDeliveryConfiguration {
+                                    id: delivery.id.clone(),
+                                    name: delivery.id.clone(),
+                                    delivery_destination_arn: delivery
+                                        .delivery_destination_arn
+                                        .clone(),
+                                    delivery_source_name: delivery.delivery_source_name.clone(),
+                                    log_type,
+                                    record_fields: delivery.record_fields.clone(),
+                                    field_delimiter: delivery.field_delimiter.clone(),
+                                    s3_delivery_configuration: delivery
+                                        .s3_delivery_configuration
+                                        .clone(),
+                                    created_at: delivery.created_at,
+                                });
+                            }
+                        }
+                        axum::Json(types::LogsDeliveryConfigResponse { configurations })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/logs/field-indexes/{log_group_name}",
+            axum::routing::get({
+                let ls = logs_state.clone();
+                move |axum::extract::Path(log_group_name): axum::extract::Path<String>| {
+                    let ls = ls.clone();
+                    async move {
+                        let accounts = ls.read();
+                        let mut indexes: Vec<types::LogsFieldIndex> = Vec::new();
+                        let mut found = false;
+                        for (_account, state) in accounts.iter() {
+                            let Some(group) = state.log_groups.get(&log_group_name) else {
+                                continue;
+                            };
+                            found = true;
+                            for policy in &group.index_policies {
+                                let parsed: serde_json::Value =
+                                    serde_json::from_str(&policy.policy_document)
+                                        .unwrap_or(serde_json::Value::Null);
+                                let fields: Vec<String> = parsed
+                                    .get("Fields")
+                                    .and_then(|v| v.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|f| f.as_str().map(|s| s.to_string()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                indexes.push(types::LogsFieldIndex {
+                                    fields,
+                                    created_at: policy.last_updated_time,
+                                    last_used_at: policy.last_updated_time,
+                                });
+                            }
+                        }
+                        if !found {
+                            return axum::http::StatusCode::NOT_FOUND.into_response();
+                        }
+                        axum::Json(types::LogsFieldIndexesResponse {
+                            log_group_name,
+                            indexes,
+                        })
+                        .into_response()
+                    }
+                }
+            }),
+        )
+        .route(
             "/_fakecloud/sqs/messages",
             axum::routing::get({
                 let ss = sqs_introspection_state;
