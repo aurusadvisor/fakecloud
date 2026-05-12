@@ -32,7 +32,7 @@ use introspection::{
     elasticache_acls_response, elasticache_cluster_response,
     elasticache_replication_group_response, elasticache_serverless_cache_response,
     elbv2_listener_response, elbv2_load_balancer_response, elbv2_rule_response,
-    elbv2_target_group_response, rds_instance_response,
+    elbv2_target_group_response, organizations_accounts_snapshot, rds_instance_response,
 };
 use kinesis_lambda_poller::KinesisLambdaPoller;
 use reset::ResetState;
@@ -6696,6 +6696,20 @@ async fn main() {
                             &body.user_name,
                         ))
                     }
+                }
+            }),
+        )
+        // Organizations introspection: list every member account with
+        // lifecycle state, parent OU, tags, and SCPs directly attached
+        // to the account. IAM-bypass admin route — tests assert on org
+        // shape without needing management-account credentials.
+        .route(
+            "/_fakecloud/organizations/accounts",
+            axum::routing::get({
+                let orgs = organizations_state.clone();
+                move || {
+                    let orgs = orgs.clone();
+                    async move { axum::Json(organizations_accounts_snapshot(&orgs)) }
                 }
             }),
         )

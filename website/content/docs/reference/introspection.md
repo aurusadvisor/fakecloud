@@ -7,6 +7,7 @@ weight = 3
 fakecloud exposes `/_fakecloud/*` endpoints for testing behaviors that AWS runs asynchronously (TTL expiration, scheduled rotation, lifecycle, etc.) and for asserting on state from within tests. The first-party SDKs wrap these into ergonomic helpers -- see [SDK setup](/docs/getting-started/sdk-setup/) -- but the raw endpoints are documented here as the source of truth.
 
 This page lists every `/_fakecloud/*` endpoint shipped today: 85 routes across 27 service areas. Endpoints marked **NEW** were added in the last two weeks.
+This page lists every `/_fakecloud/*` endpoint shipped today: 84 routes across 27 service areas. Endpoints marked **NEW** were added in the last two weeks.
 
 ## Health and reset
 
@@ -196,6 +197,12 @@ curl http://localhost:4566/_fakecloud/health
 | `/_fakecloud/logs/anomalies/inject` | POST | Inject anomaly findings against a log group/anomaly detector. |
 | `/_fakecloud/logs/delivery-config` | GET | **NEW** -- Persisted delivery configurations: `Delivery` joined with its `DeliverySource.logType`, plus `recordFields`, `fieldDelimiter`, `s3DeliveryConfiguration`, `createdAt`. |
 | `/_fakecloud/logs/field-indexes/{log_group_name}` | GET | **NEW** -- Parsed `Fields` from each index policy on a log group. 404 when the group does not exist. |
+
+## Organizations
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/organizations/accounts` | GET | **NEW** -- List every member account with lifecycle state, parent OU, tags, and directly-attached SCPs. |
 
 ## RDS
 

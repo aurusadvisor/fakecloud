@@ -2482,6 +2482,57 @@ class LogsDeliveryConfigResponse:
                 LogsDeliveryConfiguration.from_dict(c)
                 for c in data.get("configurations", [])
             ]
+# ── Organizations ───────────────────────────────────────────────────
+
+
+@dataclass
+class OrganizationsTag:
+    key: str
+    value: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> OrganizationsTag:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class OrganizationsAccount:
+    """A single member account from `GET /_fakecloud/organizations/accounts`.
+
+    Mirrors the AWS Organizations `Account` shape plus the
+    fakecloud-only `parent_ou_id` and `scp_attached` fields. The
+    `scp_attached` list contains SCP ids directly attached to this
+    account — it does not include policies inherited from a parent OU
+    or the root.
+    """
+
+    id: str
+    arn: str
+    email: str
+    name: str
+    status: str
+    joined_method: str
+    joined_timestamp: str
+    parent_ou_id: Optional[str] = None
+    tags: List[OrganizationsTag] = field(default_factory=list)
+    scp_attached: List[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> OrganizationsAccount:
+        d = _convert_keys(data)
+        tags = [OrganizationsTag(**t) for t in d.get("tags", [])]
+        return cls(
+            id=d["id"],
+            arn=d["arn"],
+            email=d["email"],
+            name=d["name"],
+            status=d["status"],
+            joined_method=d["joined_method"],
+            joined_timestamp=d["joined_timestamp"],
+            parent_ou_id=d.get("parent_ou_id"),
+            tags=tags,
+            scp_attached=list(d.get("scp_attached", [])),
         )
 
 
@@ -2544,6 +2595,19 @@ class LogsFieldIndexesResponse:
         return cls(
             log_group_name=data.get("logGroupName", ""),
             indexes=[LogsFieldIndex.from_dict(i) for i in data.get("indexes", [])],
+class OrganizationsAccountsResponse:
+    accounts: List[OrganizationsAccount] = field(default_factory=list)
+    management_account_id: Optional[str] = None
+    master_account_id: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> OrganizationsAccountsResponse:
+        d = _convert_keys(data)
+        accounts = [OrganizationsAccount.from_dict(a) for a in d.get("accounts", [])]
+        return cls(
+            accounts=accounts,
+            management_account_id=d.get("management_account_id"),
+            master_account_id=d.get("master_account_id"),
         )
 
 

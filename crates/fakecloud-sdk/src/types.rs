@@ -1821,6 +1821,42 @@ pub struct GlueJobRun {
     pub execution_time: i64,
 }
 
+// ── Organizations ───────────────────────────────────────────────────
+
+/// A single member account as exposed by
+/// `GET /_fakecloud/organizations/accounts`. Mirrors the AWS
+/// Organizations `Account` shape but adds two fakecloud-only fields
+/// useful for test assertions: `parentOuId` (resolved parent OU or
+/// root) and `scpAttached` (the set of SCP IDs directly attached to
+/// the account — does not walk up the hierarchy).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationsAccount {
+    pub id: String,
+    pub arn: String,
+    pub email: String,
+    pub name: String,
+    /// AWS lifecycle state. One of `ACTIVE`, `SUSPENDED`,
+    /// `PENDING_CLOSURE`.
+    pub status: String,
+    /// How the account entered the organization. One of `INVITED`,
+    /// `CREATED`.
+    pub joined_method: String,
+    /// RFC3339 timestamp the account joined the org.
+    pub joined_timestamp: String,
+    /// Parent OU or root id. Always set for accounts attached to a
+    /// live org; `None` only if the account record is mid-removal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_ou_id: Option<String>,
+    /// Tags directly attached to the account (alphabetical by key).
+    #[serde(default)]
+    pub tags: Vec<OrganizationsTag>,
+    /// SCP ids directly attached to the account (alphabetical).
+    /// Does not include policies inherited from parent OUs or root.
+    #[serde(default)]
+    pub scp_attached: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GlueJobRunsResponse {
@@ -1831,6 +1867,32 @@ pub struct GlueJobRunsResponse {
 #[serde(rename_all = "camelCase")]
 pub struct AthenaNamedQueriesResponse {
     pub queries: Vec<AthenaNamedQuery>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationsTag {
+    pub key: String,
+    pub value: String,
+}
+
+/// Response body for `GET /_fakecloud/organizations/accounts`.
+///
+/// `managementAccountId` and `masterAccountId` are duplicates — AWS
+/// renamed `Master` to `Management` in 2020 but kept the old field
+/// around for back-compat. Both are returned here so SDKs in either
+/// vintage match.
+///
+/// When no organization has been created yet, `accounts` is empty and
+/// the account-id fields are `None`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationsAccountsResponse {
+    pub accounts: Vec<OrganizationsAccount>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub management_account_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub master_account_id: Option<String>,
 }
 
 /// Body for `POST /_fakecloud/cloudfront/distributions/{id}/status`. The

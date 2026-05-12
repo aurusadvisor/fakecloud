@@ -44,6 +44,7 @@ final class FakeCloud
     private AcmClient $acm;
     private ApplicationAutoScalingClient $applicationAutoscaling;
     private AthenaClient $athena;
+    private OrganizationsClient $organizations;
 
     public function __construct(string $baseUrl = self::DEFAULT_BASE_URL)
     {
@@ -74,6 +75,7 @@ final class FakeCloud
         $this->acm = new AcmClient($this->http);
         $this->applicationAutoscaling = new ApplicationAutoScalingClient($this->http);
         $this->athena = new AthenaClient($this->http);
+        $this->organizations = new OrganizationsClient($this->http);
     }
 
     public function baseUrl(): string
@@ -141,6 +143,7 @@ final class FakeCloud
     public function acm(): AcmClient { return $this->acm; }
     public function applicationAutoscaling(): ApplicationAutoScalingClient { return $this->applicationAutoscaling; }
     public function athena(): AthenaClient { return $this->athena; }
+    public function organizations(): OrganizationsClient { return $this->organizations; }
 }
 
 // ── Sub-clients ────────────────────────────────────────────────
@@ -1027,5 +1030,27 @@ final class AcmClient
             '/_fakecloud/acm/certificates/' . HttpTransport::encodePath($id) . '/chain-info'
         );
         return $resp;
+    }
+}
+
+/**
+ * AWS Organizations admin/introspection sub-client. Bypasses IAM so
+ * tests can assert on org shape without management-account credentials.
+ */
+final class OrganizationsClient
+{
+    public function __construct(private readonly HttpTransport $http) {}
+
+    /**
+     * List every member account in the org with lifecycle state,
+     * parent OU, tags, and directly-attached SCPs. Returns an empty
+     * accounts list (and null management/master ids) when no
+     * organization has been created yet.
+     */
+    public function getAccounts(): OrganizationsAccountsResponse
+    {
+        return OrganizationsAccountsResponse::fromArray(
+            $this->http->get('/_fakecloud/organizations/accounts')
+        );
     }
 }

@@ -89,6 +89,7 @@ import type {
   Elbv2TargetGroupsResponse,
   Elbv2ListenersResponse,
   Elbv2RulesResponse,
+  OrganizationsAccountsResponse,
 } from "./types.js";
 
 export class FakeCloudError extends Error {
@@ -782,6 +783,7 @@ export class FakeCloud {
   private readonly _acm: AcmClient;
   private readonly _applicationAutoscaling: ApplicationAutoScalingClient;
   private readonly _athena: AthenaClient;
+  private readonly _organizations: OrganizationsClient;
 
   constructor(baseUrl: string = "http://localhost:4566") {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -814,6 +816,7 @@ export class FakeCloud {
       this.baseUrl,
     );
     this._athena = new AthenaClient(this.baseUrl);
+    this._organizations = new OrganizationsClient(this.baseUrl);
   }
 
   // ── Health & Reset ─────────────────────────────────────────────
@@ -968,6 +971,28 @@ export class AthenaClient {
    */
   async getNamedQueries(): Promise<AthenaNamedQueriesResponse> {
     const resp = await fetch(`${this.baseUrl}/_fakecloud/athena/named-queries`);
+  get organizations(): OrganizationsClient {
+    return this._organizations;
+  }
+}
+
+/**
+ * AWS Organizations admin/introspection client. Bypasses IAM so tests
+ * can assert on org shape without management-account credentials.
+ */
+export class OrganizationsClient {
+  constructor(private baseUrl: string) {}
+
+  /**
+   * List every member account in the org with lifecycle state, parent
+   * OU, tags, and directly-attached SCPs. Returns an empty accounts
+   * list (and nullable management/master ids) when no organization
+   * has been created yet.
+   */
+  async getAccounts(): Promise<OrganizationsAccountsResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/organizations/accounts`,
+    );
     return parse(resp);
   }
 }

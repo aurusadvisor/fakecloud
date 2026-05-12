@@ -70,6 +70,48 @@ aws --endpoint-url http://localhost:4566 organizations create-policy \
   --content '{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"s3:DeleteBucket","Resource":"*"}]}'
 ```
 
+## Introspection
+
+`GET /_fakecloud/organizations/accounts` returns every member account in the org with lifecycle state, parent OU, tags, and directly-attached SCPs — useful for asserting org shape from tests without management-account credentials (the endpoint bypasses IAM).
+
+```sh
+curl -fsS http://localhost:4566/_fakecloud/organizations/accounts | jq
+```
+
+Response shape:
+
+```json
+{
+  "accounts": [
+    {
+      "id": "111111111111",
+      "arn": "arn:aws:organizations::111111111111:account/o-abc/111111111111",
+      "email": "111111111111@example.com",
+      "name": "Account 111111111111",
+      "status": "ACTIVE",
+      "joinedMethod": "INVITED",
+      "joinedTimestamp": "2026-05-11T00:00:00Z",
+      "parentOuId": "r-1234",
+      "tags": [],
+      "scpAttached": []
+    }
+  ],
+  "managementAccountId": "111111111111",
+  "masterAccountId": "111111111111"
+}
+```
+
+`scpAttached` lists SCPs attached directly to the account only — to resolve the full inherited set walk up the OU tree or call `DescribeEffectivePolicy`. `accounts` is empty (and the account-id fields `null`) when no organization has been created yet. `masterAccountId` mirrors `managementAccountId` for back-compat with the AWS field renamed in 2020.
+
+The first-party SDKs wrap this:
+
+- Rust: `fakecloud_sdk::FakeCloud::new(url).organizations().get_accounts()`
+- Go: `fakecloud.New(url).Organizations().GetAccounts(ctx)`
+- Python: `await fc.organizations.get_accounts()` (async) or `fc.organizations.get_accounts()` (sync)
+- TypeScript: `await fc.organizations.getAccounts()`
+- Java: `fc.organizations().getAccounts()`
+- PHP: `$fc->organizations()->getAccounts()`
+
 ## Gotchas
 
 - **Management account only.** Mutating calls (`CreateAccount`, `AttachPolicy`, `EnableAWSServiceAccess`, etc.) must originate from the management account. Calls from member accounts return `AccessDeniedException`, matching AWS.

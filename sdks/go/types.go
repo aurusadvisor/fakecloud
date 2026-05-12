@@ -1214,6 +1214,38 @@ type GlueJobRun struct {
 // optionally filtered by job name.
 type GlueJobRunsResponse struct {
 	Runs []GlueJobRun `json:"runs"`
+// OrganizationsTag is a single key/value tag attached to an
+// Organizations resource (account, OU, root, or policy).
+type OrganizationsTag struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// OrganizationsAccount mirrors the AWS Organizations Account shape
+// plus two fakecloud-only fields: ParentOuID (the resolved parent OU
+// or root id) and ScpAttached (SCP ids directly attached — does not
+// walk up the hierarchy).
+type OrganizationsAccount struct {
+	ID              string             `json:"id"`
+	ARN             string             `json:"arn"`
+	Email           string             `json:"email"`
+	Name            string             `json:"name"`
+	Status          string             `json:"status"`
+	JoinedMethod    string             `json:"joinedMethod"`
+	JoinedTimestamp string             `json:"joinedTimestamp"`
+	ParentOuID      *string            `json:"parentOuId,omitempty"`
+	Tags            []OrganizationsTag `json:"tags"`
+	ScpAttached     []string           `json:"scpAttached"`
+}
+
+// OrganizationsAccountsResponse is the payload for
+// GET /_fakecloud/organizations/accounts. Both management and master
+// id fields are populated (AWS renamed Master to Management in 2020
+// but kept both around for back-compat). Empty when no org exists.
+type OrganizationsAccountsResponse struct {
+	Accounts            []OrganizationsAccount `json:"accounts"`
+	ManagementAccountID *string                `json:"managementAccountId,omitempty"`
+	MasterAccountID     *string                `json:"masterAccountId,omitempty"`
 }
 
 // AthenaNamedQuery is one row in the Athena named-query introspection

@@ -386,6 +386,83 @@ pub(crate) fn elbv2_rule_response(r: &fakecloud_elbv2::Rule) -> types::Elbv2Rule
     }
 }
 
+/// Build the `GET /_fakecloud/organizations/accounts` snapshot.
+///
+/// Walks the org's account directory, attaches resolved parent OU,
+/// tags, and the SCP ids directly attached to each account (no
+/// inherited policies — callers can resolve those via
+/// `DescribeEffectivePolicy`). When no organization has been created
+/// the response is empty with `None` management/master ids.
+pub(crate) fn organizations_accounts_snapshot(
+    state: &fakecloud_organizations::SharedOrganizationsState,
+) -> types::OrganizationsAccountsResponse {
+    let guard = state.read();
+    let Some(org) = guard.as_ref() else {
+        return types::OrganizationsAccountsResponse {
+            accounts: Vec::new(),
+            management_account_id: None,
+            master_account_id: None,
+        };
+    };
+
+    let mut accounts: Vec<types::OrganizationsAccount> = org
+        .accounts
+        .values()
+        .map(|a| {
+            let mut tags: Vec<types::OrganizationsTag> = org
+                .resource_tags
+                .get(&a.id)
+                .map(|m| {
+                    m.iter()
+                        .map(|(k, v)| types::OrganizationsTag {
+                            key: k.clone(),
+                            value: v.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            tags.sort_by(|x, y| x.key.cmp(&y.key));
+
+            let mut scp_attached: Vec<String> = org
+                .attachments
+                .get(&a.id)
+                .map(|set| {
+                    set.iter()
+                        .filter(|pid| {
+                            org.policies
+                                .get(*pid)
+                                .map(|p| p.policy_type == fakecloud_organizations::POLICY_TYPE_SCP)
+                                .unwrap_or(false)
+                        })
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            scp_attached.sort();
+
+            types::OrganizationsAccount {
+                id: a.id.clone(),
+                arn: a.arn.clone(),
+                email: a.email.clone(),
+                name: a.name.clone(),
+                status: a.status.clone(),
+                joined_method: a.joined_method.clone(),
+                joined_timestamp: a.joined_timestamp.to_rfc3339(),
+                parent_ou_id: Some(a.parent_id.clone()),
+                tags,
+                scp_attached,
+            }
+        })
+        .collect();
+    accounts.sort_by(|x, y| x.id.cmp(&y.id));
+
+    types::OrganizationsAccountsResponse {
+        accounts,
+        management_account_id: Some(org.management_account_id.clone()),
+        master_account_id: Some(org.management_account_id.clone()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -596,5 +673,78 @@ mod tests {
         assert_eq!(response.container_id, "container-id");
         assert_eq!(response.host_port, 15432);
         assert_eq!(response.tags.len(), 1);
+    }
+
+    #[test]
+    fn organizations_accounts_snapshot_empty_when_no_org() {
+        use std::sync::Arc;
+        let state: fakecloud_organizations::SharedOrganizationsState =
+            Arc::new(parking_lot::RwLock::new(None));
+        let snap = super::organizations_accounts_snapshot(&state);
+        assert!(snap.accounts.is_empty());
+        assert!(snap.management_account_id.is_none());
+        assert!(snap.master_account_id.is_none());
+    }
+
+    #[test]
+    fn organizations_accounts_snapshot_returns_management_and_member_state() {
+        use std::sync::Arc;
+        let mut org = fakecloud_organizations::OrganizationState::bootstrap("111111111111");
+        // Add a member account under the root.
+        let parent_id = org.root_id.clone();
+        org.accounts.insert(
+            "222222222222".to_string(),
+            fakecloud_organizations::MemberAccount {
+                id: "222222222222".to_string(),
+                arn: format!(
+                    "arn:aws:organizations::111111111111:account/{}/222222222222",
+                    org.org_id
+                ),
+                email: "member@example.com".to_string(),
+                name: "Member".to_string(),
+                status: "ACTIVE".to_string(),
+                joined_method: "CREATED".to_string(),
+                joined_timestamp: Utc::now(),
+                parent_id: parent_id.clone(),
+            },
+        );
+
+        // Tag the member account and attach a custom SCP directly.
+        org.set_resource_tags("222222222222", &[("env".to_string(), "prod".to_string())]);
+        let policy = org
+            .create_policy(
+                "DenyDelete",
+                "Deny S3 delete",
+                r#"{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"s3:DeleteBucket","Resource":"*"}]}"#,
+                "SERVICE_CONTROL_POLICY",
+            )
+            .expect("create policy");
+        let policy_id = policy.id.clone();
+        org.attach_policy(&policy_id, "222222222222")
+            .expect("attach to member");
+
+        let state: fakecloud_organizations::SharedOrganizationsState =
+            Arc::new(parking_lot::RwLock::new(Some(org)));
+        let snap = super::organizations_accounts_snapshot(&state);
+
+        assert_eq!(snap.management_account_id.as_deref(), Some("111111111111"));
+        assert_eq!(snap.master_account_id.as_deref(), Some("111111111111"));
+        assert_eq!(snap.accounts.len(), 2);
+
+        // Sorted by id, so management (1...) is first.
+        let mgmt = &snap.accounts[0];
+        assert_eq!(mgmt.id, "111111111111");
+        assert_eq!(mgmt.status, "ACTIVE");
+        assert_eq!(mgmt.parent_ou_id.as_deref(), Some(parent_id.as_str()));
+        assert!(mgmt.tags.is_empty());
+        assert!(mgmt.scp_attached.is_empty());
+
+        let member = &snap.accounts[1];
+        assert_eq!(member.id, "222222222222");
+        assert_eq!(member.joined_method, "CREATED");
+        assert_eq!(member.tags.len(), 1);
+        assert_eq!(member.tags[0].key, "env");
+        assert_eq!(member.tags[0].value, "prod");
+        assert_eq!(member.scp_attached, vec![policy_id]);
     }
 }
