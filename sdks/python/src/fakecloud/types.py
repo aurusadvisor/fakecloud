@@ -1921,3 +1921,73 @@ class LogsAnomalyInjectResponse:
     def from_dict(cls, data: Dict[str, Any]) -> LogsAnomalyInjectResponse:
         d = _convert_keys(data)
         return cls(**d)
+
+
+@dataclass
+class LogsDeliveryConfiguration:
+    """One entry of `/_fakecloud/logs/delivery-config`.
+
+    Joins a `Delivery` with the `log_type` from its `DeliverySource`
+    so callers can assert end-to-end wiring without re-querying the
+    AWS-shaped APIs.
+    """
+
+    id: str
+    name: str
+    delivery_destination_arn: str
+    delivery_source_name: str
+    log_type: str
+    created_at: int
+    record_fields: List[str] = field(default_factory=list)
+    field_delimiter: Optional[str] = None
+    s3_delivery_configuration: Optional[Dict[str, Any]] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> LogsDeliveryConfiguration:
+        d = _convert_keys(data)
+        valid = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in valid})
+
+
+@dataclass
+class LogsDeliveryConfigResponse:
+    configurations: List[LogsDeliveryConfiguration] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> LogsDeliveryConfigResponse:
+        return cls(
+            configurations=[
+                LogsDeliveryConfiguration.from_dict(c)
+                for c in data.get("configurations", [])
+            ]
+        )
+
+
+@dataclass
+class LogsFieldIndex:
+    """One parsed `Fields` entry from an index policy on a log group."""
+
+    fields: List[str] = field(default_factory=list)
+    created_at: int = 0
+    last_used_at: int = 0
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> LogsFieldIndex:
+        return cls(
+            fields=list(data.get("fields", [])),
+            created_at=int(data.get("createdAt", 0)),
+            last_used_at=int(data.get("lastUsedAt", 0)),
+        )
+
+
+@dataclass
+class LogsFieldIndexesResponse:
+    log_group_name: str
+    indexes: List[LogsFieldIndex] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> LogsFieldIndexesResponse:
+        return cls(
+            log_group_name=data.get("logGroupName", ""),
+            indexes=[LogsFieldIndex.from_dict(i) for i in data.get("indexes", [])],
+        )

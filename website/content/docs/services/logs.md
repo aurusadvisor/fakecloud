@@ -50,6 +50,10 @@ JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 
   Returns `{ "anomalyId": "<uuid>" }`. Available on every fakecloud SDK as `fc.logs().injectAnomaly(...)`.
 
+- `GET /_fakecloud/logs/delivery-config` — Persisted CloudWatch Logs delivery configurations (the joined output of `PutDeliverySource` + `PutDeliveryDestination` + `CreateDelivery`). Each entry contains `id`, `name`, `deliveryDestinationArn`, `deliverySourceName`, the `logType` carried over from the source, plus `recordFields`, `fieldDelimiter`, `s3DeliveryConfiguration`, and `createdAt` (unix-ms). Available on every fakecloud SDK as `fc.logs().getDeliveryConfig()`.
+
+- `GET /_fakecloud/logs/field-indexes/{logGroupName}` — Parsed `Fields` arrays from each `IndexPolicy` on a log group, plus `createdAt` and `lastUsedAt` timestamps. Returns `404` when the log group does not exist. Available on every fakecloud SDK as `fc.logs().getFieldIndexes(logGroupName)`.
+
 ## Gotchas
 
 - Anomaly *detection* (pattern mining) does not run. Anomalies appear in `ListAnomalies` only after being seeded through the admin endpoint above.

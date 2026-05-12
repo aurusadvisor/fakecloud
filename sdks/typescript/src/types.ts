@@ -885,3 +885,37 @@ export interface LogsAnomalyInjectRequest {
 export interface LogsAnomalyInjectResponse {
   anomalyId: string;
 }
+
+/** One entry of `/_fakecloud/logs/delivery-config`. Joins a Delivery
+ * with the `logType` from its DeliverySource for assertion-friendly
+ * test shape. */
+export interface LogsDeliveryConfiguration {
+  id: string;
+  /** Mirrors `id`; AWS deliveries are referenced by ID, not name. */
+  name: string;
+  deliveryDestinationArn: string;
+  deliverySourceName: string;
+  logType: string;
+  recordFields?: string[];
+  fieldDelimiter?: string;
+  s3DeliveryConfiguration?: unknown;
+  /** Unix-ms timestamp of CreateDelivery. */
+  createdAt: number;
+}
+
+export interface LogsDeliveryConfigResponse {
+  configurations: LogsDeliveryConfiguration[];
+}
+
+/** One parsed IndexPolicy on a log group. */
+export interface LogsFieldIndex {
+  fields: string[];
+  /** Unix-ms when the policy was created (mirrors `last_updated_time`). */
+  createdAt: number;
+  lastUsedAt: number;
+}
+
+export interface LogsFieldIndexesResponse {
+  logGroupName: string;
+  indexes: LogsFieldIndex[];
+}

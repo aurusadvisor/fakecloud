@@ -287,6 +287,8 @@ pub struct DeliverySource {
     pub service: String,
     pub log_type: String,
     pub tags: BTreeMap<String, String>,
+    #[serde(default)]
+    pub created_at: i64,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -303,6 +305,8 @@ pub struct Delivery {
     pub record_fields: Vec<String>,
     #[serde(default)]
     pub s3_delivery_configuration: Option<serde_json::Value>,
+    #[serde(default)]
+    pub created_at: i64,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
