@@ -66,6 +66,20 @@ The eventstream encoder produces AWS-compliant binary frames: 12-byte prelude (t
 - No real vector retrieval. Retrieve and RetrieveAndGenerate return synthetic results derived from the data sources attached to the knowledge base.
 - Action group Lambda executors are not invoked; the runtime emits a `RETURN_CONTROL` event so test code asserting on the agent's action-group contract receives the same shape it would receive from a real `RETURN_CONTROL` action group.
 
+## Introspection
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/bedrock-agent-runtime/invocations` | GET | List every InvokeAgent / InvokeInlineAgent / InvokeFlow / Retrieve / RetrieveAndGenerate / CreateInvocation call the runtime has seen since the last reset. |
+
+```sh
+curl http://localhost:4566/_fakecloud/bedrock-agent-runtime/invocations
+```
+
+Each row carries `{invocationId, op, agentId?, flowId?, sessionId?, input, output, outputChunks, trace?, citations[], invokedAt, durationMs}`. `op` is one of `invoke_agent`, `invoke_inline_agent`, `invoke_flow`, `retrieve`, `retrieve_and_generate`, `create_invocation`.
+
+Wrapped by `getInvocations()` on the `bedrockAgentRuntime` sub-client in every first-party SDK.
+
 ## Source
 
 - [`crates/fakecloud-bedrock-agent-runtime`](https://github.com/faiscadev/fakecloud/tree/main/crates/fakecloud-bedrock-agent-runtime)

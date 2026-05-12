@@ -1445,6 +1445,202 @@ final class BedrockStatusResponse
     }
 }
 
+// ── Bedrock Agent (control plane) ──────────────────────────────
+
+final class BedrockAgentAliasSummary
+{
+    public function __construct(
+        public readonly string $aliasId,
+        public readonly string $aliasName,
+        public readonly string $agentVersion,
+        public readonly string $aliasArn,
+        public readonly string $status,
+        public readonly string $createdAt,
+        public readonly string $updatedAt,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['aliasId'] ?? '',
+            $data['aliasName'] ?? '',
+            $data['agentVersion'] ?? '',
+            $data['aliasArn'] ?? '',
+            $data['status'] ?? '',
+            $data['createdAt'] ?? '',
+            $data['updatedAt'] ?? '',
+        );
+    }
+}
+
+final class BedrockAgentVersionSummary
+{
+    public function __construct(
+        public readonly string $agentVersion,
+        public readonly string $createdAt,
+        public readonly ?string $instruction,
+        public readonly ?string $foundationModel,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['agentVersion'] ?? '',
+            $data['createdAt'] ?? '',
+            $data['instruction'] ?? null,
+            $data['foundationModel'] ?? null,
+        );
+    }
+}
+
+final class BedrockAgentKnowledgeBaseSummary
+{
+    public function __construct(
+        public readonly string $knowledgeBaseId,
+        public readonly string $state,
+        public readonly ?string $description,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['knowledgeBaseId'] ?? '',
+            $data['state'] ?? '',
+            $data['description'] ?? null,
+        );
+    }
+}
+
+final class BedrockAgentCollaboratorSummary
+{
+    public function __construct(
+        public readonly string $collaboratorId,
+        public readonly string $collaboratorName,
+        public readonly string $collaboratorAliasArn,
+        public readonly string $relayConversationHistory,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['collaboratorId'] ?? '',
+            $data['collaboratorName'] ?? '',
+            $data['collaboratorAliasArn'] ?? '',
+            $data['relayConversationHistory'] ?? '',
+        );
+    }
+}
+
+final class BedrockAgentRow
+{
+    public function __construct(
+        public readonly string $agentId,
+        public readonly string $agentName,
+        public readonly string $agentArn,
+        public readonly string $agentStatus,
+        public readonly ?string $foundationModel,
+        public readonly ?string $instruction,
+        /** @var BedrockAgentKnowledgeBaseSummary[] */
+        public readonly array $knowledgeBases,
+        /** @var array<int, mixed> */
+        public readonly array $actionGroups,
+        /** @var BedrockAgentCollaboratorSummary[] */
+        public readonly array $collaborators,
+        /** @var BedrockAgentAliasSummary[] */
+        public readonly array $aliases,
+        /** @var BedrockAgentVersionSummary[] */
+        public readonly array $versions,
+        public readonly mixed $promptOverrides,
+        public readonly string $createdAt,
+        public readonly string $updatedAt,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['agentId'] ?? '',
+            $data['agentName'] ?? '',
+            $data['agentArn'] ?? '',
+            $data['agentStatus'] ?? '',
+            $data['foundationModel'] ?? null,
+            $data['instruction'] ?? null,
+            array_map(BedrockAgentKnowledgeBaseSummary::fromArray(...), $data['knowledgeBases'] ?? []),
+            $data['actionGroups'] ?? [],
+            array_map(BedrockAgentCollaboratorSummary::fromArray(...), $data['collaborators'] ?? []),
+            array_map(BedrockAgentAliasSummary::fromArray(...), $data['aliases'] ?? []),
+            array_map(BedrockAgentVersionSummary::fromArray(...), $data['versions'] ?? []),
+            $data['promptOverrides'] ?? null,
+            $data['createdAt'] ?? '',
+            $data['updatedAt'] ?? '',
+        );
+    }
+}
+
+final class BedrockAgentAgentsResponse
+{
+    public function __construct(
+        /** @var BedrockAgentRow[] */
+        public readonly array $agents,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(BedrockAgentRow::fromArray(...), $data['agents'] ?? []));
+    }
+}
+
+// ── Bedrock Agent Runtime (data plane) ────────────────────────
+
+final class BedrockAgentRuntimeInvocation
+{
+    public function __construct(
+        public readonly string $invocationId,
+        public readonly string $op,
+        public readonly ?string $agentId,
+        public readonly ?string $flowId,
+        public readonly ?string $sessionId,
+        public readonly string $input,
+        public readonly string $output,
+        public readonly int $outputChunks,
+        public readonly mixed $trace,
+        /** @var array<int, mixed> */
+        public readonly array $citations,
+        public readonly string $invokedAt,
+        public readonly int $durationMs,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['invocationId'] ?? '',
+            $data['op'] ?? '',
+            $data['agentId'] ?? null,
+            $data['flowId'] ?? null,
+            $data['sessionId'] ?? null,
+            $data['input'] ?? '',
+            $data['output'] ?? '',
+            (int) ($data['outputChunks'] ?? 0),
+            $data['trace'] ?? null,
+            $data['citations'] ?? [],
+            $data['invokedAt'] ?? '',
+            (int) ($data['durationMs'] ?? 0),
+        );
+    }
+}
+
+final class BedrockAgentRuntimeInvocationsResponse
+{
+    public function __construct(
+        /** @var BedrockAgentRuntimeInvocation[] */
+        public readonly array $invocations,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(BedrockAgentRuntimeInvocation::fromArray(...), $data['invocations'] ?? []));
+    }
+}
+
 // ── API Gateway v2 ─────────────────────────────────────────────
 
 final class ApiGatewayV2Request

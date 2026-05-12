@@ -397,16 +397,23 @@ async fn handle_invoke_agent(
     let output = format!("Hello from agent {}. You said: {}", agent_name, input_text);
 
     // Record invocation
+    let start = std::time::Instant::now();
     {
         let mut accts = svc.state.write();
         let s = accts.get_or_create(&req.account_id);
         s.invocations.push(InvocationRecord {
             invocation_id: uuid::Uuid::new_v4().to_string(),
+            op: "invoke_agent".to_string(),
             agent_id: Some(agent_id.clone()),
             flow_id: None,
+            session_id: Some(session_id.clone()),
             input: input_text.clone(),
             output: output.clone(),
+            output_chunks: 1,
+            trace: None,
+            citations: Vec::new(),
             timestamp: Utc::now(),
+            duration_ms: start.elapsed().as_millis() as u64,
         });
     }
 
@@ -447,6 +454,9 @@ async fn handle_invoke_flow(
     let execution_id = uuid::Uuid::new_v4().to_string();
     let input = req_str(body, "input").unwrap_or_default();
 
+    let start = std::time::Instant::now();
+    let document = format!("Flow output for input: {}", input);
+
     // Record
     {
         let mut accts = svc.state.write();
@@ -461,9 +471,22 @@ async fn handle_invoke_flow(
                 updated_at: Utc::now(),
             },
         );
+        s.invocations.push(InvocationRecord {
+            invocation_id: execution_id.clone(),
+            op: "invoke_flow".to_string(),
+            agent_id: None,
+            flow_id: Some(flow_id.clone()),
+            session_id: None,
+            input: input.clone(),
+            output: document.clone(),
+            output_chunks: 1,
+            trace: None,
+            citations: Vec::new(),
+            timestamp: Utc::now(),
+            duration_ms: start.elapsed().as_millis() as u64,
+        });
     }
 
-    let document = format!("Flow output for input: {}", input);
     let frame = crate::eventstream::flow_output_frame("StartNode", &document);
     let mut headers = http::HeaderMap::new();
     if let Ok(value) = http::HeaderValue::from_str(&execution_id) {
@@ -478,13 +501,33 @@ async fn handle_invoke_flow(
 }
 
 async fn handle_invoke_inline_agent(
-    _svc: &BedrockAgentRuntimeService,
-    _req: &AwsRequest,
+    svc: &BedrockAgentRuntimeService,
+    req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
     let session_id = req_str(body, "sessionId").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let input_text = req_str(body, "inputText").unwrap_or_default();
-    let frame = crate::eventstream::chunk_frame(&format!("Inline agent says: {}", input_text));
+    let start = std::time::Instant::now();
+    let output = format!("Inline agent says: {}", input_text);
+    {
+        let mut accts = svc.state.write();
+        let s = accts.get_or_create(&req.account_id);
+        s.invocations.push(InvocationRecord {
+            invocation_id: uuid::Uuid::new_v4().to_string(),
+            op: "invoke_inline_agent".to_string(),
+            agent_id: None,
+            flow_id: None,
+            session_id: Some(session_id.clone()),
+            input: input_text.clone(),
+            output: output.clone(),
+            output_chunks: 1,
+            trace: None,
+            citations: Vec::new(),
+            timestamp: Utc::now(),
+            duration_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    let frame = crate::eventstream::chunk_frame(&output);
     let mut headers = http::HeaderMap::new();
     if let Ok(value) = http::HeaderValue::from_str(&session_id) {
         headers.insert("x-amz-bedrock-agent-session-id", value);
@@ -531,8 +574,8 @@ async fn handle_optimize_prompt(
 }
 
 async fn handle_retrieve(
-    _svc: &BedrockAgentRuntimeService,
-    _req: &AwsRequest,
+    svc: &BedrockAgentRuntimeService,
+    req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
     let kb_id = req_str(body, "knowledgeBaseId").ok_or_else(|| {
@@ -550,11 +593,32 @@ async fn handle_retrieve(
         .unwrap_or_default()
         .to_string();
 
+    let start = std::time::Instant::now();
+    let result_text = format!("Retrieved result for query '{}' from knowledge base {}", query, kb_id);
+    {
+        let mut accts = svc.state.write();
+        let s = accts.get_or_create(&req.account_id);
+        s.invocations.push(InvocationRecord {
+            invocation_id: uuid::Uuid::new_v4().to_string(),
+            op: "retrieve".to_string(),
+            agent_id: None,
+            flow_id: None,
+            session_id: None,
+            input: query.clone(),
+            output: result_text.clone(),
+            output_chunks: 1,
+            trace: Some(serde_json::json!({ "knowledgeBaseId": kb_id })),
+            citations: Vec::new(),
+            timestamp: Utc::now(),
+            duration_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+
     let response = json!({
         "retrievalResults": [
             {
                 "content": {
-                    "text": format!("Retrieved result for query '{}' from knowledge base {}", query, kb_id)
+                    "text": result_text
                 },
                 "location": {
                     "type": "S3",
@@ -571,39 +635,56 @@ async fn handle_retrieve(
 }
 
 async fn handle_retrieve_and_generate(
-    _svc: &BedrockAgentRuntimeService,
-    _req: &AwsRequest,
+    svc: &BedrockAgentRuntimeService,
+    req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
     let session_id = req_str(body, "sessionId").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let input = req_str(body, "input").unwrap_or_default();
+    let start = std::time::Instant::now();
+    let output_text = format!("Generated response for: {}", input);
+    let citation = json!({
+        "generatedResponsePart": {
+            "textResponsePart": {
+                "text": output_text,
+                "span": { "start": 0, "end": 30 }
+            }
+        },
+        "retrievedReferences": [
+            {
+                "content": {
+                    "text": "Reference text from knowledge base"
+                },
+                "location": {
+                    "type": "CONFLUENCE",
+                    "confluenceLocation": { "url": "https://example.com/doc" }
+                }
+            }
+        ]
+    });
+    {
+        let mut accts = svc.state.write();
+        let s = accts.get_or_create(&req.account_id);
+        s.invocations.push(InvocationRecord {
+            invocation_id: uuid::Uuid::new_v4().to_string(),
+            op: "retrieve_and_generate".to_string(),
+            agent_id: None,
+            flow_id: None,
+            session_id: Some(session_id.clone()),
+            input: input.clone(),
+            output: output_text.clone(),
+            output_chunks: 1,
+            trace: None,
+            citations: vec![citation.clone()],
+            timestamp: Utc::now(),
+            duration_ms: start.elapsed().as_millis() as u64,
+        });
+    }
 
     let response = json!({
         "sessionId": session_id,
-        "output": {
-            "text": format!("Generated response for: {}", input)
-        },
-        "citations": [
-            {
-                "generatedResponsePart": {
-                    "textResponsePart": {
-                        "text": format!("Generated response for: {}", input),
-                        "span": { "start": 0, "end": 30 }
-                    }
-                },
-                "retrievedReferences": [
-                    {
-                        "content": {
-                            "text": "Reference text from knowledge base"
-                        },
-                        "location": {
-                            "type": "CONFLUENCE",
-                            "confluenceLocation": { "url": "https://example.com/doc" }
-                        }
-                    }
-                ]
-            }
-        ]
+        "output": { "text": output_text },
+        "citations": [citation]
     });
 
     Ok(AwsResponse::ok_json(response))
@@ -802,11 +883,17 @@ async fn handle_create_invocation(
         let s = accts.get_or_create(&req.account_id);
         s.invocations.push(InvocationRecord {
             invocation_id: invocation_id.clone(),
+            op: "create_invocation".to_string(),
             agent_id: req_str(body, "agentId"),
             flow_id: None,
+            session_id: req_str(body, "sessionId"),
             input: req_str(body, "input").unwrap_or_default(),
             output: String::new(),
+            output_chunks: 0,
+            trace: None,
+            citations: Vec::new(),
             timestamp: Utc::now(),
+            duration_ms: 0,
         });
     }
 

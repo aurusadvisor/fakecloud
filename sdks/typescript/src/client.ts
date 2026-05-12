@@ -7,6 +7,8 @@ import type {
   BedrockModelResponseConfig,
   BedrockResponseRule,
   BedrockStatusResponse,
+  BedrockAgentAgentsResponse,
+  BedrockAgentRuntimeInvocationsResponse,
   HealthResponse,
   ResetResponse,
   ResetServiceResponse,
@@ -617,25 +619,33 @@ export class BedrockClient {
 }
 
 /**
- * Bedrock Agent (control plane) sub-client.
- *
- * The fakecloud Bedrock Agent service has no admin/introspection endpoints
- * today; this client exists so callers can hold a typed handle alongside the
- * other Bedrock sub-clients and so future helpers can land here without an
- * API break.
+ * Bedrock Agent (control plane) sub-client. Reads `/_fakecloud/bedrock-agent/*`
+ * introspection endpoints for test assertions.
  */
 export class BedrockAgentClient {
   constructor(private readonly baseUrl: string) {}
+
+  /** List every Bedrock Agent with its aliases, versions, knowledge bases, and collaborators flattened. */
+  async getAgents(): Promise<BedrockAgentAgentsResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/bedrock-agent/agents`);
+    return parse(resp);
+  }
 }
 
 /**
- * Bedrock Agent Runtime (data plane) sub-client.
- *
- * Placeholder for future introspection helpers around InvokeAgent, Retrieve,
- * and RetrieveAndGenerate.
+ * Bedrock Agent Runtime (data plane) sub-client. Reads
+ * `/_fakecloud/bedrock-agent-runtime/*` introspection endpoints.
  */
 export class BedrockAgentRuntimeClient {
   constructor(private readonly baseUrl: string) {}
+
+  /** List recorded InvokeAgent / InvokeInlineAgent / InvokeFlow / Retrieve / RetrieveAndGenerate calls. */
+  async getInvocations(): Promise<BedrockAgentRuntimeInvocationsResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/bedrock-agent-runtime/invocations`,
+    );
+    return parse(resp);
+  }
 }
 
 // ── Main client ────────────────────────────────────────────────────

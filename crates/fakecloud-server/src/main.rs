@@ -2518,8 +2518,8 @@ async fn main() {
         bedrock_agent_state.clone(),
     )));
     registry.register(Arc::new(
-        BedrockAgentRuntimeService::new(bedrock_agent_runtime_state)
-            .with_agent_state(bedrock_agent_state),
+        BedrockAgentRuntimeService::new(bedrock_agent_runtime_state.clone())
+            .with_agent_state(bedrock_agent_state.clone()),
     ));
 
     let scheduler_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
@@ -6039,6 +6039,119 @@ async fn main() {
                     let mut accounts = bs.write(); let state = accounts.default_mut();
                     state.fault_rules.clear();
                     axum::Json(serde_json::json!({ "status": "ok" }))
+                }
+            }),
+        )
+        // Bedrock Agent (control plane) introspection: list agents with
+        // their aliases, versions, knowledge-base attachments, and
+        // collaborators flattened into one shape. Pure read-only and
+        // bypasses IAM since it's an admin/test endpoint.
+        .route(
+            "/_fakecloud/bedrock-agent/agents",
+            axum::routing::get({
+                let bas = bedrock_agent_state.clone();
+                move || async move {
+                    let accounts = bas.read();
+                    let mut out: Vec<serde_json::Value> = Vec::new();
+                    for (_acct, state) in accounts.accounts.iter() {
+                        for (agent_id, agent) in state.agents.iter() {
+                            let aliases: Vec<serde_json::Value> = state
+                                .agent_aliases
+                                .values()
+                                .filter(|a| a.agent_id == *agent_id)
+                                .map(|a| serde_json::json!({
+                                    "aliasId": a.alias_id,
+                                    "aliasName": a.alias_name,
+                                    "agentVersion": a.agent_version,
+                                    "aliasArn": a.alias_arn,
+                                    "status": a.agent_alias_status,
+                                    "createdAt": a.created_at.to_rfc3339(),
+                                    "updatedAt": a.updated_at.to_rfc3339(),
+                                }))
+                                .collect();
+                            let versions: Vec<serde_json::Value> = state
+                                .agent_versions
+                                .get(agent_id)
+                                .map(|vs| vs.iter().map(|v| serde_json::json!({
+                                    "agentVersion": v.agent_version,
+                                    "createdAt": v.created_at.to_rfc3339(),
+                                    "instruction": v.instruction,
+                                    "foundationModel": v.foundation_model,
+                                })).collect())
+                                .unwrap_or_default();
+                            let kbs: Vec<serde_json::Value> = state
+                                .agent_knowledge_bases
+                                .get(agent_id)
+                                .map(|ks| ks.iter().map(|k| serde_json::json!({
+                                    "knowledgeBaseId": k.knowledge_base_id,
+                                    "state": k.knowledge_base_state,
+                                    "description": k.description,
+                                })).collect())
+                                .unwrap_or_default();
+                            let collaborators: Vec<serde_json::Value> = state
+                                .agent_collaborators
+                                .get(agent_id)
+                                .map(|cs| cs.iter().map(|c| serde_json::json!({
+                                    "collaboratorId": c.collaborator_id,
+                                    "collaboratorName": c.collaborator_name,
+                                    "collaboratorAliasArn": c.collaborator_alias_arn,
+                                    "relayConversationHistory": c.relay_conversation_history,
+                                })).collect())
+                                .unwrap_or_default();
+                            out.push(serde_json::json!({
+                                "agentId": agent.agent_id,
+                                "agentName": agent.agent_name,
+                                "agentArn": agent.agent_arn,
+                                "agentStatus": agent.agent_status,
+                                "foundationModel": agent.foundation_model,
+                                "instruction": agent.instruction,
+                                "knowledgeBases": kbs,
+                                // Action groups are not persisted in state today
+                                // (CreateAgentActionGroup returns a stub id); the
+                                // field is exposed for forward compatibility.
+                                "actionGroups": Vec::<serde_json::Value>::new(),
+                                "collaborators": collaborators,
+                                "aliases": aliases,
+                                "versions": versions,
+                                "promptOverrides": agent.prompt_override_configuration,
+                                "createdAt": agent.created_at.to_rfc3339(),
+                                "updatedAt": agent.updated_at.to_rfc3339(),
+                            }));
+                        }
+                    }
+                    axum::Json(serde_json::json!({ "agents": out }))
+                }
+            }),
+        )
+        // Bedrock Agent Runtime (data plane) introspection: log of
+        // InvokeAgent / InvokeInlineAgent / InvokeFlow / Retrieve /
+        // RetrieveAndGenerate (and bookkeeping CreateInvocation) calls.
+        .route(
+            "/_fakecloud/bedrock-agent-runtime/invocations",
+            axum::routing::get({
+                let bars = bedrock_agent_runtime_state.clone();
+                move || async move {
+                    let accounts = bars.read();
+                    let mut out: Vec<serde_json::Value> = Vec::new();
+                    for (_acct, state) in accounts.accounts.iter() {
+                        for inv in state.invocations.iter() {
+                            out.push(serde_json::json!({
+                                "invocationId": inv.invocation_id,
+                                "op": inv.op,
+                                "agentId": inv.agent_id,
+                                "flowId": inv.flow_id,
+                                "sessionId": inv.session_id,
+                                "input": inv.input,
+                                "output": inv.output,
+                                "outputChunks": inv.output_chunks,
+                                "trace": inv.trace,
+                                "citations": inv.citations,
+                                "invokedAt": inv.timestamp.to_rfc3339(),
+                                "durationMs": inv.duration_ms,
+                            }));
+                        }
+                    }
+                    axum::Json(serde_json::json!({ "invocations": out }))
                 }
             }),
         )

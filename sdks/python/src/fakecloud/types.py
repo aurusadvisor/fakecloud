@@ -1284,6 +1284,185 @@ class BedrockStatusResponse:
         return cls(status=data.get("status", ""))
 
 
+# ── Bedrock Agent (control plane) ─────────────────────────────────────
+
+
+@dataclass
+class BedrockAgentAliasSummary:
+    alias_id: str
+    alias_name: str
+    agent_version: str
+    alias_arn: str
+    status: str
+    created_at: str
+    updated_at: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> BedrockAgentAliasSummary:
+        return cls(
+            alias_id=data.get("aliasId", ""),
+            alias_name=data.get("aliasName", ""),
+            agent_version=data.get("agentVersion", ""),
+            alias_arn=data.get("aliasArn", ""),
+            status=data.get("status", ""),
+            created_at=data.get("createdAt", ""),
+            updated_at=data.get("updatedAt", ""),
+        )
+
+
+@dataclass
+class BedrockAgentVersionSummary:
+    agent_version: str
+    created_at: str
+    instruction: Optional[str]
+    foundation_model: Optional[str]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> BedrockAgentVersionSummary:
+        return cls(
+            agent_version=data.get("agentVersion", ""),
+            created_at=data.get("createdAt", ""),
+            instruction=data.get("instruction"),
+            foundation_model=data.get("foundationModel"),
+        )
+
+
+@dataclass
+class BedrockAgentKnowledgeBaseSummary:
+    knowledge_base_id: str
+    state: str
+    description: Optional[str]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> BedrockAgentKnowledgeBaseSummary:
+        return cls(
+            knowledge_base_id=data.get("knowledgeBaseId", ""),
+            state=data.get("state", ""),
+            description=data.get("description"),
+        )
+
+
+@dataclass
+class BedrockAgentCollaboratorSummary:
+    collaborator_id: str
+    collaborator_name: str
+    collaborator_alias_arn: str
+    relay_conversation_history: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> BedrockAgentCollaboratorSummary:
+        return cls(
+            collaborator_id=data.get("collaboratorId", ""),
+            collaborator_name=data.get("collaboratorName", ""),
+            collaborator_alias_arn=data.get("collaboratorAliasArn", ""),
+            relay_conversation_history=data.get("relayConversationHistory", ""),
+        )
+
+
+@dataclass
+class BedrockAgentRow:
+    agent_id: str
+    agent_name: str
+    agent_arn: str
+    agent_status: str
+    foundation_model: Optional[str]
+    instruction: Optional[str]
+    knowledge_bases: List[BedrockAgentKnowledgeBaseSummary]
+    action_groups: List[Any]
+    collaborators: List[BedrockAgentCollaboratorSummary]
+    aliases: List[BedrockAgentAliasSummary]
+    versions: List[BedrockAgentVersionSummary]
+    prompt_overrides: Any
+    created_at: str
+    updated_at: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> BedrockAgentRow:
+        return cls(
+            agent_id=data.get("agentId", ""),
+            agent_name=data.get("agentName", ""),
+            agent_arn=data.get("agentArn", ""),
+            agent_status=data.get("agentStatus", ""),
+            foundation_model=data.get("foundationModel"),
+            instruction=data.get("instruction"),
+            knowledge_bases=[
+                BedrockAgentKnowledgeBaseSummary.from_dict(k)
+                for k in data.get("knowledgeBases", [])
+            ],
+            action_groups=list(data.get("actionGroups", [])),
+            collaborators=[
+                BedrockAgentCollaboratorSummary.from_dict(c)
+                for c in data.get("collaborators", [])
+            ],
+            aliases=[BedrockAgentAliasSummary.from_dict(a) for a in data.get("aliases", [])],
+            versions=[
+                BedrockAgentVersionSummary.from_dict(v) for v in data.get("versions", [])
+            ],
+            prompt_overrides=data.get("promptOverrides"),
+            created_at=data.get("createdAt", ""),
+            updated_at=data.get("updatedAt", ""),
+        )
+
+
+@dataclass
+class BedrockAgentAgentsResponse:
+    agents: List[BedrockAgentRow]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> BedrockAgentAgentsResponse:
+        return cls(agents=[BedrockAgentRow.from_dict(a) for a in data.get("agents", [])])
+
+
+# ── Bedrock Agent Runtime (data plane) ────────────────────────────────
+
+
+@dataclass
+class BedrockAgentRuntimeInvocation:
+    invocation_id: str
+    op: str
+    agent_id: Optional[str]
+    flow_id: Optional[str]
+    session_id: Optional[str]
+    input: str
+    output: str
+    output_chunks: int
+    trace: Any
+    citations: List[Any]
+    invoked_at: str
+    duration_ms: int
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> BedrockAgentRuntimeInvocation:
+        return cls(
+            invocation_id=data.get("invocationId", ""),
+            op=data.get("op", ""),
+            agent_id=data.get("agentId"),
+            flow_id=data.get("flowId"),
+            session_id=data.get("sessionId"),
+            input=data.get("input", ""),
+            output=data.get("output", ""),
+            output_chunks=int(data.get("outputChunks", 0)),
+            trace=data.get("trace"),
+            citations=list(data.get("citations", [])),
+            invoked_at=data.get("invokedAt", ""),
+            duration_ms=int(data.get("durationMs", 0)),
+        )
+
+
+@dataclass
+class BedrockAgentRuntimeInvocationsResponse:
+    invocations: List[BedrockAgentRuntimeInvocation]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> BedrockAgentRuntimeInvocationsResponse:
+        return cls(
+            invocations=[
+                BedrockAgentRuntimeInvocation.from_dict(i)
+                for i in data.get("invocations", [])
+            ]
+        )
+
+
 # ── IAM ────────────────────────────────────────────────────────────────
 
 

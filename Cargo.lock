@@ -3369,6 +3369,8 @@ dependencies = [
  "aws-sdk-applicationautoscaling",
  "aws-sdk-athena",
  "aws-sdk-bedrock",
+ "aws-sdk-bedrockagent",
+ "aws-sdk-bedrockagentruntime",
  "aws-sdk-bedrockruntime",
  "aws-sdk-cloudformation",
  "aws-sdk-cloudfront",

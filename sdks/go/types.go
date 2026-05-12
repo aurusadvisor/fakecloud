@@ -639,6 +639,88 @@ type BedrockStatusResponse struct {
 	Status string `json:"status"`
 }
 
+// ── Bedrock Agent (control plane) ─────────────────────────────────
+
+// BedrockAgentAliasSummary is one alias row attached to an agent.
+type BedrockAgentAliasSummary struct {
+	AliasID      string `json:"aliasId"`
+	AliasName    string `json:"aliasName"`
+	AgentVersion string `json:"agentVersion"`
+	AliasArn     string `json:"aliasArn"`
+	Status       string `json:"status"`
+	CreatedAt    string `json:"createdAt"`
+	UpdatedAt    string `json:"updatedAt"`
+}
+
+// BedrockAgentVersionSummary is one captured version of an agent.
+type BedrockAgentVersionSummary struct {
+	AgentVersion    string  `json:"agentVersion"`
+	CreatedAt       string  `json:"createdAt"`
+	Instruction     *string `json:"instruction"`
+	FoundationModel *string `json:"foundationModel"`
+}
+
+// BedrockAgentKnowledgeBaseSummary is one knowledge-base attachment.
+type BedrockAgentKnowledgeBaseSummary struct {
+	KnowledgeBaseID string  `json:"knowledgeBaseId"`
+	State           string  `json:"state"`
+	Description     *string `json:"description"`
+}
+
+// BedrockAgentCollaboratorSummary is one collaborator attachment.
+type BedrockAgentCollaboratorSummary struct {
+	CollaboratorID           string `json:"collaboratorId"`
+	CollaboratorName         string `json:"collaboratorName"`
+	CollaboratorAliasArn     string `json:"collaboratorAliasArn"`
+	RelayConversationHistory string `json:"relayConversationHistory"`
+}
+
+// BedrockAgentRow is one Bedrock Agent flattened for introspection.
+type BedrockAgentRow struct {
+	AgentID          string                             `json:"agentId"`
+	AgentName        string                             `json:"agentName"`
+	AgentArn         string                             `json:"agentArn"`
+	AgentStatus      string                             `json:"agentStatus"`
+	FoundationModel  *string                            `json:"foundationModel"`
+	Instruction      *string                            `json:"instruction"`
+	KnowledgeBases   []BedrockAgentKnowledgeBaseSummary `json:"knowledgeBases"`
+	ActionGroups     []any                              `json:"actionGroups"`
+	Collaborators    []BedrockAgentCollaboratorSummary  `json:"collaborators"`
+	Aliases          []BedrockAgentAliasSummary         `json:"aliases"`
+	Versions         []BedrockAgentVersionSummary       `json:"versions"`
+	PromptOverrides  any                                `json:"promptOverrides"`
+	CreatedAt        string                             `json:"createdAt"`
+	UpdatedAt        string                             `json:"updatedAt"`
+}
+
+// BedrockAgentAgentsResponse is the list-agents response body.
+type BedrockAgentAgentsResponse struct {
+	Agents []BedrockAgentRow `json:"agents"`
+}
+
+// ── Bedrock Agent Runtime (data plane) ────────────────────────────
+
+// BedrockAgentRuntimeInvocation is one recorded data-plane call.
+type BedrockAgentRuntimeInvocation struct {
+	InvocationID string  `json:"invocationId"`
+	Op           string  `json:"op"`
+	AgentID      *string `json:"agentId"`
+	FlowID       *string `json:"flowId"`
+	SessionID    *string `json:"sessionId"`
+	Input        string  `json:"input"`
+	Output       string  `json:"output"`
+	OutputChunks uint32  `json:"outputChunks"`
+	Trace        any     `json:"trace"`
+	Citations    []any   `json:"citations"`
+	InvokedAt    string  `json:"invokedAt"`
+	DurationMs   uint64  `json:"durationMs"`
+}
+
+// BedrockAgentRuntimeInvocationsResponse is the list-invocations body.
+type BedrockAgentRuntimeInvocationsResponse struct {
+	Invocations []BedrockAgentRuntimeInvocation `json:"invocations"`
+}
+
 // ── IAM ───────────────────────────────────────────────────────────
 
 // CreateAdminRequest is the payload for creating an IAM admin user.

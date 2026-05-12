@@ -144,6 +144,14 @@ impl FakeCloud {
         BedrockClient { fc: self }
     }
 
+    pub fn bedrock_agent(&self) -> BedrockAgentClient<'_> {
+        BedrockAgentClient { fc: self }
+    }
+
+    pub fn bedrock_agent_runtime(&self) -> BedrockAgentRuntimeClient<'_> {
+        BedrockAgentRuntimeClient { fc: self }
+    }
+
     pub fn ecs(&self) -> EcsClient<'_> {
         EcsClient { fc: self }
     }
@@ -836,6 +844,55 @@ impl BedrockClient<'_> {
             .fc
             .client
             .delete(format!("{}/_fakecloud/bedrock/faults", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── Bedrock Agent (control plane) ───────────────────────────────────
+
+pub struct BedrockAgentClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl BedrockAgentClient<'_> {
+    /// List every recorded Bedrock Agent with its aliases, versions,
+    /// knowledge-base attachments, and collaborators flattened into one
+    /// row each.
+    pub async fn get_agents(&self) -> Result<BedrockAgentAgentsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/bedrock-agent/agents",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── Bedrock Agent Runtime (data plane) ──────────────────────────────
+
+pub struct BedrockAgentRuntimeClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl BedrockAgentRuntimeClient<'_> {
+    /// List every recorded InvokeAgent / InvokeInlineAgent / InvokeFlow
+    /// / Retrieve / RetrieveAndGenerate / CreateInvocation call.
+    pub async fn get_invocations(
+        &self,
+    ) -> Result<BedrockAgentRuntimeInvocationsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/bedrock-agent-runtime/invocations",
+                self.fc.base_url
+            ))
             .send()
             .await?;
         FakeCloud::parse(resp).await
