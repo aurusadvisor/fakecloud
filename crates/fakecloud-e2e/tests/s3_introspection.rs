@@ -50,9 +50,9 @@ async fn access_points_introspection_lists_created_access_points() {
         .find(|e| e["name"] == "intro-ap")
         .expect("created access point present");
     assert_eq!(entry["bucket"], "intro-ap-bucket");
-    assert_eq!(entry["accountId"], "000000000000");
+    assert_eq!(entry["accountId"], "123456789012");
     assert_eq!(entry["networkOrigin"], "Internet");
-    assert_eq!(entry["alias"], "intro-ap-000000000000");
+    assert_eq!(entry["alias"], "intro-ap-123456789012");
     assert!(entry["createdAt"].is_string());
 }
 
