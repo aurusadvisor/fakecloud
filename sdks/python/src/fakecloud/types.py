@@ -2482,6 +2482,9 @@ class LogsDeliveryConfigResponse:
                 LogsDeliveryConfiguration.from_dict(c)
                 for c in data.get("configurations", [])
             ]
+        )
+
+
 # ── Organizations ───────────────────────────────────────────────────
 
 
@@ -2595,6 +2598,10 @@ class LogsFieldIndexesResponse:
         return cls(
             log_group_name=data.get("logGroupName", ""),
             indexes=[LogsFieldIndex.from_dict(i) for i in data.get("indexes", [])],
+        )
+
+
+@dataclass
 class OrganizationsAccountsResponse:
     accounts: List[OrganizationsAccount] = field(default_factory=list)
     management_account_id: Optional[str] = None

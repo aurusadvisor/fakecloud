@@ -1214,6 +1214,8 @@ type GlueJobRun struct {
 // optionally filtered by job name.
 type GlueJobRunsResponse struct {
 	Runs []GlueJobRun `json:"runs"`
+}
+
 // OrganizationsTag is a single key/value tag attached to an
 // Organizations resource (account, OU, root, or policy).
 type OrganizationsTag struct {

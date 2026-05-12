@@ -1143,6 +1143,8 @@ export interface LogsFieldIndex {
 export interface LogsFieldIndexesResponse {
   logGroupName: string;
   indexes: LogsFieldIndex[];
+}
+
 // ── Organizations ───────────────────────────────────────────────────
 
 export interface OrganizationsTag {
