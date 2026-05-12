@@ -6384,6 +6384,40 @@ async fn main() {
             }),
         )
         .route(
+            "/_fakecloud/cognito/pretokengen/invocations",
+            axum::routing::get({
+                let cs = cognito_state.clone();
+                move || {
+                    let cs = cs.clone();
+                    async move {
+                        let accounts = cs.read();
+                        let mut out: Vec<types::PreTokenGenInvocation> = Vec::new();
+                        for (_account_id, state) in accounts.iter() {
+                            for inv in &state.pre_token_gen_invocations {
+                                out.push(types::PreTokenGenInvocation {
+                                    pool_id: inv.pool_id.clone(),
+                                    user_pool_arn: inv.user_pool_arn.clone(),
+                                    username: inv.username.clone(),
+                                    trigger_source: inv.trigger_source.clone(),
+                                    lambda_arn: inv.lambda_arn.clone(),
+                                    request_payload: inv.request_payload.clone(),
+                                    response_payload: inv.response_payload.clone(),
+                                    claims_added: inv.claims_added.clone(),
+                                    claims_overridden: inv.claims_overridden.clone(),
+                                    group_overrides: inv.group_overrides.clone(),
+                                    invoked_at: inv.invoked_at.to_rfc3339(),
+                                    duration_ms: inv.duration_ms,
+                                });
+                            }
+                        }
+                        axum::Json(types::PreTokenGenInvocationsResponse {
+                            invocations: out,
+                        })
+                    }
+                }
+            }),
+        )
+        .route(
             "/_fakecloud/cognito/webauthn-credentials",
             axum::routing::get({
                 let cs = cognito_state.clone();

@@ -60,6 +60,7 @@ import type {
   ExpireTokensRequest,
   ExpireTokensResponse,
   AuthEventsResponse,
+  PreTokenGenInvocationsResponse,
   MintAuthorizationCodeRequest,
   MintAuthorizationCodeResponse,
   CompromisedPasswordsRequest,
@@ -503,6 +504,20 @@ export class CognitoClient {
 
   async getAuthEvents(): Promise<AuthEventsResponse> {
     const resp = await fetch(`${this.baseUrl}/_fakecloud/cognito/auth-events`);
+    return parse(resp);
+  }
+
+  /**
+   * Returns the PreTokenGeneration Lambda trigger invocation log
+   * recorded by `InitiateAuth`. Each entry includes the full request /
+   * response payloads plus pre-parsed `claimsAdded`,
+   * `claimsOverridden`, and `groupOverrides` so tests can assert claim
+   * mutation flows without inspecting the issued JWT.
+   */
+  async getPreTokenGenInvocations(): Promise<PreTokenGenInvocationsResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/cognito/pretokengen/invocations`,
+    );
     return parse(resp);
   }
 

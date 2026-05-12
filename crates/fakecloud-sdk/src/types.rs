@@ -849,6 +849,35 @@ pub struct AuthEventsResponse {
     pub events: Vec<AuthEvent>,
 }
 
+/// One PreTokenGeneration Lambda trigger invocation captured for
+/// introspection at `/_fakecloud/cognito/pretokengen/invocations`.
+/// `claims_added` / `claims_overridden` / `group_overrides` are
+/// pre-parsed from the Lambda response so test callers don't have to
+/// walk the raw `claimsAndScopeOverrideDetails` shape themselves.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreTokenGenInvocation {
+    pub pool_id: String,
+    pub user_pool_arn: String,
+    pub username: String,
+    pub trigger_source: String,
+    pub lambda_arn: String,
+    pub request_payload: serde_json::Value,
+    pub response_payload: Option<serde_json::Value>,
+    pub claims_added: Vec<String>,
+    pub claims_overridden: Vec<String>,
+    pub group_overrides: Vec<String>,
+    /// RFC3339 timestamp.
+    pub invoked_at: String,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreTokenGenInvocationsResponse {
+    pub invocations: Vec<PreTokenGenInvocation>,
+}
+
 /// Request body for the `/_fakecloud/cognito/authorization-codes` admin
 /// mint endpoint. Lets test harnesses (and any caller that wants to
 /// drive the `authorization_code` grant before the Y4 hosted-UI lands)

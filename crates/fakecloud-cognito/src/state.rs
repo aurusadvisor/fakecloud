@@ -111,6 +111,41 @@ pub struct CognitoState {
     /// `EventAction = BLOCK`.
     #[serde(default)]
     pub compromised_password_hashes: std::collections::BTreeSet<String>,
+    /// PreTokenGeneration Lambda trigger invocation log.
+    /// Captured every time `InitiateAuth` fires the
+    /// `TokenGeneration_Authentication` trigger and the Lambda returns,
+    /// regardless of whether the response actually contained an override
+    /// block. Surfaced via `/_fakecloud/cognito/pretokengen/invocations`
+    /// so tests can assert the claim mutation flow end-to-end without
+    /// inspecting the JWT they just received.
+    #[serde(default, skip)]
+    pub pre_token_gen_invocations: Vec<PreTokenGenInvocation>,
+}
+
+/// One PreTokenGeneration Lambda trigger invocation captured for
+/// introspection. `claims_added` / `claims_overridden` /
+/// `group_overrides` are pre-parsed from the trigger response so test
+/// callers don't have to walk the `claimsAndScopeOverrideDetails`
+/// shape themselves.
+#[derive(Debug, Clone, Serialize)]
+pub struct PreTokenGenInvocation {
+    pub pool_id: String,
+    pub user_pool_arn: String,
+    pub username: String,
+    pub trigger_source: String,
+    pub lambda_arn: String,
+    pub request_payload: serde_json::Value,
+    pub response_payload: Option<serde_json::Value>,
+    /// Keys added or overridden across both id-token and access-token
+    /// `claimsToAddOrOverride` blocks.
+    pub claims_added: Vec<String>,
+    /// Keys suppressed across both id-token and access-token
+    /// `claimsToSuppress` blocks.
+    pub claims_overridden: Vec<String>,
+    /// Contents of `groupOverrideDetails.groupsToOverride` if present.
+    pub group_overrides: Vec<String>,
+    pub invoked_at: DateTime<Utc>,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -194,6 +229,7 @@ impl CognitoState {
             identity_pool_role_attachments: BTreeMap::new(),
             federated_identities: BTreeMap::new(),
             compromised_password_hashes: std::collections::BTreeSet::new(),
+            pre_token_gen_invocations: Vec::new(),
         }
     }
 
@@ -222,6 +258,7 @@ impl CognitoState {
         self.identity_pools.clear();
         self.identity_pool_role_attachments.clear();
         self.federated_identities.clear();
+        self.pre_token_gen_invocations.clear();
     }
 }
 

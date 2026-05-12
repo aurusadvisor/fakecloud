@@ -410,6 +410,32 @@ export interface AuthEventsResponse {
 }
 
 /**
+ * One PreTokenGeneration Lambda trigger invocation captured by
+ * `InitiateAuth`. `claimsAdded` / `claimsOverridden` / `groupOverrides`
+ * are pre-parsed from the Lambda response so tests don't have to walk
+ * the raw `claimsAndScopeOverrideDetails` shape themselves.
+ */
+export interface PreTokenGenInvocation {
+  poolId: string;
+  userPoolArn: string;
+  username: string;
+  triggerSource: string;
+  lambdaArn: string;
+  requestPayload: Record<string, unknown>;
+  responsePayload?: Record<string, unknown> | null;
+  claimsAdded: string[];
+  claimsOverridden: string[];
+  groupOverrides: string[];
+  /** RFC3339 timestamp. */
+  invokedAt: string;
+  durationMs: number;
+}
+
+export interface PreTokenGenInvocationsResponse {
+  invocations: PreTokenGenInvocation[];
+}
+
+/**
  * Payload for `POST /_fakecloud/cognito/authorization-codes`. Lets
  * test harnesses pre-allocate a single-use OAuth2 authorization code
  * that the `/oauth2/token` `authorization_code` grant later consumes.

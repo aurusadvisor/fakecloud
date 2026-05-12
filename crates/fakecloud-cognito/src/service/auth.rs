@@ -8,8 +8,8 @@ use uuid::Uuid;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{
-    AccessTokenData, AuthEvent, ChallengeResult, CognitoState, RefreshTokenData, SessionData,
-    UserAttribute,
+    AccessTokenData, AuthEvent, ChallengeResult, CognitoState, PreTokenGenInvocation,
+    RefreshTokenData, SessionData, SharedCognitoState, UserAttribute,
 };
 use crate::triggers::{self, TriggerSource};
 use crate::user_status;
@@ -680,9 +680,29 @@ impl CognitoService {
                     &region,
                     &account_id,
                 );
-                triggers::invoke_trigger(ctx, &function_arn, &event)
-                    .await
-                    .and_then(|resp| resp.get("response").cloned())
+                let started = std::time::Instant::now();
+                let invoked_at = chrono::Utc::now();
+                let raw_response = triggers::invoke_trigger(ctx, &function_arn, &event).await;
+                let duration_ms = started.elapsed().as_millis() as u64;
+                let overrides = raw_response
+                    .as_ref()
+                    .and_then(|resp| resp.get("response").cloned());
+
+                record_pre_token_gen_invocation(
+                    &self.state,
+                    &req.account_id,
+                    pool_id,
+                    &region,
+                    &account_id,
+                    username,
+                    &function_arn,
+                    &event,
+                    raw_response.as_ref(),
+                    invoked_at,
+                    duration_ms,
+                );
+
+                overrides
             } else {
                 None
             }
@@ -2408,6 +2428,100 @@ impl CognitoService {
     }
 }
 
+/// Append one PreTokenGeneration trigger invocation to the per-account
+/// introspection log. Pulls out the override block already so callers
+/// at `/_fakecloud/cognito/pretokengen/invocations` get parsed
+/// `claims_added` / `claims_overridden` / `group_overrides` instead of
+/// having to walk the raw Lambda response themselves.
+#[allow(clippy::too_many_arguments)]
+fn record_pre_token_gen_invocation(
+    state: &SharedCognitoState,
+    account_id_key: &str,
+    pool_id: &str,
+    region: &str,
+    account_id: &str,
+    username: &str,
+    function_arn: &str,
+    event: &Value,
+    raw_response: Option<&Value>,
+    invoked_at: chrono::DateTime<Utc>,
+    duration_ms: u64,
+) {
+    let user_pool_arn = format!("arn:aws:cognito-idp:{region}:{account_id}:userpool/{pool_id}");
+
+    let mut claims_added: Vec<String> = Vec::new();
+    let mut claims_overridden: Vec<String> = Vec::new();
+    let mut group_overrides: Vec<String> = Vec::new();
+
+    if let Some(resp) = raw_response {
+        let ov = &resp["response"];
+        let v2 = &ov["claimsAndScopeOverrideDetails"];
+        let v1 = &ov["claimsOverrideDetails"];
+        let id_block = if !v2.is_null() {
+            &v2["idTokenGeneration"]
+        } else {
+            v1
+        };
+        let access_block = if !v2.is_null() {
+            &v2["accessTokenGeneration"]
+        } else {
+            v1
+        };
+        let group_block = if !v2.is_null() {
+            &v2["groupOverrideDetails"]
+        } else {
+            &v1["groupOverrideDetails"]
+        };
+        for block in [id_block, access_block] {
+            if let Some(adds) = block["claimsToAddOrOverride"].as_object() {
+                for k in adds.keys() {
+                    if !claims_added.contains(k) {
+                        claims_added.push(k.clone());
+                    }
+                }
+            }
+            if let Some(suppress) = block["claimsToSuppress"].as_array() {
+                for v in suppress {
+                    if let Some(k) = v.as_str() {
+                        let k = k.to_string();
+                        if !claims_overridden.contains(&k) {
+                            claims_overridden.push(k);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(arr) = group_block["groupsToOverride"].as_array() {
+            for v in arr {
+                if let Some(s) = v.as_str() {
+                    group_overrides.push(s.to_string());
+                }
+            }
+        }
+    }
+
+    let invocation = PreTokenGenInvocation {
+        pool_id: pool_id.to_string(),
+        user_pool_arn,
+        username: username.to_string(),
+        trigger_source: TriggerSource::TokenGenerationAuthentication
+            .as_str()
+            .to_string(),
+        lambda_arn: function_arn.to_string(),
+        request_payload: event.clone(),
+        response_payload: raw_response.cloned(),
+        claims_added,
+        claims_overridden,
+        group_overrides,
+        invoked_at,
+        duration_ms,
+    };
+
+    let mut accounts = state.write();
+    let s = accounts.get_or_create(account_id_key);
+    s.pre_token_gen_invocations.push(invocation);
+}
+
 #[cfg(test)]
 mod risk_tests {
     use super::*;
@@ -2483,6 +2597,100 @@ mod risk_tests {
             "DifferentPassword!",
         );
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn pretokengen_invocation_records_parsed_overrides() {
+        let svc = make_service();
+        let event = json!({
+            "version": "2",
+            "triggerSource": "TokenGeneration_Authentication",
+            "userPoolId": "pool-x",
+            "userName": "alice",
+        });
+        let response = json!({
+            "response": {
+                "claimsAndScopeOverrideDetails": {
+                    "idTokenGeneration": {
+                        "claimsToAddOrOverride": {"role": "admin", "tier": "gold"},
+                        "claimsToSuppress": ["email"],
+                    },
+                    "accessTokenGeneration": {
+                        "claimsToAddOrOverride": {"scope_extra": "x"},
+                        "claimsToSuppress": ["phone_number"],
+                    },
+                    "groupOverrideDetails": {
+                        "groupsToOverride": ["admins", "beta"],
+                    },
+                }
+            }
+        });
+        record_pre_token_gen_invocation(
+            &svc.state,
+            "123456789012",
+            "pool-x",
+            "us-east-1",
+            "123456789012",
+            "alice",
+            "arn:aws:lambda:us-east-1:123456789012:function:pretoken",
+            &event,
+            Some(&response),
+            chrono::Utc::now(),
+            42,
+        );
+
+        let accounts = svc.state.read();
+        let s = accounts.get("123456789012").expect("account exists");
+        assert_eq!(s.pre_token_gen_invocations.len(), 1);
+        let inv = &s.pre_token_gen_invocations[0];
+        assert_eq!(inv.pool_id, "pool-x");
+        assert_eq!(inv.username, "alice");
+        assert_eq!(
+            inv.user_pool_arn,
+            "arn:aws:cognito-idp:us-east-1:123456789012:userpool/pool-x"
+        );
+        assert_eq!(
+            inv.lambda_arn,
+            "arn:aws:lambda:us-east-1:123456789012:function:pretoken"
+        );
+        assert_eq!(inv.duration_ms, 42);
+        assert!(inv.claims_added.contains(&"role".to_string()));
+        assert!(inv.claims_added.contains(&"tier".to_string()));
+        assert!(inv.claims_added.contains(&"scope_extra".to_string()));
+        assert!(inv.claims_overridden.contains(&"email".to_string()));
+        assert!(inv.claims_overridden.contains(&"phone_number".to_string()));
+        assert_eq!(
+            inv.group_overrides,
+            vec!["admins".to_string(), "beta".to_string()]
+        );
+        assert_eq!(inv.trigger_source, "TokenGeneration_Authentication");
+    }
+
+    #[test]
+    fn pretokengen_invocation_records_no_overrides() {
+        let svc = make_service();
+        let event = json!({"triggerSource": "TokenGeneration_Authentication"});
+        record_pre_token_gen_invocation(
+            &svc.state,
+            "123456789012",
+            "pool-x",
+            "us-east-1",
+            "123456789012",
+            "bob",
+            "arn:aws:lambda:us-east-1:123456789012:function:pretoken",
+            &event,
+            None,
+            chrono::Utc::now(),
+            7,
+        );
+        let accounts = svc.state.read();
+        let s = accounts.get("123456789012").expect("account exists");
+        assert_eq!(s.pre_token_gen_invocations.len(), 1);
+        let inv = &s.pre_token_gen_invocations[0];
+        assert!(inv.claims_added.is_empty());
+        assert!(inv.claims_overridden.is_empty());
+        assert!(inv.group_overrides.is_empty());
+        assert!(inv.response_payload.is_none());
     }
 
     #[test]

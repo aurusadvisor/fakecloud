@@ -17,9 +17,9 @@ pub use state::{
     default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig,
     AuthorizationCodeData, CognitoIdentityProvider, CognitoSnapshot, CognitoState,
     CustomDomainConfig, EmailConfiguration, FederatedIdentity, IdentityPool,
-    IdentityPoolRoleAttachment, PasswordPolicy, PoolPolicies, RecoveryOption, SchemaAttribute,
-    SharedCognitoState, SignInPolicy, SmsConfiguration, UserPool, UserPoolClient, UserPoolDomain,
-    COGNITO_SNAPSHOT_SCHEMA_VERSION,
+    IdentityPoolRoleAttachment, PasswordPolicy, PoolPolicies, PreTokenGenInvocation,
+    RecoveryOption, SchemaAttribute, SharedCognitoState, SignInPolicy, SmsConfiguration, UserPool,
+    UserPoolClient, UserPoolDomain, COGNITO_SNAPSHOT_SCHEMA_VERSION,
 };
 
 /// `CognitoJwtVerifier` impl backed by the in-process Cognito state.

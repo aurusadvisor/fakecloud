@@ -368,6 +368,10 @@ async fn cognito_custom_email_sender_lambda_takes_precedence_over_ses() {
 }
 
 fn build_python_handler_zip() -> Vec<u8> {
+    build_python_handler_zip_with_source("def handler(event, context):\n    return event\n")
+}
+
+fn build_python_handler_zip_with_source(src: &str) -> Vec<u8> {
     use std::io::Write;
     let mut buf = Vec::new();
     {
@@ -375,9 +379,214 @@ fn build_python_handler_zip() -> Vec<u8> {
         let opts: zip::write::FileOptions<'_, ()> =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
         zip.start_file("index.py", opts).unwrap();
-        zip.write_all(b"def handler(event, context):\n    return event\n")
-            .unwrap();
+        zip.write_all(src.as_bytes()).unwrap();
         zip.finish().unwrap();
     }
     buf
+}
+
+#[tokio::test]
+async fn cognito_pretokengen_invocation_is_recorded() {
+    use aws_sdk_cognitoidentityprovider::types::{
+        AuthFlowType, MessageActionType, UserPoolMfaType,
+    };
+    use aws_sdk_lambda::types::{FunctionCode, Runtime};
+
+    let server = TestServer::start().await;
+    let cognito = server.cognito_client().await;
+    let lambda = server.lambda_client().await;
+    let iam = server.iam_client().await;
+    let http = reqwest::Client::new();
+
+    iam.create_role()
+        .role_name("cognito-pretokengen-role")
+        .assume_role_policy_document(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // PreTokenGen Lambda that injects a custom claim, suppresses one,
+    // and overrides the cognito:groups list. The merge expects v2
+    // shape under `response.claimsAndScopeOverrideDetails`.
+    let src = r#"
+def handler(event, context):
+    event["response"] = {
+        "claimsAndScopeOverrideDetails": {
+            "idTokenGeneration": {
+                "claimsToAddOrOverride": {"tier": "gold"},
+                "claimsToSuppress": ["email"],
+            },
+            "accessTokenGeneration": {
+                "claimsToAddOrOverride": {},
+                "claimsToSuppress": [],
+            },
+            "groupOverrideDetails": {
+                "groupsToOverride": ["admins"],
+            },
+        }
+    }
+    return event
+"#;
+    let zip_bytes = build_python_handler_zip_with_source(src);
+    lambda
+        .create_function()
+        .function_name("pretokengen-fn")
+        .runtime(Runtime::Python311)
+        .role("arn:aws:iam::123456789012:role/cognito-pretokengen-role")
+        .handler("index.handler")
+        .code(FunctionCode::builder().zip_file(zip_bytes.into()).build())
+        .send()
+        .await
+        .unwrap();
+
+    let pool = cognito
+        .create_user_pool()
+        .pool_name("pretokengen-pool")
+        .mfa_configuration(UserPoolMfaType::Off)
+        .lambda_config(
+            aws_sdk_cognitoidentityprovider::types::LambdaConfigType::builder()
+                .pre_token_generation(
+                    "arn:aws:lambda:us-east-1:123456789012:function:pretokengen-fn",
+                )
+                .build(),
+        )
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let pc = cognito
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("pretokengen-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowUserPasswordAuth)
+        .send()
+        .await
+        .unwrap();
+    let client_id = pc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    // AdminCreateUser + AdminSetUserPassword so the user is confirmed
+    // and we can drive InitiateAuth without a confirmation step.
+    cognito
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("alice")
+        .message_action(MessageActionType::Suppress)
+        .send()
+        .await
+        .unwrap();
+    cognito
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("alice")
+        .password("hunter2")
+        .permanent(true)
+        .send()
+        .await
+        .unwrap();
+
+    let auth = cognito
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "alice")
+        .auth_parameters("PASSWORD", "hunter2")
+        .send()
+        .await
+        .expect("initiate_auth should succeed");
+    assert!(auth.authentication_result().is_some());
+
+    // Pull invocation log from the new introspection endpoint.
+    let resp: serde_json::Value = http
+        .get(format!(
+            "{}/_fakecloud/cognito/pretokengen/invocations",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let invs = resp["invocations"].as_array().expect("invocations array");
+    let inv = invs
+        .iter()
+        .find(|i| i["poolId"].as_str() == Some(pool_id.as_str()))
+        .expect("invocation for our pool");
+    assert_eq!(inv["username"].as_str(), Some("alice"));
+    assert_eq!(
+        inv["triggerSource"].as_str(),
+        Some("TokenGeneration_Authentication")
+    );
+    assert_eq!(
+        inv["lambdaArn"].as_str(),
+        Some("arn:aws:lambda:us-east-1:123456789012:function:pretokengen-fn")
+    );
+    assert_eq!(
+        inv["userPoolArn"].as_str(),
+        Some(format!("arn:aws:cognito-idp:us-east-1:123456789012:userpool/{pool_id}").as_str())
+    );
+    let claims_added: Vec<&str> = inv["claimsAdded"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        claims_added.contains(&"tier"),
+        "expected `tier` in claims_added, got {claims_added:?}"
+    );
+    let claims_overridden: Vec<&str> = inv["claimsOverridden"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        claims_overridden.contains(&"email"),
+        "expected `email` suppressed, got {claims_overridden:?}"
+    );
+    let group_overrides: Vec<&str> = inv["groupOverrides"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(group_overrides, vec!["admins"]);
+    assert!(inv["requestPayload"].is_object());
+    assert!(inv["responsePayload"].is_object());
+    assert!(inv["invokedAt"].is_string());
+    assert!(inv["durationMs"].is_number());
+
+    // Confirm the SDK helper sees the same entry.
+    let sdk = fakecloud_sdk::FakeCloud::new(server.endpoint());
+    let sdk_resp = sdk
+        .cognito()
+        .get_pre_token_gen_invocations()
+        .await
+        .expect("sdk getPreTokenGenInvocations");
+    assert!(sdk_resp
+        .invocations
+        .iter()
+        .any(|i| i.pool_id == pool_id && i.username == "alice"));
 }

@@ -491,6 +491,30 @@ type AuthEventsResponse struct {
 	Events []AuthEvent `json:"events"`
 }
 
+// PreTokenGenInvocation is one PreTokenGeneration Lambda trigger
+// invocation captured by InitiateAuth. ClaimsAdded / ClaimsOverridden /
+// GroupOverrides are pre-parsed from the Lambda response.
+type PreTokenGenInvocation struct {
+	PoolID           string                 `json:"poolId"`
+	UserPoolARN      string                 `json:"userPoolArn"`
+	Username         string                 `json:"username"`
+	TriggerSource    string                 `json:"triggerSource"`
+	LambdaARN        string                 `json:"lambdaArn"`
+	RequestPayload   map[string]interface{} `json:"requestPayload"`
+	ResponsePayload  map[string]interface{} `json:"responsePayload,omitempty"`
+	ClaimsAdded      []string               `json:"claimsAdded"`
+	ClaimsOverridden []string               `json:"claimsOverridden"`
+	GroupOverrides   []string               `json:"groupOverrides"`
+	InvokedAt        string                 `json:"invokedAt"`
+	DurationMs       uint64                 `json:"durationMs"`
+}
+
+// PreTokenGenInvocationsResponse is the shape returned by
+// /_fakecloud/cognito/pretokengen/invocations.
+type PreTokenGenInvocationsResponse struct {
+	Invocations []PreTokenGenInvocation `json:"invocations"`
+}
+
 // MintAuthorizationCodeRequest is the payload for the
 // /_fakecloud/cognito/authorization-codes admin endpoint. Lets test
 // harnesses mint a single-use OAuth2 authorization code that the

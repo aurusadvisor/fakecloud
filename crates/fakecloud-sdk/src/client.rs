@@ -679,6 +679,26 @@ impl CognitoClient<'_> {
             .await?;
         FakeCloud::parse(resp).await
     }
+
+    /// List PreTokenGeneration Lambda trigger invocations recorded
+    /// during `InitiateAuth`. Each entry includes the full request /
+    /// response payloads plus pre-parsed `claims_added`,
+    /// `claims_overridden`, and `group_overrides` so tests can assert
+    /// the claim mutation flow without inspecting the issued JWT.
+    pub async fn get_pre_token_gen_invocations(
+        &self,
+    ) -> Result<PreTokenGenInvocationsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/cognito/pretokengen/invocations",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
 }
 
 // ── API Gateway v2 ──────────────────────────────────────────────────
