@@ -163,9 +163,7 @@ class ElastiCacheClient:
         return ElastiCacheServerlessCachesResponse.from_dict(resp.json())
 
     async def get_elasti_cache_acls(self) -> ElastiCacheAclsResponse:
-        resp = await self._client.get(
-            f"{self._base}/_fakecloud/elasticache/acls"
-        )
+        resp = await self._client.get(f"{self._base}/_fakecloud/elasticache/acls")
         _check(resp)
         return ElastiCacheAclsResponse.from_dict(resp.json())
 
