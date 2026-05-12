@@ -686,6 +686,56 @@ pub struct StepFunctionsExecutionsResponse {
     pub executions: Vec<StepFunctionsExecution>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepFunctionsSyncBillingDetails {
+    pub billed_duration_in_milliseconds: i64,
+    pub billed_memory_used_in_mb: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepFunctionsSyncExecution {
+    pub execution_arn: String,
+    pub state_machine_arn: String,
+    pub name: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    pub started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stopped_at: Option<String>,
+    pub duration_ms: i64,
+    pub billing_details: StepFunctionsSyncBillingDetails,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepFunctionsSyncExecutionsResponse {
+    pub executions: Vec<StepFunctionsSyncExecution>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepFunctionsExecutionTreeNode {
+    pub arn: String,
+    pub state_machine_arn: String,
+    pub status: String,
+    pub started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stopped_at: Option<String>,
+    pub children: Vec<StepFunctionsExecutionTreeNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepFunctionsExecutionTreeResponse {
+    pub root_arn: String,
+    pub tree: StepFunctionsExecutionTreeNode,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SfnEnqueueActivityTaskRequest {

@@ -28,6 +28,10 @@ fn create_execution(state: &SharedStepFunctionsState, arn: &str, input: Option<S
             error: None,
             cause: None,
             history_events: vec![],
+            parent_execution_arn: None,
+            is_sync: false,
+            billed_duration_ms: None,
+            billed_memory_mb: None,
         },
     );
 }

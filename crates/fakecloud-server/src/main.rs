@@ -5412,6 +5412,122 @@ async fn main() {
             }),
         )
         .route(
+            "/_fakecloud/stepfunctions/sync-executions",
+            axum::routing::get({
+                let ss = stepfunctions_state.clone();
+                move || {
+                    let ss = ss.clone();
+                    async move {
+                        let accounts = ss.read();
+                        let state = accounts.default_ref();
+                        let mut executions: Vec<types::StepFunctionsSyncExecution> = state
+                            .executions
+                            .values()
+                            .filter(|exec| exec.is_sync)
+                            .map(|exec| {
+                                let duration_ms = exec.billed_duration_ms.unwrap_or_else(|| {
+                                    exec.stop_date.map_or(0, |stop| {
+                                        (stop - exec.start_date).num_milliseconds().max(0)
+                                    })
+                                });
+                                types::StepFunctionsSyncExecution {
+                                    execution_arn: exec.execution_arn.clone(),
+                                    state_machine_arn: exec.state_machine_arn.clone(),
+                                    name: exec.name.clone(),
+                                    status: exec.status.as_str().to_string(),
+                                    input: exec.input.clone(),
+                                    output: exec.output.clone(),
+                                    started_at: exec.start_date.to_rfc3339(),
+                                    stopped_at: exec.stop_date.map(|d| d.to_rfc3339()),
+                                    duration_ms,
+                                    billing_details: types::StepFunctionsSyncBillingDetails {
+                                        billed_duration_in_milliseconds: duration_ms,
+                                        billed_memory_used_in_mb: exec
+                                            .billed_memory_mb
+                                            .unwrap_or(64),
+                                    },
+                                }
+                            })
+                            .collect();
+                        executions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                        axum::Json(types::StepFunctionsSyncExecutionsResponse { executions })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/stepfunctions/execution-tree/{arn}",
+            axum::routing::get({
+                let ss = stepfunctions_state.clone();
+                move |axum::extract::Path(arn): axum::extract::Path<String>| {
+                    let ss = ss.clone();
+                    async move {
+                        let accounts = ss.read();
+                        let state = accounts.default_ref();
+                        // Index children by parent arn for O(N) tree build.
+                        let mut children_by_parent: std::collections::HashMap<
+                            String,
+                            Vec<&fakecloud_stepfunctions::state::Execution>,
+                        > = std::collections::HashMap::new();
+                        for exec in state.executions.values() {
+                            if let Some(parent) = exec.parent_execution_arn.as_ref() {
+                                children_by_parent
+                                    .entry(parent.clone())
+                                    .or_default()
+                                    .push(exec);
+                            }
+                        }
+                        fn build_node(
+                            exec: &fakecloud_stepfunctions::state::Execution,
+                            children_by_parent: &std::collections::HashMap<
+                                String,
+                                Vec<&fakecloud_stepfunctions::state::Execution>,
+                            >,
+                        ) -> types::StepFunctionsExecutionTreeNode {
+                            let kids = children_by_parent
+                                .get(&exec.execution_arn)
+                                .map(|v| {
+                                    let mut sorted = v.clone();
+                                    sorted.sort_by(|a, b| a.start_date.cmp(&b.start_date));
+                                    sorted
+                                        .into_iter()
+                                        .map(|c| build_node(c, children_by_parent))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            types::StepFunctionsExecutionTreeNode {
+                                arn: exec.execution_arn.clone(),
+                                state_machine_arn: exec.state_machine_arn.clone(),
+                                status: exec.status.as_str().to_string(),
+                                started_at: exec.start_date.to_rfc3339(),
+                                stopped_at: exec.stop_date.map(|d| d.to_rfc3339()),
+                                children: kids,
+                            }
+                        }
+                        match state.executions.get(&arn) {
+                            Some(root) => (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::to_value(
+                                    types::StepFunctionsExecutionTreeResponse {
+                                        root_arn: root.execution_arn.clone(),
+                                        tree: build_node(root, &children_by_parent),
+                                    },
+                                )
+                                .unwrap_or_else(|_| serde_json::json!({}))),
+                            ),
+                            None => (
+                                axum::http::StatusCode::NOT_FOUND,
+                                axum::Json(serde_json::json!({
+                                    "error": "ExecutionDoesNotExist",
+                                    "message": format!("Execution Does Not Exist: '{}'", arn),
+                                })),
+                            ),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
             "/_fakecloud/apigatewayv2/requests",
             axum::routing::get({
                 let apigw_state = apigatewayv2_state.clone();

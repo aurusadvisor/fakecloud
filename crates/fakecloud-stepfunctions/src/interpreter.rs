@@ -1137,8 +1137,29 @@ async fn invoke_resource(
     if let Some(tail) = resource.strip_prefix("arn:aws:states:::") {
         if tail.starts_with("states:startExecution") {
             let account_id = account_from_execution_arn(execution_arn);
-            return invoke_aws_sdk_integration(tail, input, registry, &account_id, timeout_seconds)
-                .await;
+            let result =
+                invoke_aws_sdk_integration(tail, input, registry, &account_id, timeout_seconds)
+                    .await;
+            // Patch the inner execution's parent_execution_arn so the
+            // `/execution-tree` introspection can walk back-references.
+            // For `.sync`, the result is the DescribeExecution shape
+            // (has `executionArn`); for fire-and-forget StartExecution the
+            // initial StartExecution response also carries `executionArn`.
+            if let Ok(ref value) = result {
+                if let Some(inner_arn) = value
+                    .get("executionArn")
+                    .or_else(|| value.get("ExecutionArn"))
+                    .and_then(Value::as_str)
+                {
+                    let mut accounts = shared_state.write();
+                    if let Some(state) = accounts.get_mut(&account_id) {
+                        if let Some(exec) = state.executions.get_mut(inner_arn) {
+                            exec.parent_execution_arn = Some(execution_arn.to_string());
+                        }
+                    }
+                }
+            }
+            return result;
         }
     }
 
