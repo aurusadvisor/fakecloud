@@ -727,9 +727,7 @@ impl StepFunctionsClient<'_> {
     /// List `StartSyncExecution` invocations with billing details. EXPRESS state
     /// machines only — async (`StartExecution`) calls show up under
     /// [`Self::get_executions`] instead.
-    pub async fn get_sync_executions(
-        &self,
-    ) -> Result<StepFunctionsSyncExecutionsResponse, Error> {
+    pub async fn get_sync_executions(&self) -> Result<StepFunctionsSyncExecutionsResponse, Error> {
         let resp = self
             .fc
             .client
