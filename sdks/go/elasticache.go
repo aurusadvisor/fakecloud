@@ -33,3 +33,13 @@ func (c *ElastiCacheClient) GetServerlessCaches(ctx context.Context) (*ElastiCac
 	}
 	return &out, nil
 }
+
+// GetElastiCacheAcls returns ACL state (users + user groups) for ElastiCache
+// replication groups that have one or more user groups attached.
+func (c *ElastiCacheClient) GetElastiCacheAcls(ctx context.Context) (*ElastiCacheAclsResponse, error) {
+	var out ElastiCacheAclsResponse
+	if err := c.fc.doGet(ctx, "/_fakecloud/elasticache/acls", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

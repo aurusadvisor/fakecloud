@@ -35,6 +35,7 @@ from fakecloud.types import (
     EcsTask,
     EcsTaskLogsResponse,
     EcsTasksResponse,
+    ElastiCacheAclsResponse,
     ElastiCacheClustersResponse,
     ElastiCacheReplicationGroupsResponse,
     ElastiCacheServerlessCachesResponse,
@@ -160,6 +161,13 @@ class ElastiCacheClient:
         )
         _check(resp)
         return ElastiCacheServerlessCachesResponse.from_dict(resp.json())
+
+    async def get_elasti_cache_acls(self) -> ElastiCacheAclsResponse:
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/elasticache/acls"
+        )
+        _check(resp)
+        return ElastiCacheAclsResponse.from_dict(resp.json())
 
 
 class EcrClient:
@@ -1074,6 +1082,11 @@ class _SyncElastiCacheClient:
         )
         _check(resp)
         return ElastiCacheServerlessCachesResponse.from_dict(resp.json())
+
+    def get_elasti_cache_acls(self) -> ElastiCacheAclsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/elasticache/acls")
+        _check(resp)
+        return ElastiCacheAclsResponse.from_dict(resp.json())
 
 
 class _SyncLogsClient:

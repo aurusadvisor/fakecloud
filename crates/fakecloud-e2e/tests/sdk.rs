@@ -238,6 +238,112 @@ async fn sdk_elasticache_get_serverless_caches() {
     assert_eq!(cache.status, "available");
 }
 
+#[tokio::test]
+async fn sdk_elasticache_get_acls() {
+    // Needs Docker because the replication group must actually come up
+    // before its `UserGroupIds` is committed.
+    if std::process::Command::new("docker")
+        .arg("info")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| !s.success())
+        .unwrap_or(true)
+    {
+        if std::env::var("CI").is_ok() {
+            panic!("docker is required for sdk_elasticache_get_acls in CI");
+        }
+        eprintln!("Skipping sdk_elasticache_get_acls: docker not available");
+        return;
+    }
+
+    let server = TestServer::start().await;
+    let fc = FakeCloud::new(server.endpoint());
+    let ec = server.elasticache_client().await;
+
+    // Create a non-default user with a real password (no_password_required=false).
+    ec.create_user()
+        .user_id("acl-app")
+        .user_name("acl-app")
+        .engine("redis")
+        .access_string("on ~app:* +get +set")
+        .passwords("s3cret-token-of-acceptable-length")
+        .send()
+        .await
+        .unwrap();
+
+    // Attach the user to a user group.
+    ec.create_user_group()
+        .user_group_id("acl-ug")
+        .engine("redis")
+        .user_ids("default")
+        .user_ids("acl-app")
+        .send()
+        .await
+        .unwrap();
+
+    // Pin the user group onto a replication group.
+    ec.create_replication_group()
+        .replication_group_id("sdk-acl-rg")
+        .replication_group_description("ACL introspection")
+        .cache_node_type("cache.t3.micro")
+        .engine("redis")
+        .engine_version("7.1")
+        .transit_encryption_enabled(true)
+        .user_group_ids("acl-ug")
+        .send()
+        .await
+        .unwrap();
+
+    // Second replication group without any ACL — should be filtered out.
+    ec.create_replication_group()
+        .replication_group_id("sdk-noacl-rg")
+        .replication_group_description("no ACL")
+        .cache_node_type("cache.t3.micro")
+        .engine("redis")
+        .engine_version("7.1")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = fc
+        .elasticache()
+        .get_acls()
+        .await
+        .expect("get ElastiCache ACLs");
+
+    assert_eq!(
+        resp.acls.len(),
+        1,
+        "only replication groups with user groups attached should appear: {:?}",
+        resp.acls.iter().map(|a| &a.cluster_id).collect::<Vec<_>>()
+    );
+    let cluster = &resp.acls[0];
+    assert_eq!(cluster.cluster_id, "sdk-acl-rg");
+    assert_eq!(cluster.engine, "redis");
+    assert_eq!(cluster.groups.len(), 1);
+    assert_eq!(cluster.groups[0].name, "acl-ug");
+    assert!(cluster.groups[0].members.contains(&"default".to_string()));
+    assert!(cluster.groups[0].members.contains(&"acl-app".to_string()));
+
+    let app = cluster
+        .users
+        .iter()
+        .find(|u| u.name == "acl-app")
+        .expect("acl-app user in ACL response");
+    assert!(!app.no_password_required);
+    assert_eq!(app.password_count, 1);
+    assert_eq!(app.access_string, "on ~app:* +get +set");
+
+    let default_user = cluster
+        .users
+        .iter()
+        .find(|u| u.name == "default")
+        .expect("default user in ACL response");
+    assert!(default_user.no_password_required);
+    assert_eq!(default_user.password_count, 0);
+}
+
 // ── SQS ────────────────────────────────────────────────────────────
 
 #[tokio::test]

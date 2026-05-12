@@ -201,6 +201,61 @@ pub(crate) fn elasticache_replication_group_response(
     }
 }
 
+/// Aggregate ACL state (users + user groups) for every replication group
+/// that has at least one user group attached.
+///
+/// AWS ElastiCache exposes user/usergroup state via `DescribeUsers` and
+/// `DescribeUserGroups`, but pinning the membership graph to specific
+/// clusters requires correlating `ReplicationGroup.user_group_ids` →
+/// `UserGroup.user_ids` → `User`. We do that join here so test authors
+/// can assert against a single shape.
+pub(crate) fn elasticache_acls_response(
+    state: &fakecloud_elasticache::ElastiCacheState,
+) -> types::ElastiCacheAclsResponse {
+    let mut acls: Vec<types::ElastiCacheAclCluster> = state
+        .replication_groups
+        .values()
+        .filter(|rg| !rg.user_group_ids.is_empty())
+        .map(|rg| {
+            let groups: Vec<types::ElastiCacheAclGroup> = rg
+                .user_group_ids
+                .iter()
+                .filter_map(|gid| state.user_groups.get(gid))
+                .map(|g| types::ElastiCacheAclGroup {
+                    name: g.user_group_id.clone(),
+                    members: g.user_ids.clone(),
+                })
+                .collect();
+            // Collect the unique user ids referenced by all attached groups.
+            let mut user_ids: Vec<String> = groups
+                .iter()
+                .flat_map(|g| g.members.iter().cloned())
+                .collect();
+            user_ids.sort();
+            user_ids.dedup();
+            let users: Vec<types::ElastiCacheAclUser> = user_ids
+                .iter()
+                .filter_map(|uid| state.users.get(uid))
+                .map(|u| types::ElastiCacheAclUser {
+                    name: u.user_name.clone(),
+                    status: u.status.clone(),
+                    access_string: u.access_string.clone(),
+                    no_password_required: u.authentication_type == "no-password",
+                    password_count: u.password_count,
+                })
+                .collect();
+            types::ElastiCacheAclCluster {
+                cluster_id: rg.replication_group_id.clone(),
+                engine: rg.engine.clone(),
+                users,
+                groups,
+            }
+        })
+        .collect();
+    acls.sort_by(|a, b| a.cluster_id.cmp(&b.cluster_id));
+    types::ElastiCacheAclsResponse { acls }
+}
+
 pub(crate) fn elasticache_serverless_cache_response(
     cache: &fakecloud_elasticache::ServerlessCache,
 ) -> types::ElastiCacheServerlessCacheIntrospection {
@@ -320,9 +375,134 @@ pub(crate) fn elbv2_rule_response(r: &fakecloud_elbv2::Rule) -> types::Elbv2Rule
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use fakecloud_elasticache::{
+        ElastiCacheState, ElastiCacheUser, ElastiCacheUserGroup, ReplicationGroup,
+    };
     use fakecloud_rds::DbInstance;
 
-    use super::rds_instance_response;
+    use super::{elasticache_acls_response, rds_instance_response};
+
+    fn test_replication_group(id: &str, user_group_ids: Vec<String>) -> ReplicationGroup {
+        ReplicationGroup {
+            replication_group_id: id.to_string(),
+            description: "test".to_string(),
+            global_replication_group_id: None,
+            global_replication_group_role: None,
+            status: "available".to_string(),
+            cache_node_type: "cache.t3.micro".to_string(),
+            engine: "redis".to_string(),
+            engine_version: "7.1".to_string(),
+            num_cache_clusters: 1,
+            automatic_failover_enabled: false,
+            endpoint_address: "127.0.0.1".to_string(),
+            endpoint_port: 6379,
+            arn: format!("arn:aws:elasticache:us-east-1:123456789012:replicationgroup:{id}"),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            container_id: "abc123".to_string(),
+            host_port: 12345,
+            member_clusters: vec![format!("{id}-001")],
+            snapshot_retention_limit: 0,
+            snapshot_window: "05:00-09:00".to_string(),
+            transit_encryption_enabled: false,
+            at_rest_encryption_enabled: false,
+            cluster_enabled: false,
+            kms_key_id: None,
+            auth_token_enabled: false,
+            user_group_ids,
+            multi_az_enabled: false,
+            log_delivery_configurations: Vec::new(),
+            data_tiering: None,
+            ip_discovery: None,
+            network_type: None,
+            transit_encryption_mode: None,
+            num_node_groups: 1,
+            configuration_endpoint_address: None,
+            configuration_endpoint_port: None,
+            replicas_per_node_group: None,
+            auth_token: None,
+            port: 6379,
+            notification_topic_arn: None,
+            cluster_mode: None,
+            data_tiering_enabled: None,
+            notification_topic_status: None,
+            cache_parameter_group_name: None,
+            cache_subnet_group_name: None,
+            security_group_ids: Vec::new(),
+            preferred_maintenance_window: None,
+            snapshot_name: None,
+            snapshot_arns: Vec::new(),
+            auto_minor_version_upgrade: true,
+        }
+    }
+
+    #[test]
+    fn elasticache_acls_aggregates_users_groups_per_cluster() {
+        let mut state = ElastiCacheState::new("123456789012", "us-east-1");
+
+        // Replication group with an attached user group; should appear in ACLs.
+        state.replication_groups.insert(
+            "rg-acl".to_string(),
+            test_replication_group("rg-acl", vec!["ug-prod".to_string()]),
+        );
+        // Replication group with no user groups; should be filtered out.
+        state.replication_groups.insert(
+            "rg-noacl".to_string(),
+            test_replication_group("rg-noacl", Vec::new()),
+        );
+
+        state.user_groups.insert(
+            "ug-prod".to_string(),
+            ElastiCacheUserGroup {
+                user_group_id: "ug-prod".to_string(),
+                engine: "redis".to_string(),
+                status: "active".to_string(),
+                user_ids: vec!["default".to_string(), "appuser".to_string()],
+                arn: "arn:aws:elasticache:us-east-1:123456789012:usergroup:ug-prod".to_string(),
+                minimum_engine_version: "6.0".to_string(),
+                pending_changes: None,
+                replication_groups: vec!["rg-acl".to_string()],
+            },
+        );
+        state.users.insert(
+            "appuser".to_string(),
+            ElastiCacheUser {
+                user_id: "appuser".to_string(),
+                user_name: "appuser".to_string(),
+                engine: "redis".to_string(),
+                access_string: "on ~app:* +get +set".to_string(),
+                status: "active".to_string(),
+                authentication_type: "password".to_string(),
+                password_count: 1,
+                arn: "arn:aws:elasticache:us-east-1:123456789012:user:appuser".to_string(),
+                minimum_engine_version: "6.0".to_string(),
+                user_group_ids: vec!["ug-prod".to_string()],
+            },
+        );
+
+        let resp = elasticache_acls_response(&state);
+
+        assert_eq!(resp.acls.len(), 1, "only clusters with ACLs included");
+        let cluster = &resp.acls[0];
+        assert_eq!(cluster.cluster_id, "rg-acl");
+        assert_eq!(cluster.engine, "redis");
+        assert_eq!(cluster.groups.len(), 1);
+        assert_eq!(cluster.groups[0].name, "ug-prod");
+        assert_eq!(cluster.groups[0].members, vec!["default", "appuser"]);
+
+        assert_eq!(cluster.users.len(), 2);
+        let names: Vec<&str> = cluster.users.iter().map(|u| u.name.as_str()).collect();
+        assert!(names.contains(&"default"));
+        assert!(names.contains(&"appuser"));
+
+        let default_user = cluster.users.iter().find(|u| u.name == "default").unwrap();
+        assert!(default_user.no_password_required);
+        assert_eq!(default_user.password_count, 0);
+        assert_eq!(default_user.access_string, "on ~* +@all");
+
+        let app_user = cluster.users.iter().find(|u| u.name == "appuser").unwrap();
+        assert!(!app_user.no_password_required);
+        assert_eq!(app_user.password_count, 1);
+    }
 
     #[test]
     fn rds_instance_response_omits_password_but_keeps_runtime_metadata() {

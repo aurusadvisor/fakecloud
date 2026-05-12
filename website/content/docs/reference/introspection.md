@@ -122,6 +122,7 @@ curl http://localhost:4566/_fakecloud/health
 | `/_fakecloud/elasticache/clusters` | GET | List cache clusters and node state. |
 | `/_fakecloud/elasticache/replication-groups` | GET | List replication groups with primary/replica layout. |
 | `/_fakecloud/elasticache/serverless-caches` | GET | List serverless cache resources. |
+| `/_fakecloud/elasticache/acls` | GET | List ACL state (users + user groups) for replication groups with user groups attached. |
 
 ## ELBv2
 

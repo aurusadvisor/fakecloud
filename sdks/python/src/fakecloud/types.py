@@ -218,6 +218,61 @@ class ElastiCacheServerlessCachesResponse:
         )
 
 
+@dataclass
+class ElastiCacheAclUser:
+    name: str
+    status: str
+    access_string: str
+    no_password_required: bool
+    password_count: int
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ElastiCacheAclUser:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class ElastiCacheAclGroup:
+    name: str
+    members: List[str]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ElastiCacheAclGroup:
+        d = _convert_keys(data)
+        return cls(name=d["name"], members=list(d.get("members", [])))
+
+
+@dataclass
+class ElastiCacheAclCluster:
+    cluster_id: str
+    engine: str
+    users: List[ElastiCacheAclUser]
+    groups: List[ElastiCacheAclGroup]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ElastiCacheAclCluster:
+        d = _convert_keys(data)
+        return cls(
+            cluster_id=d["cluster_id"],
+            engine=d["engine"],
+            users=[ElastiCacheAclUser.from_dict(u) for u in d.get("users", [])],
+            groups=[ElastiCacheAclGroup.from_dict(g) for g in d.get("groups", [])],
+        )
+
+
+@dataclass
+class ElastiCacheAclsResponse:
+    acls: List[ElastiCacheAclCluster]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ElastiCacheAclsResponse:
+        d = _convert_keys(data)
+        return cls(
+            acls=[ElastiCacheAclCluster.from_dict(a) for a in d.get("acls", [])],
+        )
+
+
 # ── Lambda ──────────────────────────────────────────────────────────
 
 

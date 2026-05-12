@@ -28,8 +28,9 @@ use cli::Cli;
 use dynamodb_streams_lambda_poller::DynamoDbStreamsLambdaPoller;
 use introspection::{
     ecr_image_response, ecr_pull_through_rule_response, ecr_repository_response,
-    ecs_cluster_response, ecs_lifecycle_event, ecs_task_response, elasticache_cluster_response,
-    elasticache_replication_group_response, elasticache_serverless_cache_response,
+    ecs_cluster_response, ecs_lifecycle_event, ecs_task_response, elasticache_acls_response,
+    elasticache_cluster_response, elasticache_replication_group_response,
+    elasticache_serverless_cache_response,
     elbv2_listener_response, elbv2_load_balancer_response, elbv2_rule_response,
     elbv2_target_group_response, rds_instance_response,
 };
@@ -4843,7 +4844,7 @@ async fn main() {
         .route(
             "/_fakecloud/elasticache/serverless-caches",
             axum::routing::get({
-                let ec = elasticache_introspection_state;
+                let ec = elasticache_introspection_state.clone();
                 move || {
                     let ec = ec.clone();
                     async move {
@@ -4859,6 +4860,20 @@ async fn main() {
                         serverless_caches
                             .sort_by(|a, b| a.serverless_cache_name.cmp(&b.serverless_cache_name));
                         axum::Json(types::ElastiCacheServerlessCachesResponse { serverless_caches })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/elasticache/acls",
+            axum::routing::get({
+                let ec = elasticache_introspection_state;
+                move || {
+                    let ec = ec.clone();
+                    async move {
+                        let accounts = ec.read();
+                        let state = accounts.default_ref();
+                        axum::Json(elasticache_acls_response(state))
                     }
                 }
             }),

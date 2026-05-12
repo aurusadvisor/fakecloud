@@ -250,6 +250,77 @@ final class ElastiCacheServerlessCachesResponse
     }
 }
 
+final class ElastiCacheAclUser
+{
+    public function __construct(
+        public readonly string $name,
+        public readonly string $status,
+        public readonly string $accessString,
+        public readonly bool $noPasswordRequired,
+        public readonly int $passwordCount,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['name'],
+            $data['status'],
+            $data['accessString'],
+            $data['noPasswordRequired'],
+            $data['passwordCount'],
+        );
+    }
+}
+
+final class ElastiCacheAclGroup
+{
+    public function __construct(
+        public readonly string $name,
+        /** @var string[] */
+        public readonly array $members,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self($data['name'], $data['members'] ?? []);
+    }
+}
+
+final class ElastiCacheAclCluster
+{
+    public function __construct(
+        public readonly string $clusterId,
+        public readonly string $engine,
+        /** @var ElastiCacheAclUser[] */
+        public readonly array $users,
+        /** @var ElastiCacheAclGroup[] */
+        public readonly array $groups,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['clusterId'],
+            $data['engine'],
+            array_map(ElastiCacheAclUser::fromArray(...), $data['users'] ?? []),
+            array_map(ElastiCacheAclGroup::fromArray(...), $data['groups'] ?? []),
+        );
+    }
+}
+
+final class ElastiCacheAclsResponse
+{
+    public function __construct(
+        /** @var ElastiCacheAclCluster[] */
+        public readonly array $acls,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(ElastiCacheAclCluster::fromArray(...), $data['acls'] ?? []));
+    }
+}
+
 // ── Lambda ─────────────────────────────────────────────────────
 
 final class LambdaInvocation

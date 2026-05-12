@@ -201,6 +201,13 @@ final class ElastiCacheClient
             $this->http->get('/_fakecloud/elasticache/serverless-caches')
         );
     }
+
+    public function getElastiCacheAcls(): ElastiCacheAclsResponse
+    {
+        return ElastiCacheAclsResponse::fromArray(
+            $this->http->get('/_fakecloud/elasticache/acls')
+        );
+    }
 }
 
 final class EcrClient

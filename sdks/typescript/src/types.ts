@@ -94,6 +94,30 @@ export interface ElastiCacheServerlessCachesResponse {
   serverlessCaches: ElastiCacheServerlessCacheIntrospection[];
 }
 
+export interface ElastiCacheAclUser {
+  name: string;
+  status: string;
+  accessString: string;
+  noPasswordRequired: boolean;
+  passwordCount: number;
+}
+
+export interface ElastiCacheAclGroup {
+  name: string;
+  members: string[];
+}
+
+export interface ElastiCacheAclCluster {
+  clusterId: string;
+  engine: string;
+  users: ElastiCacheAclUser[];
+  groups: ElastiCacheAclGroup[];
+}
+
+export interface ElastiCacheAclsResponse {
+  acls: ElastiCacheAclCluster[];
+}
+
 // ── Lambda ─────────────────────────────────────────────────────────
 
 export interface LambdaInvocation {

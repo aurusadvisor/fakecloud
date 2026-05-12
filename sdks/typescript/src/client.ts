@@ -11,6 +11,7 @@ import type {
   ResetResponse,
   ResetServiceResponse,
   RdsInstancesResponse,
+  ElastiCacheAclsResponse,
   ElastiCacheClustersResponse,
   ElastiCacheReplicationGroupsResponse,
   ElastiCacheServerlessCachesResponse,
@@ -148,6 +149,11 @@ export class ElastiCacheClient {
     const resp = await fetch(
       `${this.baseUrl}/_fakecloud/elasticache/serverless-caches`,
     );
+    return parse(resp);
+  }
+
+  async getElastiCacheAcls(): Promise<ElastiCacheAclsResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/elasticache/acls`);
     return parse(resp);
   }
 }
