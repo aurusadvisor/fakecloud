@@ -1876,6 +1876,7 @@ class FakeCloud:
     @property
     def athena(self) -> AthenaClient:
         return AthenaClient(self._client, self._base)
+
     def organizations(self) -> OrganizationsClient:
         return OrganizationsClient(self._client, self._base)
 
@@ -2032,6 +2033,7 @@ class FakeCloudSync:
     @property
     def athena(self) -> _SyncAthenaClient:
         return _SyncAthenaClient(self._client, self._base)
+
     def organizations(self) -> _SyncOrganizationsClient:
         return _SyncOrganizationsClient(self._client, self._base)
 
