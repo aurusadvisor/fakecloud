@@ -5488,7 +5488,7 @@ async fn main() {
                                 .get(&exec.execution_arn)
                                 .map(|v| {
                                     let mut sorted = v.clone();
-                                    sorted.sort_by(|a, b| a.start_date.cmp(&b.start_date));
+                                    sorted.sort_by_key(|a| a.start_date);
                                     sorted
                                         .into_iter()
                                         .map(|c| build_node(c, children_by_parent))
