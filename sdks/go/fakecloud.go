@@ -148,6 +148,9 @@ func (fc *FakeCloud) ApplicationAutoScaling() *ApplicationAutoScalingClient {
 	return &ApplicationAutoScalingClient{fc: fc}
 }
 
+// Organizations returns the AWS Organizations admin/introspection sub-client.
+func (fc *FakeCloud) Organizations() *OrganizationsClient { return &OrganizationsClient{fc: fc} }
+
 // ── Error type ─────────────────────────────────────────────────────
 
 // APIError is returned when the server responds with a non-2xx status.

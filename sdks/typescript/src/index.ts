@@ -20,5 +20,6 @@ export {
   BedrockAgentRuntimeClient,
   EcsClient,
   AthenaClient,
+  OrganizationsClient,
 } from "./client.js";
 export type * from "./types.js";

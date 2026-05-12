@@ -134,6 +134,7 @@ public final class FakeCloud {
     private final AcmClient acm;
     private final ApplicationAutoScalingClient applicationAutoscaling;
     private final AthenaClient athena;
+    private final OrganizationsClient organizations;
 
     public FakeCloud() {
         this(DEFAULT_BASE_URL);
@@ -167,6 +168,7 @@ public final class FakeCloud {
         this.acm = new AcmClient(http);
         this.applicationAutoscaling = new ApplicationAutoScalingClient(http);
         this.athena = new AthenaClient(http);
+        this.organizations = new OrganizationsClient(http);
     }
 
     static String trimTrailingSlashes(String url) {
@@ -232,6 +234,7 @@ public final class FakeCloud {
     public AcmClient acm() { return acm; }
     public ApplicationAutoScalingClient applicationAutoscaling() { return applicationAutoscaling; }
     public AthenaClient athena() { return athena; }
+    public OrganizationsClient organizations() { return organizations; }
 
     // ── Sub-clients ────────────────────────────────────────────────
 
@@ -962,6 +965,28 @@ public final class FakeCloud {
             return http.get(
                     "/_fakecloud/acm/certificates/" + encodePath(id) + "/chain-info",
                     Types.AcmCertificateChainInfo.class);
+        }
+    }
+
+    /**
+     * AWS Organizations admin/introspection sub-client. Bypasses IAM
+     * so tests can assert on org shape without management-account
+     * credentials.
+     */
+    public static final class OrganizationsClient {
+        private final HttpTransport http;
+        OrganizationsClient(HttpTransport http) { this.http = http; }
+
+        /**
+         * List every member account in the org with lifecycle state,
+         * parent OU, tags, and directly-attached SCPs. Returns an
+         * empty list (and {@code null} management/master ids) when
+         * no organization has been created yet.
+         */
+        public Types.OrganizationsAccountsResponse getAccounts() {
+            return http.get(
+                    "/_fakecloud/organizations/accounts",
+                    Types.OrganizationsAccountsResponse.class);
         }
     }
 }

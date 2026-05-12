@@ -1190,6 +1190,40 @@ export interface LogsFieldIndexesResponse {
   indexes: LogsFieldIndex[];
 }
 
+// ── Organizations ───────────────────────────────────────────────────
+
+export interface OrganizationsTag {
+  key: string;
+  value: string;
+}
+
+export interface OrganizationsAccount {
+  id: string;
+  arn: string;
+  email: string;
+  name: string;
+  /** AWS lifecycle state: ACTIVE | SUSPENDED | PENDING_CLOSURE. */
+  status: string;
+  /** How the account joined the org: INVITED | CREATED. */
+  joinedMethod: string;
+  /** RFC3339. */
+  joinedTimestamp: string;
+  parentOuId?: string;
+  tags: OrganizationsTag[];
+  /** SCP ids directly attached to the account. Does not include
+   *  policies inherited from the parent OU or root. */
+  scpAttached: string[];
+}
+
+export interface OrganizationsAccountsResponse {
+  accounts: OrganizationsAccount[];
+  /** `null`/undefined when no organization has been created yet. */
+  managementAccountId?: string;
+  /** Duplicate of `managementAccountId`. AWS renamed Master to
+   *  Management in 2020 but kept the old field for back-compat. */
+  masterAccountId?: string;
+}
+
 // ── Athena ─────────────────────────────────────────────────────────
 
 /**

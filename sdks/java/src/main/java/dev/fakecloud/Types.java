@@ -1117,4 +1117,32 @@ public final class Types {
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record AthenaNamedQueriesResponse(List<AthenaNamedQuery> queries) {}
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record OrganizationsTag(String key, String value) {}
+
+    /**
+     * A single member account from
+     * {@code GET /_fakecloud/organizations/accounts}. Mirrors the AWS
+     * Organizations {@code Account} shape plus {@code parentOuId} and
+     * {@code scpAttached} — the latter contains SCP ids directly
+     * attached to this account only (no inherited policies).
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record OrganizationsAccount(
+            String id,
+            String arn,
+            String email,
+            String name,
+            String status,
+            String joinedMethod,
+            String joinedTimestamp,
+            String parentOuId,
+            List<OrganizationsTag> tags,
+            List<String> scpAttached) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record OrganizationsAccountsResponse(
+            List<OrganizationsAccount> accounts,
+            String managementAccountId,
+            String masterAccountId) {}
 }

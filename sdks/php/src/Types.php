@@ -3131,6 +3131,79 @@ final class LogsFieldIndexesResponse
     }
 }
 
+// ── Organizations ─────────────────────────────────────────────────
+
+/**
+ * A single Organizations tag (key/value).
+ */
+final class OrganizationsTag
+{
+    public function __construct(
+        public readonly string $key,
+        public readonly string $value,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self((string) ($data['key'] ?? ''), (string) ($data['value'] ?? ''));
+    }
+}
+
+final class OrganizationsAccount
+{
+    public function __construct(
+        public readonly string $id,
+        public readonly string $arn,
+        public readonly string $email,
+        public readonly string $name,
+        public readonly string $status,
+        public readonly string $joinedMethod,
+        public readonly string $joinedTimestamp,
+        public readonly ?string $parentOuId = null,
+        /** @var OrganizationsTag[] */
+        public readonly array $tags = [],
+        /** @var string[] */
+        public readonly array $scpAttached = [],
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        $tags = array_map(OrganizationsTag::fromArray(...), $data['tags'] ?? []);
+        $scp = array_map('strval', $data['scpAttached'] ?? []);
+        return new self(
+            (string) ($data['id'] ?? ''),
+            (string) ($data['arn'] ?? ''),
+            (string) ($data['email'] ?? ''),
+            (string) ($data['name'] ?? ''),
+            (string) ($data['status'] ?? ''),
+            (string) ($data['joinedMethod'] ?? ''),
+            (string) ($data['joinedTimestamp'] ?? ''),
+            isset($data['parentOuId']) ? (string) $data['parentOuId'] : null,
+            $tags,
+            $scp,
+        );
+    }
+}
+
+final class OrganizationsAccountsResponse
+{
+    public function __construct(
+        /** @var OrganizationsAccount[] */
+        public readonly array $accounts,
+        public readonly ?string $managementAccountId = null,
+        public readonly ?string $masterAccountId = null,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            array_map(OrganizationsAccount::fromArray(...), $data['accounts'] ?? []),
+            isset($data['managementAccountId']) ? (string) $data['managementAccountId'] : null,
+            isset($data['masterAccountId']) ? (string) $data['masterAccountId'] : null,
+        );
+    }
+}
+
 // ── Athena ────────────────────────────────────────────────────────
 
 final class AthenaNamedQuery

@@ -164,6 +164,10 @@ impl FakeCloud {
         AthenaClient { fc: self }
     }
 
+    pub fn organizations(&self) -> OrganizationsClient<'_> {
+        OrganizationsClient { fc: self }
+    }
+
     // ── Internal helpers ────────────────────────────────────────────
 
     async fn parse<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T, Error> {
@@ -1139,6 +1143,31 @@ impl AthenaClient<'_> {
             .client
             .get(format!(
                 "{}/_fakecloud/athena/named-queries",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── Organizations ───────────────────────────────────────────────────
+
+pub struct OrganizationsClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl OrganizationsClient<'_> {
+    /// List every member account in the org with lifecycle state,
+    /// parent OU, tags, and directly-attached SCPs. Returns an empty
+    /// `accounts` list (and `None` for management/master ids) when no
+    /// organization has been created yet.
+    pub async fn get_accounts(&self) -> Result<OrganizationsAccountsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/organizations/accounts",
                 self.fc.base_url
             ))
             .send()

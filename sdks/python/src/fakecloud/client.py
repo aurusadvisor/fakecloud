@@ -70,6 +70,7 @@ from fakecloud.types import (
     LogsFieldIndexesResponse,
     MintAuthorizationCodeRequest,
     MintAuthorizationCodeResponse,
+    OrganizationsAccountsResponse,
     PendingConfirmationsResponse,
     PreTokenGenInvocationsResponse,
     RdsInstancesResponse,
@@ -655,6 +656,26 @@ class LogsClient:
         )
         _check(resp)
         return LogsFieldIndexesResponse.from_dict(resp.json())
+
+
+class OrganizationsClient:
+    """Async AWS Organizations admin/introspection client.
+
+    Bypasses IAM so tests can assert on org shape without
+    management-account credentials.
+    """
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def get_accounts(self) -> OrganizationsAccountsResponse:
+        """List every member account with lifecycle state, parent OU,
+        tags, and directly-attached SCPs. Returns an empty list when
+        no org has been created yet."""
+        resp = await self._client.get(f"{self._base}/_fakecloud/organizations/accounts")
+        _check(resp)
+        return OrganizationsAccountsResponse.from_dict(resp.json())
 
 
 class SesClient:
@@ -1265,6 +1286,17 @@ class _SyncLogsClient:
         return LogsFieldIndexesResponse.from_dict(resp.json())
 
 
+class _SyncOrganizationsClient:
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def get_accounts(self) -> OrganizationsAccountsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/organizations/accounts")
+        _check(resp)
+        return OrganizationsAccountsResponse.from_dict(resp.json())
+
+
 class _SyncSesClient:
     def __init__(self, client: httpx.Client, base_url: str) -> None:
         self._client = client
@@ -1861,6 +1893,9 @@ class FakeCloud:
     def athena(self) -> AthenaClient:
         return AthenaClient(self._client, self._base)
 
+    def organizations(self) -> OrganizationsClient:
+        return OrganizationsClient(self._client, self._base)
+
     # ── Lifecycle ───────────────────────────────────────────────────
 
     async def aclose(self) -> None:
@@ -2014,6 +2049,9 @@ class FakeCloudSync:
     @property
     def athena(self) -> _SyncAthenaClient:
         return _SyncAthenaClient(self._client, self._base)
+
+    def organizations(self) -> _SyncOrganizationsClient:
+        return _SyncOrganizationsClient(self._client, self._base)
 
     # ── Lifecycle ───────────────────────────────────────────────────
 
