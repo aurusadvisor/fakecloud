@@ -76,7 +76,11 @@ pub fn list_all_jobs(state: &SharedGlueState) -> Vec<JobRow> {
         .iter()
         .flat_map(|(account_id, s)| s.jobs.values().map(|j| job_to_row(account_id, j)))
         .collect();
-    rows.sort_by(|a, b| a.account_id.cmp(&b.account_id).then_with(|| a.name.cmp(&b.name)));
+    rows.sort_by(|a, b| {
+        a.account_id
+            .cmp(&b.account_id)
+            .then_with(|| a.name.cmp(&b.name))
+    });
     rows
 }
 
