@@ -43,6 +43,7 @@ final class FakeCloud
     private Route53Client $route53;
     private AcmClient $acm;
     private ApplicationAutoScalingClient $applicationAutoscaling;
+    private AthenaClient $athena;
 
     public function __construct(string $baseUrl = self::DEFAULT_BASE_URL)
     {
@@ -72,6 +73,7 @@ final class FakeCloud
         $this->route53 = new Route53Client($this->http);
         $this->acm = new AcmClient($this->http);
         $this->applicationAutoscaling = new ApplicationAutoScalingClient($this->http);
+        $this->athena = new AthenaClient($this->http);
     }
 
     public function baseUrl(): string
@@ -138,6 +140,7 @@ final class FakeCloud
     public function route53(): Route53Client { return $this->route53; }
     public function acm(): AcmClient { return $this->acm; }
     public function applicationAutoscaling(): ApplicationAutoScalingClient { return $this->applicationAutoscaling; }
+    public function athena(): AthenaClient { return $this->athena; }
 }
 
 // ── Sub-clients ────────────────────────────────────────────────
@@ -416,6 +419,24 @@ final class ApplicationAutoScalingClient
     {
         return AppAsScheduledTickResponse::fromArray(
             $this->http->postEmpty('/_fakecloud/application-autoscaling/scheduled-tick')
+        );
+    }
+}
+
+final class AthenaClient
+{
+    public function __construct(private readonly HttpTransport $http) {}
+
+    /**
+     * List every named query stored in the Athena registry across all
+     * workgroups for the default account. The response includes a
+     * `lastUsedAt` timestamp the server bumps each time
+     * `StartQueryExecution` resolves the query string by id.
+     */
+    public function getNamedQueries(): AthenaNamedQueriesResponse
+    {
+        return AthenaNamedQueriesResponse::fromArray(
+            $this->http->get('/_fakecloud/athena/named-queries')
         );
     }
 }

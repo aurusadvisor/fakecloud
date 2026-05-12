@@ -344,6 +344,79 @@ async fn sdk_elasticache_get_acls() {
     assert_eq!(default_user.password_count, 0);
 }
 
+// ── Athena ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn sdk_athena_get_named_queries() {
+    let server = TestServer::start().await;
+    let fc = FakeCloud::new(server.endpoint());
+    let athena = server.athena_client().await;
+
+    let created = athena
+        .create_named_query()
+        .name("sdk-nq")
+        .description("SDK introspection test")
+        .database("default")
+        .query_string("SELECT 1 AS id")
+        .work_group("primary")
+        .send()
+        .await
+        .expect("create named query");
+    let nq_id = created.named_query_id().expect("nq id").to_owned();
+
+    // Before StartQueryExecution: last_used_at is unset.
+    let initial = fc
+        .athena()
+        .get_named_queries()
+        .await
+        .expect("get named queries");
+    let row = initial
+        .queries
+        .iter()
+        .find(|q| q.named_query_id == nq_id)
+        .expect("named query in listing");
+    assert_eq!(row.name, "sdk-nq");
+    assert_eq!(row.database, "default");
+    assert_eq!(row.workgroup, "primary");
+    assert_eq!(row.query_string, "SELECT 1 AS id");
+    assert!(row.last_used_at.is_none());
+
+    // Resolve query by id; server bumps last_used_at. The aws-sdk-athena
+    // builder doesn't expose `NamedQueryId` on StartQueryExecution, so
+    // the call is dispatched via raw JSON 1.1.
+    reqwest::Client::new()
+        .post(server.endpoint())
+        .header("X-Amz-Target", "AmazonAthena.StartQueryExecution")
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 \
+             Credential=root/20260101/us-east-1/athena/aws4_request, \
+             SignedHeaders=host, Signature=00",
+        )
+        .body(serde_json::json!({ "NamedQueryId": nq_id }).to_string())
+        .send()
+        .await
+        .expect("raw start query")
+        .error_for_status()
+        .expect("start query 2xx");
+
+    let after = fc
+        .athena()
+        .get_named_queries()
+        .await
+        .expect("get named queries");
+    let bumped = after
+        .queries
+        .iter()
+        .find(|q| q.named_query_id == nq_id)
+        .expect("named query still present");
+    assert!(
+        bumped.last_used_at.is_some(),
+        "last_used_at must be populated after StartQueryExecution",
+    );
+}
+
 // ── SQS ────────────────────────────────────────────────────────────
 
 #[tokio::test]

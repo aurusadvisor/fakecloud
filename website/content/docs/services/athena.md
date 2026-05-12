@@ -77,6 +77,27 @@ Capacity reservations are stored verbatim; `allocated_dpus` mirrors `target_dpus
 
 The managed engine version catalog (`ListEngineVersions`) is a static seed: `AUTO`, `Athena engine version 2`, `Athena engine version 3`. New engine versions shipped by AWS will not appear until the seed is updated.
 
+## Introspection
+
+`GET /_fakecloud/athena/named-queries` returns every named query stored in the registry across all workgroups for the default account. Useful when test code needs to assert that a saved query was created, or that `StartQueryExecution` resolved a query by id — the response includes a `lastUsedAt` timestamp that is bumped each time the query is referenced.
+
+```bash
+curl -s http://localhost:4566/_fakecloud/athena/named-queries | jq
+# {
+#   "queries": [
+#     {
+#       "namedQueryId": "abc-123",
+#       "name": "daily-rollup",
+#       "description": "Aggregates yesterday's events",
+#       "database": "analytics",
+#       "queryString": "SELECT count(*) FROM events",
+#       "workgroup": "primary",
+#       "lastUsedAt": "2026-05-11T12:34:56Z"
+#     }
+#   ]
+# }
+```
+
 ## Source
 
 - [`crates/fakecloud-athena`](https://github.com/faiscadev/fakecloud/tree/main/crates/fakecloud-athena)

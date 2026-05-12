@@ -160,6 +160,10 @@ impl FakeCloud {
         ApplicationAutoScalingClient { fc: self }
     }
 
+    pub fn athena(&self) -> AthenaClient<'_> {
+        AthenaClient { fc: self }
+    }
+
     // ── Internal helpers ────────────────────────────────────────────
 
     async fn parse<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T, Error> {
@@ -1112,6 +1116,31 @@ impl EcsClient<'_> {
             .fc
             .client
             .get(format!("{}/_fakecloud/ecs/events", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── Athena ──────────────────────────────────────────────────────────
+
+pub struct AthenaClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl AthenaClient<'_> {
+    /// List every named query stored in the Athena named-query registry
+    /// across all workgroups for the default account. Bumps `last_used_at`
+    /// each time `StartQueryExecution` resolves a query by id so test
+    /// authors can assert that a saved query was actually exercised.
+    pub async fn get_named_queries(&self) -> Result<AthenaNamedQueriesResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/athena/named-queries",
+                self.fc.base_url
+            ))
             .send()
             .await?;
         FakeCloud::parse(resp).await

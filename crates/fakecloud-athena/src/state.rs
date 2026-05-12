@@ -98,6 +98,12 @@ pub struct NamedQuery {
     pub database: String,
     pub query_string: String,
     pub work_group: String,
+    /// Last time this named query was referenced by `StartQueryExecution`.
+    /// `None` until the first invocation; populated by the
+    /// `/_fakecloud/athena/named-queries` introspection endpoint so test
+    /// authors can assert that a saved query was actually used.
+    #[serde(default)]
+    pub last_used_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1144,3 +1144,30 @@ export interface LogsFieldIndexesResponse {
   logGroupName: string;
   indexes: LogsFieldIndex[];
 }
+
+// ── Athena ─────────────────────────────────────────────────────────
+
+/**
+ * One row in the Athena named-query introspection listing returned by
+ * `GET /_fakecloud/athena/named-queries`. Mirrors the underlying named
+ * query record plus a `lastUsedAt` timestamp the server bumps every
+ * time `StartQueryExecution` resolves the query by id.
+ */
+export interface AthenaNamedQuery {
+  namedQueryId: string;
+  name: string;
+  description?: string | null;
+  database: string;
+  queryString: string;
+  workgroup: string;
+  /**
+   * RFC3339 timestamp of the most recent `StartQueryExecution` that
+   * resolved its query string from this named query. `null` until the
+   * first such invocation.
+   */
+  lastUsedAt?: string | null;
+}
+
+export interface AthenaNamedQueriesResponse {
+  queries: AthenaNamedQuery[];
+}

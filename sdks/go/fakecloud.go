@@ -94,6 +94,9 @@ func (fc *FakeCloud) RDS() *RDSClient { return &RDSClient{fc: fc} }
 // ElastiCache returns the ElastiCache sub-client.
 func (fc *FakeCloud) ElastiCache() *ElastiCacheClient { return &ElastiCacheClient{fc: fc} }
 
+// Athena returns the Athena sub-client.
+func (fc *FakeCloud) Athena() *AthenaClient { return &AthenaClient{fc: fc} }
+
 // ECR returns the ECR sub-client.
 func (fc *FakeCloud) ECR() *ECRClient { return &ECRClient{fc: fc} }
 

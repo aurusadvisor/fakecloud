@@ -268,6 +268,20 @@ pub(crate) fn elasticache_serverless_cache_response(
     }
 }
 
+pub(crate) fn athena_named_query_response(
+    q: &fakecloud_athena::NamedQuery,
+) -> types::AthenaNamedQuery {
+    types::AthenaNamedQuery {
+        named_query_id: q.named_query_id.clone(),
+        name: q.name.clone(),
+        description: q.description.clone(),
+        database: q.database.clone(),
+        query_string: q.query_string.clone(),
+        workgroup: q.work_group.clone(),
+        last_used_at: q.last_used_at.map(|t| t.to_rfc3339()),
+    }
+}
+
 pub(crate) fn elbv2_load_balancer_response(
     lb: &fakecloud_elbv2::LoadBalancer,
 ) -> types::Elbv2LoadBalancer {

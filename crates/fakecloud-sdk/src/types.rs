@@ -1774,6 +1774,29 @@ pub struct GlueJob {
     pub last_modified_on: String,
 }
 
+// ── Athena ──────────────────────────────────────────────────────────
+
+/// One row in the Athena named-query introspection list returned by
+/// `GET /_fakecloud/athena/named-queries`. Mirrors the underlying named
+/// query record plus a `last_used_at` timestamp the server bumps every
+/// time `StartQueryExecution` resolves the query by id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AthenaNamedQuery {
+    pub named_query_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub database: String,
+    pub query_string: String,
+    pub workgroup: String,
+    /// RFC3339 timestamp of the most recent `StartQueryExecution` that
+    /// resolved its query string from this named query. `None` until the
+    /// first such invocation.
+    #[serde(default)]
+    pub last_used_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GlueJobsResponse {
@@ -1802,6 +1825,12 @@ pub struct GlueJobRun {
 #[serde(rename_all = "camelCase")]
 pub struct GlueJobRunsResponse {
     pub runs: Vec<GlueJobRun>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AthenaNamedQueriesResponse {
+    pub queries: Vec<AthenaNamedQuery>,
 }
 
 /// Body for `POST /_fakecloud/cloudfront/distributions/{id}/status`. The

@@ -17362,6 +17362,7 @@ impl ResourceProvisioner {
             database,
             query_string,
             work_group,
+            last_used_at: None,
         };
         account.named_queries.insert(id.clone(), nq);
         Ok(ProvisionResult::new(id.clone()).with("NamedQueryId", id))

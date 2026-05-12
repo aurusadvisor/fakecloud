@@ -2485,6 +2485,38 @@ class LogsDeliveryConfigResponse:
         )
 
 
+# ── Athena ──────────────────────────────────────────────────────────
+
+
+@dataclass
+class AthenaNamedQuery:
+    """One row in the Athena named-query introspection listing."""
+
+    named_query_id: str
+    name: str
+    description: Optional[str]
+    database: str
+    query_string: str
+    workgroup: str
+    # RFC3339 timestamp of the most recent ``StartQueryExecution`` that
+    # resolved its query string from this named query. ``None`` until the
+    # first such invocation.
+    last_used_at: Optional[str]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> AthenaNamedQuery:
+        d = _convert_keys(data)
+        return cls(
+            named_query_id=d["named_query_id"],
+            name=d["name"],
+            description=d.get("description"),
+            database=d["database"],
+            query_string=d["query_string"],
+            workgroup=d["workgroup"],
+            last_used_at=d.get("last_used_at"),
+        )
+
+
 @dataclass
 class LogsFieldIndex:
     """One parsed `Fields` entry from an index policy on a log group."""
@@ -2512,4 +2544,16 @@ class LogsFieldIndexesResponse:
         return cls(
             log_group_name=data.get("logGroupName", ""),
             indexes=[LogsFieldIndex.from_dict(i) for i in data.get("indexes", [])],
+        )
+
+
+@dataclass
+class AthenaNamedQueriesResponse:
+    queries: List[AthenaNamedQuery]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> AthenaNamedQueriesResponse:
+        d = _convert_keys(data)
+        return cls(
+            queries=[AthenaNamedQuery.from_dict(q) for q in d.get("queries", [])],
         )
