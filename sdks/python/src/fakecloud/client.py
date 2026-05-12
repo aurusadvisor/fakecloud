@@ -308,9 +308,7 @@ class EcsClient:
     async def get_task_metadata(self, task_arn: str) -> EcsTaskMetadataResponse:
         """Return the v4 metadata-URI dump for the task with the given ARN."""
         encoded = _urlquote(task_arn, safe="")
-        resp = await self._client.get(
-            f"{self._base}/_fakecloud/ecs/metadata/{encoded}"
-        )
+        resp = await self._client.get(f"{self._base}/_fakecloud/ecs/metadata/{encoded}")
         _check(resp)
         return EcsTaskMetadataResponse.from_dict(resp.json())
 
