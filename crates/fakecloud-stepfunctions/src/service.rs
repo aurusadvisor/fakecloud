@@ -501,6 +501,10 @@ impl StepFunctionsService {
             error: None,
             cause: None,
             history_events: vec![],
+            parent_execution_arn: None,
+            is_sync: false,
+            billed_duration_ms: None,
+            billed_memory_mb: None,
         };
 
         state.executions.insert(exec_arn.clone(), execution);
@@ -1335,6 +1339,10 @@ impl StepFunctionsService {
                 error: None,
                 cause: None,
                 history_events: vec![],
+                parent_execution_arn: None,
+                is_sync: true,
+                billed_duration_ms: None,
+                billed_memory_mb: None,
             };
             state.executions.insert(exec_arn.clone(), execution);
             (
@@ -1355,6 +1363,22 @@ impl StepFunctionsService {
             logging_config,
         )
         .await;
+
+        // Persist billing details on the stored execution so introspection
+        // endpoints can replay the same numbers later.
+        {
+            let mut accounts = self.state.write();
+            if let Some(state) = accounts.get_mut(&req.account_id) {
+                if let Some(exec) = state.executions.get_mut(&exec_arn) {
+                    let duration_ms = exec
+                        .stop_date
+                        .map_or(0, |stop| (stop - exec.start_date).num_milliseconds())
+                        .max(0);
+                    exec.billed_duration_ms = Some(duration_ms);
+                    exec.billed_memory_mb = Some(64);
+                }
+            }
+        }
 
         let accounts = self.state.read();
         let state = accounts.get(&req.account_id).unwrap();
@@ -1797,6 +1821,10 @@ pub fn start_execution_from_delivery(
         error: None,
         cause: None,
         history_events: vec![],
+        parent_execution_arn: None,
+        is_sync: false,
+        billed_duration_ms: None,
+        billed_memory_mb: None,
     };
 
     st.executions.insert(exec_arn.clone(), execution);
@@ -2553,6 +2581,35 @@ mod tests {
         let req = make_request("StartSyncExecution", &body.to_string());
         let err = expect_err(svc.start_sync_execution(&req).await);
         assert!(err.to_string().contains("StateMachineDoesNotExist"));
+    }
+
+    #[tokio::test]
+    async fn start_sync_execution_records_introspection_fields() {
+        let svc = StepFunctionsService::new(make_state());
+        let arn = create_express_sm(&svc, "sync-introspect");
+
+        let body = json!({"stateMachineArn": arn, "input": "{}"});
+        let req = make_request("StartSyncExecution", &body.to_string());
+        let resp = svc.start_sync_execution(&req).await.unwrap();
+        let b = body_json(&resp);
+        let exec_arn = b["executionArn"].as_str().unwrap().to_string();
+
+        let accounts = svc.state.read();
+        let state = accounts.get("123456789012").unwrap();
+        let stored = state
+            .executions
+            .get(&exec_arn)
+            .expect("sync execution should be persisted for introspection");
+        assert!(stored.is_sync, "sync executions must be marked is_sync");
+        assert_eq!(stored.billed_memory_mb, Some(64));
+        assert!(
+            stored.billed_duration_ms.is_some(),
+            "billed_duration_ms must be populated after sync run"
+        );
+        assert!(
+            stored.parent_execution_arn.is_none(),
+            "top-level sync execution has no parent"
+        );
     }
 
     #[tokio::test]

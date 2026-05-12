@@ -195,6 +195,25 @@ pub struct Execution {
     pub error: Option<String>,
     pub cause: Option<String>,
     pub history_events: Vec<HistoryEvent>,
+    /// Parent execution ARN when this execution was started by another
+    /// state machine via `arn:aws:states:::states:startExecution[.sync]`.
+    /// `None` for top-level executions started by external callers.
+    #[serde(default)]
+    pub parent_execution_arn: Option<String>,
+    /// True when this execution was created by `StartSyncExecution`
+    /// (EXPRESS state machines only). Distinguishes it from regular
+    /// async executions in introspection endpoints.
+    #[serde(default)]
+    pub is_sync: bool,
+    /// Billed duration in milliseconds, populated on terminal state for
+    /// sync executions. Mirrors `billingDetails.billedDurationInMilliseconds`
+    /// from the StartSyncExecution response.
+    #[serde(default)]
+    pub billed_duration_ms: Option<i64>,
+    /// Billed memory in MB for sync executions. Mirrors
+    /// `billingDetails.billedMemoryUsedInMB`.
+    #[serde(default)]
+    pub billed_memory_mb: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

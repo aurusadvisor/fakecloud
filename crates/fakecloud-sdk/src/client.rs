@@ -763,6 +763,50 @@ impl StepFunctionsClient<'_> {
             .await?;
         FakeCloud::parse(resp).await
     }
+
+    /// List `StartSyncExecution` invocations with billing details. EXPRESS state
+    /// machines only — async (`StartExecution`) calls show up under
+    /// [`Self::get_executions`] instead.
+    pub async fn get_sync_executions(&self) -> Result<StepFunctionsSyncExecutionsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/stepfunctions/sync-executions",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Return the nested call tree rooted at `execution_arn`. Children are
+    /// executions that were started by their parent via
+    /// `arn:aws:states:::states:startExecution[.sync]`.
+    pub async fn get_execution_tree(
+        &self,
+        execution_arn: &str,
+    ) -> Result<StepFunctionsExecutionTreeResponse, Error> {
+        let mut encoded = String::with_capacity(execution_arn.len());
+        for b in execution_arn.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    encoded.push(b as char);
+                }
+                _ => encoded.push_str(&format!("%{:02X}", b)),
+            }
+        }
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/stepfunctions/execution-tree/{}",
+                self.fc.base_url, encoded
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
 }
 
 // ── Bedrock ─────────────────────────────────────────────────────────
