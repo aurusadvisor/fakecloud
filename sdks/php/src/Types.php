@@ -2614,6 +2614,125 @@ final class EcsEventsResponse
     }
 }
 
+final class EcsTaskMetadataLimits
+{
+    public function __construct(
+        public readonly ?float $cpu,
+        public readonly ?int $memory,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            isset($data['cpu']) ? (float) $data['cpu'] : null,
+            isset($data['memory']) ? (int) $data['memory'] : null,
+        );
+    }
+}
+
+final class EcsTaskMetadataPort
+{
+    public function __construct(
+        public readonly ?int $containerPort,
+        public readonly ?int $hostPort,
+        public readonly ?string $protocol,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            isset($data['containerPort']) ? (int) $data['containerPort'] : null,
+            isset($data['hostPort']) ? (int) $data['hostPort'] : null,
+            $data['protocol'] ?? null,
+        );
+    }
+}
+
+final class EcsTaskMetadataContainer
+{
+    public function __construct(
+        public readonly string $name,
+        public readonly string $image,
+        public readonly ?string $imageId,
+        /** @var EcsTaskMetadataPort[] */
+        public readonly array $ports,
+        /** @var array<string, string> */
+        public readonly array $labels,
+        public readonly string $desiredStatus,
+        public readonly string $knownStatus,
+        public readonly EcsTaskMetadataLimits $limits,
+        public readonly ?string $createdAt,
+        public readonly ?string $startedAt,
+        public readonly ?int $exitCode,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['name'],
+            $data['image'],
+            $data['imageId'] ?? null,
+            array_map(EcsTaskMetadataPort::fromArray(...), $data['ports'] ?? []),
+            $data['labels'] ?? [],
+            $data['desiredStatus'],
+            $data['knownStatus'],
+            EcsTaskMetadataLimits::fromArray($data['limits'] ?? []),
+            $data['createdAt'] ?? null,
+            $data['startedAt'] ?? null,
+            isset($data['exitCode']) ? (int) $data['exitCode'] : null,
+        );
+    }
+}
+
+final class EcsTaskMetadata
+{
+    public function __construct(
+        public readonly string $cluster,
+        public readonly string $taskArn,
+        public readonly string $family,
+        public readonly int $revision,
+        public readonly string $desiredStatus,
+        public readonly string $knownStatus,
+        /** @var EcsTaskMetadataContainer[] */
+        public readonly array $containers,
+        public readonly ?string $pullStartedAt,
+        public readonly ?string $pullStoppedAt,
+        public readonly string $availabilityZone,
+        public readonly string $launchType,
+        public readonly ?string $vpcId,
+        public readonly ?string $eniId,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['cluster'],
+            $data['taskArn'],
+            $data['family'],
+            (int) $data['revision'],
+            $data['desiredStatus'],
+            $data['knownStatus'],
+            array_map(EcsTaskMetadataContainer::fromArray(...), $data['containers'] ?? []),
+            $data['pullStartedAt'] ?? null,
+            $data['pullStoppedAt'] ?? null,
+            $data['availabilityZone'],
+            $data['launchType'],
+            $data['vpcId'] ?? null,
+            $data['eniId'] ?? null,
+        );
+    }
+}
+
+final class EcsTaskMetadataResponse
+{
+    public function __construct(public readonly EcsTaskMetadata $task) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(EcsTaskMetadata::fromArray($data['task']));
+    }
+}
+
 // ── ELBv2 ──────────────────────────────────────────────────────
 
 final class Elbv2Tag

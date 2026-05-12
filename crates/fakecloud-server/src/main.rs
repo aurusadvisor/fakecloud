@@ -28,8 +28,8 @@ use cli::Cli;
 use dynamodb_streams_lambda_poller::DynamoDbStreamsLambdaPoller;
 use introspection::{
     athena_named_query_response, ecr_image_response, ecr_pull_through_rule_response,
-    ecr_repository_response, ecs_cluster_response, ecs_lifecycle_event, ecs_task_response,
-    elasticache_acls_response, elasticache_cluster_response,
+    ecr_repository_response, ecs_cluster_response, ecs_lifecycle_event, ecs_task_metadata_response,
+    ecs_task_response, elasticache_acls_response, elasticache_cluster_response,
     elasticache_replication_group_response, elasticache_serverless_cache_response,
     elbv2_listener_response, elbv2_load_balancer_response, elbv2_rule_response,
     elbv2_target_group_response, rds_instance_response,
@@ -5660,6 +5660,41 @@ async fn main() {
                                     axum::http::StatusCode::OK,
                                     axum::Json(serde_json::to_value(ecs_task_response(t)).unwrap()),
                                 );
+                            }
+                        }
+                        (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({"error": "task not found"})),
+                        )
+                    }
+                }
+            }),
+        )
+        .route(
+            // ECS task-metadata introspection (v4 dump). Looks up a task by
+            // its full ARN (URL-encoded) and returns the aggregated shape a
+            // container would see at `ECS_CONTAINER_METADATA_URI_V4`. Unlike
+            // `/_fakecloud/ecs/v4/{task_id}` (which is what the container
+            // itself hits), this is keyed by ARN for assertion-friendly use
+            // from tests holding the RunTask response.
+            "/_fakecloud/ecs/metadata/{task_arn}",
+            axum::routing::get({
+                let ec = ecs_introspection_state.clone();
+                move |axum::extract::Path(task_arn): axum::extract::Path<String>| {
+                    let ec = ec.clone();
+                    async move {
+                        let accounts = ec.read();
+                        for (_, state) in accounts.iter() {
+                            for t in state.tasks.values() {
+                                if t.task_arn == task_arn {
+                                    return (
+                                        axum::http::StatusCode::OK,
+                                        axum::Json(
+                                            serde_json::to_value(ecs_task_metadata_response(t))
+                                                .unwrap(),
+                                        ),
+                                    );
+                                }
                             }
                         }
                         (

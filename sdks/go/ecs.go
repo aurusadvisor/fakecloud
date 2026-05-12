@@ -89,3 +89,15 @@ func (c *ECSClient) GetEvents(ctx context.Context) (*EcsEventsResponse, error) {
 	}
 	return &out, nil
 }
+
+// GetTaskMetadata returns the aggregated v4 metadata dump (the same shape
+// `ECS_CONTAINER_METADATA_URI_V4` exposes to a container) for the task with
+// the given full ARN. The ARN is URL-encoded before insertion into the path.
+func (c *ECSClient) GetTaskMetadata(ctx context.Context, taskArn string) (*EcsTaskMetadataResponse, error) {
+	var out EcsTaskMetadataResponse
+	path := fmt.Sprintf("/_fakecloud/ecs/metadata/%s", url.PathEscape(taskArn))
+	if err := c.fc.doGet(ctx, path, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

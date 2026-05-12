@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, cast
+from urllib.parse import quote as _urlquote
 
 import httpx
 
@@ -37,6 +38,7 @@ from fakecloud.types import (
     EcsMarkFailedRequest,
     EcsTask,
     EcsTaskLogsResponse,
+    EcsTaskMetadataResponse,
     EcsTasksResponse,
     ElastiCacheAclsResponse,
     ElastiCacheClustersResponse,
@@ -303,6 +305,15 @@ class EcsClient:
         _check(resp)
         return EcsEventsResponse.from_dict(resp.json())
 
+    async def get_task_metadata(self, task_arn: str) -> EcsTaskMetadataResponse:
+        """Return the v4 metadata-URI dump for the task with the given ARN."""
+        encoded = _urlquote(task_arn, safe="")
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/ecs/metadata/{encoded}"
+        )
+        _check(resp)
+        return EcsTaskMetadataResponse.from_dict(resp.json())
+
 
 class _SyncEcsClient:
     """Sync ECS introspection client."""
@@ -359,6 +370,13 @@ class _SyncEcsClient:
         resp = self._client.get(f"{self._base}/_fakecloud/ecs/events")
         _check(resp)
         return EcsEventsResponse.from_dict(resp.json())
+
+    def get_task_metadata(self, task_arn: str) -> EcsTaskMetadataResponse:
+        """Return the v4 metadata-URI dump for the task with the given ARN."""
+        encoded = _urlquote(task_arn, safe="")
+        resp = self._client.get(f"{self._base}/_fakecloud/ecs/metadata/{encoded}")
+        _check(resp)
+        return EcsTaskMetadataResponse.from_dict(resp.json())
 
 
 class Elbv2Client:

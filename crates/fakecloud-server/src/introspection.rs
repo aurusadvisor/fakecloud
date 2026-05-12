@@ -132,6 +132,82 @@ pub(crate) fn ecs_task_response(task: &fakecloud_ecs::Task) -> types::EcsTask {
     }
 }
 
+pub(crate) fn ecs_task_metadata_response(
+    task: &fakecloud_ecs::Task,
+) -> types::EcsTaskMetadataResponse {
+    // Pull the ENI/VPC bits out of the awsvpc attachment, if any.
+    let mut eni_id: Option<String> = None;
+    let mut vpc_id: Option<String> = None;
+    for att in &task.attachments {
+        if att.attachment_type.eq_ignore_ascii_case("eni") {
+            eni_id = Some(att.id.clone());
+            for d in &att.details {
+                if d.name == "vpcId" {
+                    vpc_id = Some(d.value.clone());
+                }
+            }
+        }
+    }
+    // fakecloud doesn't model a separate VPC store today, so synthesise a
+    // stable placeholder if the task has an ENI but no explicit vpcId.
+    if eni_id.is_some() && vpc_id.is_none() {
+        vpc_id = Some("vpc-fakecloud".into());
+    }
+
+    let containers = task
+        .containers
+        .iter()
+        .map(|c| {
+            let ports = c
+                .network_bindings
+                .iter()
+                .map(|nb| types::EcsTaskMetadataPort {
+                    container_port: nb.get("containerPort").and_then(|v| v.as_i64()),
+                    host_port: nb.get("hostPort").and_then(|v| v.as_i64()),
+                    protocol: nb
+                        .get("protocol")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                })
+                .collect();
+            types::EcsTaskMetadataContainer {
+                name: c.name.clone(),
+                image: c.image.clone(),
+                image_id: c.image_digest.clone(),
+                ports,
+                labels: std::collections::BTreeMap::new(),
+                desired_status: c.last_status.clone(),
+                known_status: c.last_status.clone(),
+                limits: types::EcsTaskMetadataLimits {
+                    cpu: c.cpu.as_ref().and_then(|v| v.parse::<f64>().ok()),
+                    memory: c.memory.as_ref().and_then(|v| v.parse::<i64>().ok()),
+                },
+                created_at: Some(task.created_at.to_rfc3339()),
+                started_at: task.started_at.map(|d| d.to_rfc3339()),
+                exit_code: c.exit_code,
+            }
+        })
+        .collect();
+
+    types::EcsTaskMetadataResponse {
+        task: types::EcsTaskMetadata {
+            cluster: task.cluster_name.clone(),
+            task_arn: task.task_arn.clone(),
+            family: task.family.clone(),
+            revision: task.revision,
+            desired_status: task.desired_status.clone(),
+            known_status: task.last_status.clone(),
+            containers,
+            pull_started_at: task.pull_started_at.map(|d| d.to_rfc3339()),
+            pull_stopped_at: task.pull_stopped_at.map(|d| d.to_rfc3339()),
+            availability_zone: "us-east-1a".into(),
+            launch_type: task.launch_type.clone(),
+            vpc_id,
+            eni_id,
+        },
+    }
+}
+
 pub(crate) fn ecs_lifecycle_event(
     event: &fakecloud_ecs::LifecycleEvent,
 ) -> types::EcsLifecycleEvent {

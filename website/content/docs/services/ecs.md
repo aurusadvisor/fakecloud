@@ -172,6 +172,46 @@ Endpoints bypass the public AWS API so tests can assert deterministic state with
 | `/_fakecloud/ecs/tasks/{taskId}/force-stop` | POST | SIGTERM + SIGKILL the running container |
 | `/_fakecloud/ecs/tasks/{taskId}/mark-failed` | POST | Flip to STOPPED without killing the container (inject exit code + reason) |
 | `/_fakecloud/ecs/events` | GET | Replay the lifecycle event log |
+| `/_fakecloud/ecs/metadata/{taskArn}` | GET | Aggregated v4 metadata dump keyed by full task ARN (URL-encode it) |
+
+### Task metadata by ARN
+
+`GET /_fakecloud/ecs/metadata/{taskArn}` returns the same shape a container would see at `ECS_CONTAINER_METADATA_URI_V4`, but addressable from outside the container by full task ARN -- handy when a test holds the `RunTask` response and wants to assert what the in-container SDK metadata loader would observe.
+
+The path segment must be URL-encoded (`arn:aws:ecs:us-east-1:000000000000:task/cluster/<id>` -> `arn%3Aaws%3Aecs%3Aus-east-1%3A000000000000%3Atask%2Fcluster%2F<id>`). SDK helpers (`getEcsTaskMetadata` / `get_task_metadata`) handle the encoding for you.
+
+```json
+{
+  "task": {
+    "cluster": "prod",
+    "taskArn": "arn:aws:ecs:us-east-1:000000000000:task/prod/abc123",
+    "family": "web",
+    "revision": 4,
+    "desiredStatus": "RUNNING",
+    "knownStatus": "RUNNING",
+    "containers": [
+      {
+        "name": "app",
+        "image": "nginx:1.27",
+        "imageId": "sha256:...",
+        "ports": [{"containerPort": 8080, "hostPort": 32768, "protocol": "tcp"}],
+        "labels": {},
+        "desiredStatus": "RUNNING",
+        "knownStatus": "RUNNING",
+        "limits": {"cpu": 0.25, "memory": 512},
+        "createdAt": "2026-05-11T10:00:00Z",
+        "startedAt": "2026-05-11T10:00:02Z"
+      }
+    ],
+    "pullStartedAt": "2026-05-11T10:00:00Z",
+    "pullStoppedAt": "2026-05-11T10:00:01Z",
+    "availabilityZone": "us-east-1a",
+    "launchType": "FARGATE",
+    "vpcId": "vpc-fakecloud",
+    "eniId": "eni-..."
+  }
+}
+```
 
 All endpoints are sorted deterministically (by ARN for clusters/tasks, by timestamp for events) so test assertions don't flake on map iteration order.
 
