@@ -313,13 +313,7 @@ fn probe_query(
     let resp = client
         .post(endpoint)
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .header(
-            "Authorization",
-            format!(
-                "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/{}/aws4_request",
-                service_name
-            ),
-        )
+        .header("Authorization", sigv4_auth_header(service_name))
         .body(body)
         .send()
         .map_err(|e| e.to_string())?;
@@ -327,6 +321,25 @@ fn probe_query(
     let status = resp.status().as_u16();
     let body = resp.text().map_err(|e| e.to_string())?;
     Ok((status, body))
+}
+
+/// Build a minimally-well-formed SigV4 Authorization header for probing.
+///
+/// fakecloud's service-routing layer parses this header to extract the
+/// service name (region/service/aws4_request). The parser at
+/// `fakecloud-aws::sigv4::parse_sigv4` requires `Credential=...` to be
+/// terminated by a comma, which means the header must also carry
+/// `SignedHeaders` and `Signature` — otherwise the parse returns `None`,
+/// service detection fails, and the request falls through to API Gateway's
+/// execute-api fallback (returning `404 NotFoundException "Stage not
+/// specified"`). The signature value is irrelevant — fakecloud does not
+/// verify SigV4 signatures, only parses the credential scope.
+fn sigv4_auth_header(service_name: &str) -> String {
+    format!(
+        "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/{}/aws4_request, \
+         SignedHeaders=host;x-amz-date, Signature=00",
+        service_name
+    )
 }
 
 fn probe_json(
@@ -343,10 +356,7 @@ fn probe_json(
         .post(endpoint)
         .header("Content-Type", "application/x-amz-json-1.1")
         .header("X-Amz-Target", &target)
-        .header(
-            "Authorization",
-            "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/service/aws4_request",
-        )
+        .header("Authorization", sigv4_auth_header("service"))
         .body(body)
         .send()
         .map_err(|e| e.to_string())?;
@@ -816,13 +826,9 @@ fn probe_rest(
         _ => legacy_rest_request(endpoint, service_name, operation_name, variant),
     };
 
-    let mut req = client.request(method.clone(), &url).header(
-        "Authorization",
-        format!(
-            "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/{}/aws4_request",
-            service_name
-        ),
-    );
+    let mut req = client
+        .request(method.clone(), &url)
+        .header("Authorization", sigv4_auth_header(service_name));
 
     for (name, value) in &headers {
         req = req.header(name.as_str(), value.as_str());
