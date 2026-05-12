@@ -528,7 +528,8 @@ mod tests {
 
     #[test]
     fn parse_credential_only_no_trailing_parts() {
-        let header = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260101/us-east-1/rds/aws4_request";
+        let header =
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260101/us-east-1/rds/aws4_request";
         let info = parse_sigv4(header).unwrap();
         assert_eq!(info.service, "rds");
         assert_eq!(info.region, "us-east-1");
