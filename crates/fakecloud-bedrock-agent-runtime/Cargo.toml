@@ -1,7 +1,11 @@
 [package]
 name = "fakecloud-bedrock-agent-runtime"
-version = "0.13.3"
-edition = "2021"
+description = "Bedrock Agent Runtime implementation for FakeCloud"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+version.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
@@ -15,8 +19,8 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
-fakecloud-bedrock-agent = { path = "../fakecloud-bedrock-agent" }
-fakecloud-core = { path = "../fakecloud-core" }
+fakecloud-bedrock-agent = { workspace = true }
+fakecloud-core = { workspace = true }
 
 [dev-dependencies]
 fakecloud-testkit = { path = "../fakecloud-testkit" }
