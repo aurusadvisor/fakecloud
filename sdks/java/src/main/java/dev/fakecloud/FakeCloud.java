@@ -3,6 +3,7 @@ package dev.fakecloud;
 import static dev.fakecloud.HttpTransport.encodePath;
 
 import dev.fakecloud.Types.ApiGatewayV2RequestsResponse;
+import dev.fakecloud.Types.AthenaNamedQueriesResponse;
 import dev.fakecloud.Types.AppAsScheduledTickResponse;
 import dev.fakecloud.Types.AppAsTickResponse;
 import dev.fakecloud.Types.AuthEventsResponse;
@@ -127,6 +128,7 @@ public final class FakeCloud {
     private final Route53Client route53;
     private final AcmClient acm;
     private final ApplicationAutoScalingClient applicationAutoscaling;
+    private final AthenaClient athena;
 
     public FakeCloud() {
         this(DEFAULT_BASE_URL);
@@ -159,6 +161,7 @@ public final class FakeCloud {
         this.route53 = new Route53Client(http);
         this.acm = new AcmClient(http);
         this.applicationAutoscaling = new ApplicationAutoScalingClient(http);
+        this.athena = new AthenaClient(http);
     }
 
     static String trimTrailingSlashes(String url) {
@@ -223,6 +226,7 @@ public final class FakeCloud {
     public Route53Client route53() { return route53; }
     public AcmClient acm() { return acm; }
     public ApplicationAutoScalingClient applicationAutoscaling() { return applicationAutoscaling; }
+    public AthenaClient athena() { return athena; }
 
     // ── Sub-clients ────────────────────────────────────────────────
 
@@ -420,6 +424,23 @@ public final class FakeCloud {
             return http.postEmpty(
                     "/_fakecloud/application-autoscaling/scheduled-tick",
                     AppAsScheduledTickResponse.class);
+        }
+    }
+
+    public static final class AthenaClient {
+        private final HttpTransport http;
+        AthenaClient(HttpTransport http) { this.http = http; }
+
+        /**
+         * List every named query stored in the Athena registry across all
+         * workgroups for the default account. The response includes a
+         * {@code lastUsedAt} timestamp the server bumps each time
+         * {@code StartQueryExecution} resolves the query by id.
+         */
+        public AthenaNamedQueriesResponse getNamedQueries() {
+            return http.get(
+                    "/_fakecloud/athena/named-queries",
+                    AthenaNamedQueriesResponse.class);
         }
     }
 

@@ -29,6 +29,8 @@ use dynamodb_streams_lambda_poller::DynamoDbStreamsLambdaPoller;
 use introspection::{
     ecr_image_response, ecr_pull_through_rule_response, ecr_repository_response,
     ecs_cluster_response, ecs_lifecycle_event, ecs_task_response, elasticache_acls_response,
+    athena_named_query_response, ecr_image_response, ecr_pull_through_rule_response,
+    ecr_repository_response, ecs_cluster_response, ecs_lifecycle_event, ecs_task_response,
     elasticache_cluster_response, elasticache_replication_group_response,
     elasticache_serverless_cache_response, elbv2_listener_response, elbv2_load_balancer_response,
     elbv2_rule_response, elbv2_target_group_response, rds_instance_response,
@@ -625,6 +627,7 @@ async fn main() {
     let rds_bridge_s3_state = s3_state.clone();
     let rds_introspection_state = rds_state.clone();
     let elasticache_introspection_state = elasticache_state.clone();
+    let athena_introspection_state = athena_state.clone();
     let ecr_introspection_state = ecr_state.clone();
     let ecs_introspection_state = ecs_state.clone();
     let dynamodb_ttl_state = dynamodb_state.clone();
@@ -5019,6 +5022,21 @@ async fn main() {
                         let accounts = ec.read();
                         let state = accounts.default_ref();
                         axum::Json(elasticache_acls_response(state))
+            "/_fakecloud/athena/named-queries",
+            axum::routing::get({
+                let athena = athena_introspection_state.clone();
+                move || {
+                    let athena = athena.clone();
+                    async move {
+                        let accounts = athena.read();
+                        let mut queries: Vec<types::AthenaNamedQuery> = accounts
+                            .accounts
+                            .values()
+                            .flat_map(|acc| acc.named_queries.values())
+                            .map(athena_named_query_response)
+                            .collect();
+                        queries.sort_by(|a, b| a.named_query_id.cmp(&b.named_query_id));
+                        axum::Json(types::AthenaNamedQueriesResponse { queries })
                     }
                 }
             }),

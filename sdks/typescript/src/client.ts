@@ -1,4 +1,5 @@
 import type {
+  AthenaNamedQueriesResponse,
   CreateAdminResponse,
   ApiGatewayV2RequestsResponse,
   BedrockFaultRule,
@@ -726,6 +727,7 @@ export class FakeCloud {
   private readonly _route53: Route53Client;
   private readonly _acm: AcmClient;
   private readonly _applicationAutoscaling: ApplicationAutoScalingClient;
+  private readonly _athena: AthenaClient;
 
   constructor(baseUrl: string = "http://localhost:4566") {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -757,6 +759,7 @@ export class FakeCloud {
     this._applicationAutoscaling = new ApplicationAutoScalingClient(
       this.baseUrl,
     );
+    this._athena = new AthenaClient(this.baseUrl);
   }
 
   // ── Health & Reset ─────────────────────────────────────────────
@@ -893,6 +896,27 @@ export class FakeCloud {
 
   get applicationAutoscaling(): ApplicationAutoScalingClient {
     return this._applicationAutoscaling;
+  }
+
+  get athena(): AthenaClient {
+    return this._athena;
+  }
+}
+
+export class AthenaClient {
+  constructor(private baseUrl: string) {}
+
+  /**
+   * List every named query stored in the Athena registry across all
+   * workgroups for the default account. The response includes a
+   * `lastUsedAt` timestamp the server bumps each time
+   * `StartQueryExecution` resolves the query string by id.
+   */
+  async getNamedQueries(): Promise<AthenaNamedQueriesResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/athena/named-queries`,
+    );
+    return parse(resp);
   }
 }
 

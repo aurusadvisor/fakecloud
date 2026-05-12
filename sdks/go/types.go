@@ -1017,4 +1017,21 @@ type GlueJobRun struct {
 // optionally filtered by job name.
 type GlueJobRunsResponse struct {
 	Runs []GlueJobRun `json:"runs"`
+// AthenaNamedQuery is one row in the Athena named-query introspection
+// listing returned by GET /_fakecloud/athena/named-queries.
+type AthenaNamedQuery struct {
+	NamedQueryID string  `json:"namedQueryId"`
+	Name         string  `json:"name"`
+	Description  *string `json:"description,omitempty"`
+	Database     string  `json:"database"`
+	QueryString  string  `json:"queryString"`
+	Workgroup    string  `json:"workgroup"`
+	// LastUsedAt is the RFC3339 timestamp of the most recent
+	// StartQueryExecution that resolved its query string from this named
+	// query. Nil until the first such invocation.
+	LastUsedAt *string `json:"lastUsedAt,omitempty"`
+}
+
+type AthenaNamedQueriesResponse struct {
+	Queries []AthenaNamedQuery `json:"queries"`
 }

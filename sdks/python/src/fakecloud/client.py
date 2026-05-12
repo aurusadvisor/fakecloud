@@ -11,6 +11,7 @@ from fakecloud.types import (
     ApiGatewayV2RequestsResponse,
     AppAsScheduledTickResponse,
     AppAsTickResponse,
+    AthenaNamedQueriesResponse,
     AuthEventsResponse,
     BedrockFaultRule,
     BedrockFaultsResponse,
@@ -171,6 +172,37 @@ class ElastiCacheClient:
         resp = await self._client.get(f"{self._base}/_fakecloud/elasticache/acls")
         _check(resp)
         return ElastiCacheAclsResponse.from_dict(resp.json())
+
+
+class AthenaClient:
+    """Async Athena introspection client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def get_named_queries(self) -> AthenaNamedQueriesResponse:
+        """List every named query across workgroups for the default account.
+
+        The response includes a ``last_used_at`` timestamp the server bumps
+        each time ``StartQueryExecution`` resolves the query by id.
+        """
+        resp = await self._client.get(f"{self._base}/_fakecloud/athena/named-queries")
+        _check(resp)
+        return AthenaNamedQueriesResponse.from_dict(resp.json())
+
+
+class _SyncAthenaClient:
+    """Sync Athena introspection client."""
+
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def get_named_queries(self) -> AthenaNamedQueriesResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/athena/named-queries")
+        _check(resp)
+        return AthenaNamedQueriesResponse.from_dict(resp.json())
 
 
 class EcrClient:
@@ -1714,6 +1746,10 @@ class FakeCloud:
     def application_autoscaling(self) -> ApplicationAutoScalingClient:
         return ApplicationAutoScalingClient(self._client, self._base)
 
+    @property
+    def athena(self) -> AthenaClient:
+        return AthenaClient(self._client, self._base)
+
     # ── Lifecycle ───────────────────────────────────────────────────
 
     async def aclose(self) -> None:
@@ -1863,6 +1899,10 @@ class FakeCloudSync:
     @property
     def application_autoscaling(self) -> _SyncApplicationAutoScalingClient:
         return _SyncApplicationAutoScalingClient(self._client, self._base)
+
+    @property
+    def athena(self) -> _SyncAthenaClient:
+        return _SyncAthenaClient(self._client, self._base)
 
     # ── Lifecycle ───────────────────────────────────────────────────
 

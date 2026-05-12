@@ -57,6 +57,12 @@ curl http://localhost:4566/_fakecloud/health
 | `/_fakecloud/application-autoscaling/tick` | POST | Trigger one policy-evaluation tick. |
 | `/_fakecloud/application-autoscaling/scheduled-tick` | POST | Run scheduled scaling actions that are due. |
 
+## Athena
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/athena/named-queries` | GET | **NEW** -- List every named query across workgroups with `lastUsedAt` bumped each time `StartQueryExecution` resolves the query by id. |
+
 ## Bedrock
 
 | Endpoint | Method | Description |

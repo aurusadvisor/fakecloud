@@ -2443,6 +2443,23 @@ final class LogsDeliveryConfiguration
         public readonly array $recordFields = [],
         public readonly ?string $fieldDelimiter = null,
         public readonly mixed $s3DeliveryConfiguration = null,
+// ── Athena ────────────────────────────────────────────────────────
+
+final class AthenaNamedQuery
+{
+    public function __construct(
+        public readonly string $namedQueryId,
+        public readonly string $name,
+        public readonly ?string $description,
+        public readonly string $database,
+        public readonly string $queryString,
+        public readonly string $workgroup,
+        /**
+         * RFC3339 timestamp of the most recent StartQueryExecution that
+         * resolved its query string from this named query. Null until the
+         * first such invocation.
+         */
+        public readonly ?string $lastUsedAt,
     ) {}
 
     public static function fromArray(array $data): self
@@ -2457,6 +2474,13 @@ final class LogsDeliveryConfiguration
             array_values(array_map('strval', $data['recordFields'] ?? [])),
             isset($data['fieldDelimiter']) ? (string) $data['fieldDelimiter'] : null,
             $data['s3DeliveryConfiguration'] ?? null,
+            (string) $data['namedQueryId'],
+            (string) $data['name'],
+            isset($data['description']) ? (string) $data['description'] : null,
+            (string) $data['database'],
+            (string) $data['queryString'],
+            (string) $data['workgroup'],
+            isset($data['lastUsedAt']) ? (string) $data['lastUsedAt'] : null,
         );
     }
 }
@@ -2466,6 +2490,11 @@ final class LogsDeliveryConfigResponse
     /** @param LogsDeliveryConfiguration[] $configurations */
     public function __construct(
         public readonly array $configurations,
+final class AthenaNamedQueriesResponse
+{
+    public function __construct(
+        /** @var AthenaNamedQuery[] */
+        public readonly array $queries,
     ) {}
 
     public static function fromArray(array $data): self
@@ -2516,5 +2545,6 @@ final class LogsFieldIndexesResponse
             (string) ($data['logGroupName'] ?? ''),
             array_values($indexes),
         );
+        return new self(array_map(AthenaNamedQuery::fromArray(...), $data['queries'] ?? []));
     }
 }

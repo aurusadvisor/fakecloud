@@ -687,6 +687,7 @@ impl AthenaService {
                 database,
                 query_string,
                 work_group,
+                last_used_at: None,
             },
         );
         Ok(AwsResponse::ok_json(json!({ "NamedQueryId": id })))
@@ -978,20 +979,23 @@ impl AthenaService {
             .map(str::to_owned);
 
         // Resolve query string from NamedQueryId or QueryString.
-        let mut query =
-            if let Some(named_query_id) = body.get("NamedQueryId").and_then(Value::as_str) {
-                let state = self.state.read();
-                let account = state
-                    .accounts
-                    .get(&req.account_id)
-                    .ok_or_else(|| invalid_request("Account not found"))?;
-                let nq = account.named_queries.get(named_query_id).ok_or_else(|| {
-                    invalid_request(format!("NamedQuery {named_query_id} not found"))
-                })?;
-                nq.query_string.clone()
-            } else {
-                require_str(&body, "QueryString")?
-            };
+        let mut query = if let Some(named_query_id) =
+            body.get("NamedQueryId").and_then(Value::as_str)
+        {
+            let mut state = self.state.write();
+            let account = state
+                .accounts
+                .get_mut(&req.account_id)
+                .ok_or_else(|| invalid_request(format!("NamedQuery {named_query_id} not found")))?;
+            let nq = account
+                .named_queries
+                .get_mut(named_query_id)
+                .ok_or_else(|| invalid_request(format!("NamedQuery {named_query_id} not found")))?;
+            nq.last_used_at = Some(Utc::now());
+            nq.query_string.clone()
+        } else {
+            require_str(&body, "QueryString")?
+        };
 
         // Apply ExecutionParameters substitution.
         if let Some(params) = body.get("ExecutionParameters").and_then(Value::as_array) {
@@ -2686,6 +2690,50 @@ mod tests {
             .unwrap();
         let qe = parse_json(&qe_resp).get("QueryExecution").unwrap().clone();
         assert_eq!(qe.get("Query").unwrap(), "SELECT 1 AS id");
+    }
+
+    #[test]
+    fn start_query_execution_bumps_named_query_last_used_at() {
+        let svc = AthenaService::new(SharedAthenaState::default());
+        let create_resp = svc
+            .create_named_query(&req(
+                "CreateNamedQuery",
+                json!({
+                    "Name": "tracked",
+                    "Database": "default",
+                    "QueryString": "SELECT 1",
+                    "WorkGroup": "primary"
+                }),
+            ))
+            .unwrap();
+        let nq_id = parse_json(&create_resp)
+            .get("NamedQueryId")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Before any StartQueryExecution the named query has no last_used_at.
+        {
+            let state = svc.state.read();
+            let account = state.accounts.values().next().unwrap();
+            let nq = account.named_queries.get(&nq_id).unwrap();
+            assert!(nq.last_used_at.is_none());
+        }
+
+        svc.start_query_execution(&req(
+            "StartQueryExecution",
+            json!({ "NamedQueryId": nq_id }),
+        ))
+        .unwrap();
+
+        let state = svc.state.read();
+        let account = state.accounts.values().next().unwrap();
+        let nq = account.named_queries.get(&nq_id).unwrap();
+        assert!(
+            nq.last_used_at.is_some(),
+            "last_used_at must be populated after StartQueryExecution",
+        );
     }
 
     #[test]

@@ -897,4 +897,18 @@ public final class Types {
             @JsonProperty("external_ca_validated") boolean externalCaValidated,
             @JsonProperty("status") String status,
             @JsonProperty("cert_type") String certType) {}
+
+    // ── Athena ────────────────────────────────────────────────────
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record AthenaNamedQuery(
+            String namedQueryId,
+            String name,
+            String description,
+            String database,
+            String queryString,
+            String workgroup,
+            String lastUsedAt) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record AthenaNamedQueriesResponse(List<AthenaNamedQuery> queries) {}
 }
