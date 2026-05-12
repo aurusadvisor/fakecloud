@@ -215,6 +215,85 @@ pub fn print_text_report(report: &ConformanceReport) {
     );
 }
 
+/// Build a compact markdown summary suitable for `$GITHUB_STEP_SUMMARY`
+/// (max ~1MB). One row per service plus an overall row; per-variant
+/// failure detail is intentionally omitted — the full report.json and
+/// report.txt artifacts cover that.
+pub fn render_markdown_summary(
+    report: &ConformanceReport,
+    baseline_passed_total: usize,
+    baseline_total: usize,
+    baseline_per_service: &HashMap<String, usize>,
+    regressions: &[String],
+) -> String {
+    fn pct(num: usize, den: usize) -> String {
+        if den == 0 {
+            "—".to_string()
+        } else {
+            format!("{:.1}%", num as f64 / den as f64 * 100.0)
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("## Conformance Report\n\n");
+
+    if regressions.is_empty() {
+        out.push_str("**Status:** PASSED (no regressions vs baseline)\n\n");
+    } else {
+        out.push_str("**Status:** FAILED — coverage dropped\n\n");
+        for r in regressions {
+            out.push_str(&format!("- {}\n", r));
+        }
+        out.push('\n');
+    }
+
+    let cur_passed = report.summary.variants_passed;
+    let cur_total = report.summary.total_variants;
+    out.push_str(&format!(
+        "**Overall:** {}/{} variants pass ({}). Baseline: {}/{} ({}). Delta: {:+}.\n\n",
+        cur_passed,
+        cur_total,
+        pct(cur_passed, cur_total),
+        baseline_passed_total,
+        baseline_total,
+        pct(baseline_passed_total, baseline_total),
+        cur_passed as i64 - baseline_passed_total as i64,
+    ));
+
+    out.push_str("| Service | Ops impl | Ops passing | Variants pass | Pct | Δ vs baseline |\n");
+    out.push_str("|---|---:|---:|---:|---:|---:|\n");
+
+    for svc in &report.services {
+        let implemented = svc.operations.iter().filter(|o| !o.not_implemented).count();
+        let ops_passing = svc
+            .operations
+            .iter()
+            .filter(|o| !o.not_implemented && o.failed == 0)
+            .count();
+        let v_passed: usize = svc.operations.iter().map(|o| o.passed).sum();
+        let v_total: usize = svc.operations.iter().map(|o| o.total_variants).sum();
+        let baseline = baseline_per_service
+            .get(&svc.service_name)
+            .copied()
+            .unwrap_or(0);
+        let delta = v_passed as i64 - baseline as i64;
+        out.push_str(&format!(
+            "| {} | {}/{} | {}/{} | {}/{} | {} | {:+} |\n",
+            svc.service_name,
+            implemented,
+            svc.total_operations,
+            ops_passing,
+            implemented,
+            v_passed,
+            v_total,
+            pct(v_passed, v_total),
+            delta,
+        ));
+    }
+
+    out
+}
+
 /// Print the report as JSON to stdout.
 pub fn print_json_report(report: &ConformanceReport) {
     println!(

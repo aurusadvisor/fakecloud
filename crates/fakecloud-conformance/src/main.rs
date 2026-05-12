@@ -63,6 +63,12 @@ enum CliCommand {
         /// Connect to an already-running fakecloud at this endpoint
         #[arg(long)]
         endpoint: Option<String>,
+        /// Also write the full JSON report to this path
+        #[arg(long)]
+        json_out: Option<PathBuf>,
+        /// Also write a compact markdown summary (suitable for $GITHUB_STEP_SUMMARY) to this path
+        #[arg(long)]
+        markdown_summary_out: Option<PathBuf>,
     },
     /// Update the baseline file with current conformance results
     UpdateBaseline {
@@ -95,7 +101,18 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        CliCommand::Check { baseline, endpoint } => cmd_check(&cli.models_dir, &baseline, endpoint),
+        CliCommand::Check {
+            baseline,
+            endpoint,
+            json_out,
+            markdown_summary_out,
+        } => cmd_check(
+            &cli.models_dir,
+            &baseline,
+            endpoint,
+            json_out.as_deref(),
+            markdown_summary_out.as_deref(),
+        ),
         CliCommand::UpdateBaseline { baseline, endpoint } => {
             cmd_update_baseline(&cli.models_dir, &baseline, endpoint)
         }
@@ -436,6 +453,8 @@ fn cmd_check(
     models_dir: &std::path::Path,
     baseline_path: &std::path::Path,
     endpoint: Option<String>,
+    json_out: Option<&std::path::Path>,
+    markdown_summary_out: Option<&std::path::Path>,
 ) {
     let baseline_content = std::fs::read_to_string(baseline_path).unwrap_or_else(|e| {
         eprintln!("Failed to read baseline {}: {}", baseline_path.display(), e);
@@ -449,6 +468,13 @@ fn cmd_check(
     let report_data = run_probes(models_dir, None, endpoint);
 
     report::print_text_report(&report_data);
+
+    if let Some(path) = json_out {
+        let json = serde_json::to_string_pretty(&report_data).unwrap();
+        if let Err(e) = std::fs::write(path, format!("{}\n", json)) {
+            eprintln!("Failed to write JSON report {}: {}", path.display(), e);
+        }
+    }
 
     // Check per-service ratchet
     let mut regressions = Vec::new();
@@ -489,6 +515,24 @@ fn cmd_check(
             current_total_passed,
             baseline.variants_passed - current_total_passed,
         ));
+    }
+
+    if let Some(path) = markdown_summary_out {
+        let baseline_passed: HashMap<String, usize> = baseline
+            .per_service
+            .iter()
+            .map(|(k, v)| (k.clone(), v.passed))
+            .collect();
+        let md = report::render_markdown_summary(
+            &report_data,
+            baseline.variants_passed,
+            baseline.total_variants,
+            &baseline_passed,
+            &regressions,
+        );
+        if let Err(e) = std::fs::write(path, md) {
+            eprintln!("Failed to write markdown summary {}: {}", path.display(), e);
+        }
     }
 
     if regressions.is_empty() {
