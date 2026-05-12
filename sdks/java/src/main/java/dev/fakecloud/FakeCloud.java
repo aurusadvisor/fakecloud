@@ -39,6 +39,7 @@ import dev.fakecloud.Types.Elbv2ListenersResponse;
 import dev.fakecloud.Types.Elbv2LoadBalancersResponse;
 import dev.fakecloud.Types.Elbv2RulesResponse;
 import dev.fakecloud.Types.Elbv2TargetGroupsResponse;
+import dev.fakecloud.Types.ElastiCacheAclsResponse;
 import dev.fakecloud.Types.ElastiCacheClustersResponse;
 import dev.fakecloud.Types.ElastiCacheReplicationGroupsResponse;
 import dev.fakecloud.Types.ElastiCacheServerlessCachesResponse;
@@ -271,6 +272,12 @@ public final class FakeCloud {
             return http.get(
                     "/_fakecloud/elasticache/serverless-caches",
                     ElastiCacheServerlessCachesResponse.class);
+        }
+
+        public ElastiCacheAclsResponse getElastiCacheAcls() {
+            return http.get(
+                    "/_fakecloud/elasticache/acls",
+                    ElastiCacheAclsResponse.class);
         }
     }
 

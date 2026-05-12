@@ -349,6 +349,81 @@ func TestE2EElastiCacheServerlessCaches(t *testing.T) {
 	}
 }
 
+func TestE2EElastiCacheAcls(t *testing.T) {
+	resetState(t)
+	ctx := context.Background()
+	cfg := awsConfig(t)
+
+	ecClient := elasticache.NewFromConfig(cfg, func(o *elasticache.Options) {
+		o.BaseEndpoint = aws.String(fakecloudURL)
+	})
+
+	_, err := ecClient.CreateUser(ctx, &elasticache.CreateUserInput{
+		UserId:       aws.String("sdk-go-acl-app"),
+		UserName:     aws.String("sdk-go-acl-app"),
+		Engine:       aws.String("redis"),
+		AccessString: aws.String("on ~app:* +get +set"),
+		Passwords:    []string{"s3cret-token-of-acceptable-length"},
+	})
+	if err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
+	}
+
+	_, err = ecClient.CreateUserGroup(ctx, &elasticache.CreateUserGroupInput{
+		UserGroupId: aws.String("sdk-go-acl-ug"),
+		Engine:      aws.String("redis"),
+		UserIds:     []string{"default", "sdk-go-acl-app"},
+	})
+	if err != nil {
+		t.Fatalf("CreateUserGroup failed: %v", err)
+	}
+
+	_, err = ecClient.CreateReplicationGroup(ctx, &elasticache.CreateReplicationGroupInput{
+		ReplicationGroupId:          aws.String("sdk-go-acl-rg"),
+		ReplicationGroupDescription: aws.String("ACL introspection"),
+		CacheNodeType:               aws.String("cache.t3.micro"),
+		Engine:                      aws.String("redis"),
+		EngineVersion:               aws.String("7.1"),
+		TransitEncryptionEnabled:    aws.Bool(true),
+		UserGroupIds:                []string{"sdk-go-acl-ug"},
+	})
+	if err != nil {
+		t.Fatalf("CreateReplicationGroup failed: %v", err)
+	}
+
+	fc := fakecloud.New(fakecloudURL)
+	resp, err := fc.ElastiCache().GetElastiCacheAcls(ctx)
+	if err != nil {
+		t.Fatalf("ElastiCache().GetElastiCacheAcls() failed: %v", err)
+	}
+
+	if len(resp.Acls) != 1 {
+		t.Fatalf("expected 1 ACL cluster, got %d", len(resp.Acls))
+	}
+	cluster := resp.Acls[0]
+	if cluster.ClusterID != "sdk-go-acl-rg" {
+		t.Fatalf("expected sdk-go-acl-rg cluster id, got %s", cluster.ClusterID)
+	}
+	if len(cluster.Groups) != 1 || cluster.Groups[0].Name != "sdk-go-acl-ug" {
+		t.Fatalf("expected sdk-go-acl-ug user group, got %+v", cluster.Groups)
+	}
+	gotApp := false
+	for _, u := range cluster.Users {
+		if u.Name == "sdk-go-acl-app" {
+			gotApp = true
+			if u.NoPasswordRequired {
+				t.Fatal("expected sdk-go-acl-app to require a password")
+			}
+			if u.PasswordCount != 1 {
+				t.Fatalf("expected password count 1, got %d", u.PasswordCount)
+			}
+		}
+	}
+	if !gotApp {
+		t.Fatal("expected sdk-go-acl-app user in ACL response")
+	}
+}
+
 // ── Reset ─────────────────────────────────────────────────────────
 
 func TestE2EReset(t *testing.T) {

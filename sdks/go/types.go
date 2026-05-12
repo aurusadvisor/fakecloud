@@ -101,6 +101,30 @@ type ElastiCacheServerlessCachesResponse struct {
 	ServerlessCaches []ElastiCacheServerlessCacheIntrospection `json:"serverlessCaches"`
 }
 
+type ElastiCacheAclUser struct {
+	Name               string `json:"name"`
+	Status             string `json:"status"`
+	AccessString       string `json:"accessString"`
+	NoPasswordRequired bool   `json:"noPasswordRequired"`
+	PasswordCount      int32  `json:"passwordCount"`
+}
+
+type ElastiCacheAclGroup struct {
+	Name    string   `json:"name"`
+	Members []string `json:"members"`
+}
+
+type ElastiCacheAclCluster struct {
+	ClusterID string                `json:"clusterId"`
+	Engine    string                `json:"engine"`
+	Users     []ElastiCacheAclUser  `json:"users"`
+	Groups    []ElastiCacheAclGroup `json:"groups"`
+}
+
+type ElastiCacheAclsResponse struct {
+	Acls []ElastiCacheAclCluster `json:"acls"`
+}
+
 // ── Lambda ─────────────────────────────────────────────────────────
 
 // LambdaInvocation represents a recorded Lambda invocation.

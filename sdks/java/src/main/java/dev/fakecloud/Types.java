@@ -102,6 +102,27 @@ public final class Types {
     public record ElastiCacheServerlessCachesResponse(
             List<ElastiCacheServerlessCacheIntrospection> serverlessCaches) {}
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record ElastiCacheAclUser(
+            String name,
+            String status,
+            String accessString,
+            boolean noPasswordRequired,
+            int passwordCount) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record ElastiCacheAclGroup(String name, List<String> members) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record ElastiCacheAclCluster(
+            String clusterId,
+            String engine,
+            List<ElastiCacheAclUser> users,
+            List<ElastiCacheAclGroup> groups) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record ElastiCacheAclsResponse(List<ElastiCacheAclCluster> acls) {}
+
     // ── Lambda ─────────────────────────────────────────────────────
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record LambdaInvocation(

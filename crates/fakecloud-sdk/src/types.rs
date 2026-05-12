@@ -716,6 +716,38 @@ pub struct ElastiCacheServerlessCachesResponse {
     pub serverless_caches: Vec<ElastiCacheServerlessCacheIntrospection>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElastiCacheAclUser {
+    pub name: String,
+    pub status: String,
+    pub access_string: String,
+    pub no_password_required: bool,
+    pub password_count: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElastiCacheAclGroup {
+    pub name: String,
+    pub members: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElastiCacheAclCluster {
+    pub cluster_id: String,
+    pub engine: String,
+    pub users: Vec<ElastiCacheAclUser>,
+    pub groups: Vec<ElastiCacheAclGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElastiCacheAclsResponse {
+    pub acls: Vec<ElastiCacheAclCluster>,
+}
+
 // ── Step Functions ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

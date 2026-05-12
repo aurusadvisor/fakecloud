@@ -235,6 +235,18 @@ impl ElastiCacheClient<'_> {
             .await?;
         FakeCloud::parse(resp).await
     }
+
+    /// List ACL state (users + user groups) for ElastiCache replication groups
+    /// that have one or more user groups attached.
+    pub async fn get_acls(&self) -> Result<ElastiCacheAclsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/elasticache/acls", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
 }
 
 // ── Lambda ──────────────────────────────────────────────────────────

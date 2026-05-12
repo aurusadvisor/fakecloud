@@ -40,8 +40,9 @@ When you call `CreateCacheCluster` (or `CreateReplicationGroup` for Redis/Valkey
 - `GET /_fakecloud/elasticache/clusters` — current cache clusters (id, engine, status, mapped port)
 - `GET /_fakecloud/elasticache/replication-groups` — replication groups with node members and ports
 - `GET /_fakecloud/elasticache/serverless-caches` — serverless caches with endpoints
+- `GET /_fakecloud/elasticache/acls` — ACL state (users + user groups) for replication groups with one or more user groups attached
 
-All three are exposed by the introspection SDKs (`fakecloud.elasticache.clusters()`, etc.) for assertions in tests.
+All four are exposed by the introspection SDKs (`fakecloud.elasticache.clusters()`, `getElastiCacheAcls()`, etc.) for assertions in tests.
 
 ## Gotchas
 
