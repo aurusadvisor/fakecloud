@@ -2936,48 +2936,6 @@ final class LogsDeliveryConfiguration
         public readonly array $recordFields = [],
         public readonly ?string $fieldDelimiter = null,
         public readonly mixed $s3DeliveryConfiguration = null,
- * A single Organizations tag (key/value).
- */
-final class OrganizationsTag
-{
-    public function __construct(
-        public readonly string $key,
-        public readonly string $value,
-    ) {}
-
-    public static function fromArray(array $data): self
-    {
-        return new self((string) $data['key'], (string) $data['value']);
-    }
-}
-
-/**
- * A single member account from
- * `GET /_fakecloud/organizations/accounts`. Mirrors the AWS
- * Organizations `Account` shape plus `parentOuId` and `scpAttached`
- * — the latter contains SCP ids directly attached to this account
- * only (no inherited policies).
- *
- * @param list<OrganizationsTag> $tags
- * @param list<string> $scpAttached
- */
-final class OrganizationsAccount
-{
-    /**
-     * @param list<OrganizationsTag> $tags
-     * @param list<string> $scpAttached
-     */
-    public function __construct(
-        public readonly string $id,
-        public readonly string $arn,
-        public readonly string $email,
-        public readonly string $name,
-        public readonly string $status,
-        public readonly string $joinedMethod,
-        public readonly string $joinedTimestamp,
-        public readonly ?string $parentOuId,
-        public readonly array $tags,
-        public readonly array $scpAttached,
     ) {}
 
     public static function fromArray(array $data): self
@@ -2992,21 +2950,6 @@ final class OrganizationsAccount
             array_values(array_map('strval', $data['recordFields'] ?? [])),
             isset($data['fieldDelimiter']) ? (string) $data['fieldDelimiter'] : null,
             $data['s3DeliveryConfiguration'] ?? null,
-        $tags = [];
-        foreach ($data['tags'] ?? [] as $t) {
-            $tags[] = OrganizationsTag::fromArray($t);
-        }
-        return new self(
-            (string) $data['id'],
-            (string) $data['arn'],
-            (string) $data['email'],
-            (string) $data['name'],
-            (string) $data['status'],
-            (string) $data['joinedMethod'],
-            (string) $data['joinedTimestamp'],
-            isset($data['parentOuId']) ? (string) $data['parentOuId'] : null,
-            $tags,
-            array_map('strval', $data['scpAttached'] ?? []),
         );
     }
 }
@@ -3036,16 +2979,6 @@ final class LogsFieldIndex
         public readonly array $fields,
         public readonly int $createdAt,
         public readonly int $lastUsedAt,
-/**
- * @param list<OrganizationsAccount> $accounts
- */
-final class OrganizationsAccountsResponse
-{
-    /** @param list<OrganizationsAccount> $accounts */
-    public function __construct(
-        public readonly array $accounts,
-        public readonly ?string $managementAccountId,
-        public readonly ?string $masterAccountId,
     ) {}
 
     public static function fromArray(array $data): self
@@ -3075,12 +3008,77 @@ final class LogsFieldIndexesResponse
         return new self(
             (string) ($data['logGroupName'] ?? ''),
             array_values($indexes),
-        $accounts = [];
-        foreach ($data['accounts'] ?? [] as $a) {
-            $accounts[] = OrganizationsAccount::fromArray($a);
-        }
+        );
+    }
+}
+
+// ── Organizations ─────────────────────────────────────────────────
+
+/**
+ * A single Organizations tag (key/value).
+ */
+final class OrganizationsTag
+{
+    public function __construct(
+        public readonly string $key,
+        public readonly string $value,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self((string) ($data['key'] ?? ''), (string) ($data['value'] ?? ''));
+    }
+}
+
+final class OrganizationsAccount
+{
+    public function __construct(
+        public readonly string $id,
+        public readonly string $arn,
+        public readonly string $email,
+        public readonly string $name,
+        public readonly string $status,
+        public readonly string $joinedMethod,
+        public readonly string $joinedTimestamp,
+        public readonly ?string $parentOuId = null,
+        /** @var OrganizationsTag[] */
+        public readonly array $tags = [],
+        /** @var string[] */
+        public readonly array $scpAttached = [],
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        $tags = array_map(OrganizationsTag::fromArray(...), $data['tags'] ?? []);
+        $scp = array_map('strval', $data['scpAttached'] ?? []);
         return new self(
-            $accounts,
+            (string) ($data['id'] ?? ''),
+            (string) ($data['arn'] ?? ''),
+            (string) ($data['email'] ?? ''),
+            (string) ($data['name'] ?? ''),
+            (string) ($data['status'] ?? ''),
+            (string) ($data['joinedMethod'] ?? ''),
+            (string) ($data['joinedTimestamp'] ?? ''),
+            isset($data['parentOuId']) ? (string) $data['parentOuId'] : null,
+            $tags,
+            $scp,
+        );
+    }
+}
+
+final class OrganizationsAccountsResponse
+{
+    public function __construct(
+        /** @var OrganizationsAccount[] */
+        public readonly array $accounts,
+        public readonly ?string $managementAccountId = null,
+        public readonly ?string $masterAccountId = null,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            array_map(OrganizationsAccount::fromArray(...), $data['accounts'] ?? []),
             isset($data['managementAccountId']) ? (string) $data['managementAccountId'] : null,
             isset($data['masterAccountId']) ? (string) $data['masterAccountId'] : null,
         );
