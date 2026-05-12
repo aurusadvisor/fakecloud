@@ -544,10 +544,7 @@ def handler(event, context):
     );
     assert_eq!(
         inv["userPoolArn"].as_str(),
-        Some(
-            format!("arn:aws:cognito-idp:us-east-1:123456789012:userpool/{pool_id}")
-                .as_str()
-        )
+        Some(format!("arn:aws:cognito-idp:us-east-1:123456789012:userpool/{pool_id}").as_str())
     );
     let claims_added: Vec<&str> = inv["claimsAdded"]
         .as_array()

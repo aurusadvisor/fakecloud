@@ -1028,8 +1028,7 @@ class PreTokenGenInvocationsResponse:
     def from_dict(cls, data: Dict[str, Any]) -> PreTokenGenInvocationsResponse:
         return cls(
             invocations=[
-                PreTokenGenInvocation.from_dict(e)
-                for e in data.get("invocations", [])
+                PreTokenGenInvocation.from_dict(e) for e in data.get("invocations", [])
             ],
         )
 
