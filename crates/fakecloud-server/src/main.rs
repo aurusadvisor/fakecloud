@@ -30,9 +30,8 @@ use introspection::{
     ecr_image_response, ecr_pull_through_rule_response, ecr_repository_response,
     ecs_cluster_response, ecs_lifecycle_event, ecs_task_response, elasticache_acls_response,
     elasticache_cluster_response, elasticache_replication_group_response,
-    elasticache_serverless_cache_response,
-    elbv2_listener_response, elbv2_load_balancer_response, elbv2_rule_response,
-    elbv2_target_group_response, rds_instance_response,
+    elasticache_serverless_cache_response, elbv2_listener_response, elbv2_load_balancer_response,
+    elbv2_rule_response, elbv2_target_group_response, rds_instance_response,
 };
 use kinesis_lambda_poller::KinesisLambdaPoller;
 use reset::ResetState;
