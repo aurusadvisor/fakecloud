@@ -80,25 +80,20 @@ jobs:
         id: check
         run: |
           set -o pipefail
-          cargo run -p fakecloud-conformance -- check 2>&1 | tee conformance-report.txt
+          cargo run -p fakecloud-conformance -- check \
+            --json-out conformance-report.json \
+            --markdown-summary-out conformance-summary.md \
+            2>&1 | tee conformance-report.txt
 
       - name: Audit handwritten tests (fails if implemented action lacks a test)
         if: always() && steps.check.outcome != 'skipped'
         run: cargo run -p fakecloud-conformance -- audit
 
-      - name: Generate JSON report
-        if: always()
-        run: cargo run -p fakecloud-conformance -- run --format json > conformance-report.json 2>/dev/null || true
-
       - name: Post summary
         if: always()
         run: |
-          echo '## Conformance Report' >> $GITHUB_STEP_SUMMARY
-          echo '' >> $GITHUB_STEP_SUMMARY
-          if [ -f conformance-report.txt ]; then
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            grep -E "^(Conformance|  |Operations|Variants)" conformance-report.txt >> $GITHUB_STEP_SUMMARY || true
-            echo '```' >> $GITHUB_STEP_SUMMARY
+          if [ -f conformance-summary.md ]; then
+            cat conformance-summary.md >> $GITHUB_STEP_SUMMARY
           fi
 
       - name: Upload report
@@ -109,4 +104,5 @@ jobs:
           path: |
             conformance-report.txt
             conformance-report.json
+            conformance-summary.md
           retention-days: 90
