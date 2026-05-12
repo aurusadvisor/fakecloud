@@ -161,46 +161,48 @@ jobs:
           # Layer 2: depends on fakecloud-aws
           publish fakecloud-core
 
-          # Layer 3: depend on aws + core only
+          # Layer 3a: depend on aws + core + persistence only
           publish fakecloud-sqs
-          publish fakecloud-sns
           publish fakecloud-iam
-          publish fakecloud-organizations  # depends on core only
+          publish fakecloud-organizations
           publish fakecloud-lambda
-          publish fakecloud-secretsmanager
           publish fakecloud-logs
           publish fakecloud-kms
           publish fakecloud-ses
-          publish fakecloud-cognito
           publish fakecloud-rds
           publish fakecloud-elasticache
           publish fakecloud-kinesis
-          publish fakecloud-scheduler      # depends on aws + core + persistence
-          publish fakecloud-apigatewayv2   # depends on core only
-          publish fakecloud-apigateway     # depends on core + persistence
-          publish fakecloud-bedrock        # depends on aws + core
-          publish fakecloud-elbv2          # depends on aws + core + persistence
-          publish fakecloud-cloudfront     # depends on aws + core + persistence
-          publish fakecloud-route53        # depends on aws + core + persistence
-          publish fakecloud-acm            # depends on aws + core
-          publish fakecloud-application-autoscaling  # depends on aws + core
-          publish fakecloud-wafv2          # depends on aws + core
-          publish fakecloud-athena         # depends on aws + core
-          publish fakecloud-cloudwatch     # depends on aws + core
-          publish fakecloud-glue           # depends on aws + core
-          publish fakecloud-bedrock-agent  # depends on core only
+          publish fakecloud-scheduler
+          publish fakecloud-bedrock
+          publish fakecloud-cloudfront
+          publish fakecloud-acm
+          publish fakecloud-application-autoscaling
+          publish fakecloud-wafv2
+          publish fakecloud-cloudwatch
+          publish fakecloud-glue
+          publish fakecloud-bedrock-agent
 
-          # Layer 4: depend on layer 3 crates
+          # Layer 3b: depend on layer 3a
+          publish fakecloud-sns            # depends on ses
+          publish fakecloud-secretsmanager # depends on iam
+          publish fakecloud-cognito        # depends on iam
+          publish fakecloud-elbv2          # depends on wafv2
+          publish fakecloud-apigatewayv2   # depends on wafv2
+          publish fakecloud-bedrock-agent-runtime  # depends on bedrock-agent
+          publish fakecloud-eventbridge    # depends on iam, lambda, logs
+
+          # Layer 4: depend on layer 3a/3b crates
           publish fakecloud-s3             # depends on kms
-          publish fakecloud-ecr            # depends on kms
+          publish fakecloud-ecr            # depends on iam, kms
           publish fakecloud-ssm            # depends on secretsmanager
-          publish fakecloud-eventbridge    # depends on lambda, logs
-          publish fakecloud-bedrock-agent-runtime  # depends on bedrock-agent + core
+          publish fakecloud-apigateway     # depends on elbv2, wafv2
 
-          # Layer 5: depends on layer 4
+          # Layer 5: depend on layer 4
           publish fakecloud-dynamodb       # depends on s3
+          publish fakecloud-firehose       # depends on s3
+          publish fakecloud-athena         # depends on glue, s3
+          publish fakecloud-route53        # depends on cloudfront, elbv2, logs, s3
           publish fakecloud-ecs            # depends on logs, secretsmanager, ssm
-          publish fakecloud-firehose       # depends on aws + core + s3
 
           # Layer 6: depends on layer 5
           publish fakecloud-stepfunctions  # depends on dynamodb
