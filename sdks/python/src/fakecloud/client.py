@@ -51,6 +51,8 @@ from fakecloud.types import (
     FireRuleResponse,
     FireScheduleResponse,
     ForceDlqResponse,
+    GlueJobRunsResponse,
+    GlueJobsResponse,
     HealthResponse,
     InboundEmailRequest,
     InboundEmailResponse,
@@ -60,8 +62,6 @@ from fakecloud.types import (
     LogsAnomalyInjectResponse,
     MintAuthorizationCodeRequest,
     MintAuthorizationCodeResponse,
-    GlueJobRunsResponse,
-    GlueJobsResponse,
     PendingConfirmationsResponse,
     RdsInstancesResponse,
     ResetResponse,
@@ -768,9 +768,7 @@ class GlueClient:
         _check(resp)
         return GlueJobsResponse.from_dict(resp.json())
 
-    async def get_job_runs(
-        self, job_name: Optional[str] = None
-    ) -> GlueJobRunsResponse:
+    async def get_job_runs(self, job_name: Optional[str] = None) -> GlueJobRunsResponse:
         params = {"job_name": job_name} if job_name else None
         resp = await self._client.get(
             f"{self._base}/_fakecloud/glue/job-runs", params=params
@@ -1281,9 +1279,7 @@ class _SyncGlueClient:
 
     def get_job_runs(self, job_name: Optional[str] = None) -> GlueJobRunsResponse:
         params = {"job_name": job_name} if job_name else None
-        resp = self._client.get(
-            f"{self._base}/_fakecloud/glue/job-runs", params=params
-        )
+        resp = self._client.get(f"{self._base}/_fakecloud/glue/job-runs", params=params)
         _check(resp)
         return GlueJobRunsResponse.from_dict(resp.json())
 
