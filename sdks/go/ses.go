@@ -55,6 +55,46 @@ func (c *SESClient) GetDkimPublicKey(ctx context.Context, identity string) (*SES
 	return &out, nil
 }
 
+// GetBounces returns all bounces queued via SES SendBounce.
+func (c *SESClient) GetBounces(ctx context.Context) (*SESBouncesResponse, error) {
+	var out SESBouncesResponse
+	if err := c.fc.doGet(ctx, "/_fakecloud/ses/bounces", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetMessageInsights returns per-message delivery tracking (sends, deliveries,
+// bounces, complaints) for one message id.
+func (c *SESClient) GetMessageInsights(ctx context.Context, messageID string) (*SESMessageInsightsResponse, error) {
+	var out SESMessageInsightsResponse
+	path := "/_fakecloud/ses/messages/" + messageID + "/insights"
+	if err := c.fc.doGet(ctx, path, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetSmtpSubmissions returns messages received via the inbound SMTP listener
+// (FAKECLOUD_SES_SMTP_PORT).
+func (c *SESClient) GetSmtpSubmissions(ctx context.Context) (*SESSmtpSubmissionsResponse, error) {
+	var out SESSmtpSubmissionsResponse
+	if err := c.fc.doGet(ctx, "/_fakecloud/ses/smtp/submissions", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetEventDestinationDeliveries returns the SES fanout log: every event
+// dispatched to a configured event destination (sns/eventbridge/kinesis/firehose/cloudwatch).
+func (c *SESClient) GetEventDestinationDeliveries(ctx context.Context) (*SESEventDestinationDeliveriesResponse, error) {
+	var out SESEventDestinationDeliveriesResponse
+	if err := c.fc.doGet(ctx, "/_fakecloud/ses/event-destinations/deliveries", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // SetSandbox toggles the SES sandbox state for the account.
 // sandbox=true disables production access; sandbox=false re-enables it.
 func (c *SESClient) SetSandbox(ctx context.Context, sandbox bool) (*SESSandboxResponse, error) {

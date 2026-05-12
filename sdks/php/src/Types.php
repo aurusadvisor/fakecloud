@@ -494,6 +494,214 @@ final class SesSandboxResponse
     }
 }
 
+final class SesBouncedRecipientInfo
+{
+    public function __construct(
+        public readonly string $recipient,
+        public readonly string $bounceType,
+        public readonly string $action,
+        public readonly string $status,
+        public readonly string $diagnosticCode,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['recipient'] ?? ''),
+            (string) ($data['bounceType'] ?? ''),
+            (string) ($data['action'] ?? ''),
+            (string) ($data['status'] ?? ''),
+            (string) ($data['diagnosticCode'] ?? ''),
+        );
+    }
+}
+
+final class SesBounce
+{
+    public function __construct(
+        public readonly string $messageId,
+        public readonly string $bounceType,
+        public readonly string $bounceSubType,
+        /** @var SesBouncedRecipientInfo[] */
+        public readonly array $bouncedRecipientInfo,
+        public readonly ?string $explanation,
+        public readonly string $timestamp,
+        public readonly string $originalMessageId,
+        public readonly string $bounceSender,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['messageId'] ?? ''),
+            (string) ($data['bounceType'] ?? ''),
+            (string) ($data['bounceSubType'] ?? ''),
+            array_map(
+                fn(array $i) => SesBouncedRecipientInfo::fromArray($i),
+                $data['bouncedRecipientInfo'] ?? []
+            ),
+            $data['explanation'] ?? null,
+            (string) ($data['timestamp'] ?? ''),
+            (string) ($data['originalMessageId'] ?? ''),
+            (string) ($data['bounceSender'] ?? ''),
+        );
+    }
+}
+
+final class SesBouncesResponse
+{
+    public function __construct(
+        /** @var SesBounce[] */
+        public readonly array $bounces,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(
+            fn(array $b) => SesBounce::fromArray($b),
+            $data['bounces'] ?? []
+        ));
+    }
+}
+
+final class SesMessageInsightEvent
+{
+    public function __construct(
+        public readonly string $destination,
+        public readonly string $timestamp,
+        public readonly ?string $bounceType,
+        public readonly ?string $bounceSubType,
+        public readonly ?string $diagnosticCode,
+        public readonly ?string $complaintFeedbackType,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['destination'] ?? ''),
+            (string) ($data['timestamp'] ?? ''),
+            $data['bounceType'] ?? null,
+            $data['bounceSubType'] ?? null,
+            $data['diagnosticCode'] ?? null,
+            $data['complaintFeedbackType'] ?? null,
+        );
+    }
+}
+
+final class SesMessageInsightsResponse
+{
+    public function __construct(
+        public readonly string $messageId,
+        /** @var SesMessageInsightEvent[] */ public readonly array $sends,
+        /** @var SesMessageInsightEvent[] */ public readonly array $deliveries,
+        /** @var SesMessageInsightEvent[] */ public readonly array $opens,
+        /** @var SesMessageInsightEvent[] */ public readonly array $clicks,
+        /** @var SesMessageInsightEvent[] */ public readonly array $bounces,
+        /** @var SesMessageInsightEvent[] */ public readonly array $complaints,
+        /** @var SesMessageInsightEvent[] */ public readonly array $rejects,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        $events = fn(string $k) => array_map(
+            fn(array $e) => SesMessageInsightEvent::fromArray($e),
+            $data[$k] ?? []
+        );
+        return new self(
+            (string) ($data['messageId'] ?? ''),
+            $events('sends'),
+            $events('deliveries'),
+            $events('opens'),
+            $events('clicks'),
+            $events('bounces'),
+            $events('complaints'),
+            $events('rejects'),
+        );
+    }
+}
+
+final class SesSmtpSubmission
+{
+    public function __construct(
+        public readonly string $messageId,
+        public readonly string $from,
+        /** @var string[] */ public readonly array $to,
+        public readonly ?string $subject,
+        public readonly int $rawSizeBytes,
+        public readonly string $receivedAt,
+        public readonly string $authUser,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['messageId'] ?? ''),
+            (string) ($data['from'] ?? ''),
+            $data['to'] ?? [],
+            $data['subject'] ?? null,
+            (int) ($data['rawSizeBytes'] ?? 0),
+            (string) ($data['receivedAt'] ?? ''),
+            (string) ($data['authUser'] ?? ''),
+        );
+    }
+}
+
+final class SesSmtpSubmissionsResponse
+{
+    public function __construct(
+        /** @var SesSmtpSubmission[] */
+        public readonly array $submissions,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(
+            fn(array $s) => SesSmtpSubmission::fromArray($s),
+            $data['submissions'] ?? []
+        ));
+    }
+}
+
+final class SesEventDestinationDelivery
+{
+    public function __construct(
+        public readonly string $destinationName,
+        public readonly string $destinationType,
+        public readonly string $eventType,
+        public readonly string $messageId,
+        public readonly string $dispatchedAt,
+        public readonly string $targetArn,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['destinationName'] ?? ''),
+            (string) ($data['destinationType'] ?? ''),
+            (string) ($data['eventType'] ?? ''),
+            (string) ($data['messageId'] ?? ''),
+            (string) ($data['dispatchedAt'] ?? ''),
+            (string) ($data['targetArn'] ?? ''),
+        );
+    }
+}
+
+final class SesEventDestinationDeliveriesResponse
+{
+    public function __construct(
+        /** @var SesEventDestinationDelivery[] */
+        public readonly array $deliveries,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(
+            fn(array $d) => SesEventDestinationDelivery::fromArray($d),
+            $data['deliveries'] ?? []
+        ));
+    }
+}
+
 // ── SNS ────────────────────────────────────────────────────────
 
 final class SnsMessage

@@ -462,6 +462,187 @@ class SesSandboxResponse:
         )
 
 
+@dataclass
+class SesBouncedRecipientInfo:
+    recipient: str
+    bounce_type: str
+    action: str
+    status: str
+    diagnostic_code: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SesBouncedRecipientInfo:
+        d = _convert_keys(data)
+        return cls(
+            recipient=d.get("recipient", ""),
+            bounce_type=d.get("bounce_type", ""),
+            action=d.get("action", ""),
+            status=d.get("status", ""),
+            diagnostic_code=d.get("diagnostic_code", ""),
+        )
+
+
+@dataclass
+class SesBounce:
+    message_id: str
+    bounce_type: str
+    bounce_sub_type: str
+    bounced_recipient_info: List[SesBouncedRecipientInfo]
+    explanation: Optional[str]
+    timestamp: str
+    original_message_id: str
+    bounce_sender: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SesBounce:
+        d = _convert_keys(data)
+        return cls(
+            message_id=d.get("message_id", ""),
+            bounce_type=d.get("bounce_type", ""),
+            bounce_sub_type=d.get("bounce_sub_type", ""),
+            bounced_recipient_info=[
+                SesBouncedRecipientInfo.from_dict(i)
+                for i in data.get("bouncedRecipientInfo", [])
+            ],
+            explanation=d.get("explanation"),
+            timestamp=d.get("timestamp", ""),
+            original_message_id=d.get("original_message_id", ""),
+            bounce_sender=d.get("bounce_sender", ""),
+        )
+
+
+@dataclass
+class SesBouncesResponse:
+    bounces: List[SesBounce]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SesBouncesResponse:
+        return cls(bounces=[SesBounce.from_dict(b) for b in data.get("bounces", [])])
+
+
+@dataclass
+class SesMessageInsightEvent:
+    destination: str
+    timestamp: str
+    bounce_type: Optional[str] = None
+    bounce_sub_type: Optional[str] = None
+    diagnostic_code: Optional[str] = None
+    complaint_feedback_type: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SesMessageInsightEvent:
+        d = _convert_keys(data)
+        return cls(
+            destination=d.get("destination", ""),
+            timestamp=d.get("timestamp", ""),
+            bounce_type=d.get("bounce_type"),
+            bounce_sub_type=d.get("bounce_sub_type"),
+            diagnostic_code=d.get("diagnostic_code"),
+            complaint_feedback_type=d.get("complaint_feedback_type"),
+        )
+
+
+@dataclass
+class SesMessageInsightsResponse:
+    message_id: str
+    sends: List[SesMessageInsightEvent]
+    deliveries: List[SesMessageInsightEvent]
+    opens: List[SesMessageInsightEvent]
+    clicks: List[SesMessageInsightEvent]
+    bounces: List[SesMessageInsightEvent]
+    complaints: List[SesMessageInsightEvent]
+    rejects: List[SesMessageInsightEvent]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SesMessageInsightsResponse:
+        def _events(key: str) -> List[SesMessageInsightEvent]:
+            return [SesMessageInsightEvent.from_dict(e) for e in data.get(key, [])]
+
+        return cls(
+            message_id=data.get("messageId", ""),
+            sends=_events("sends"),
+            deliveries=_events("deliveries"),
+            opens=_events("opens"),
+            clicks=_events("clicks"),
+            bounces=_events("bounces"),
+            complaints=_events("complaints"),
+            rejects=_events("rejects"),
+        )
+
+
+@dataclass
+class SesSmtpSubmission:
+    message_id: str
+    from_addr: str
+    to: List[str]
+    subject: Optional[str]
+    raw_size_bytes: int
+    received_at: str
+    auth_user: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SesSmtpSubmission:
+        d = _convert_keys(data)
+        return cls(
+            message_id=d.get("message_id", ""),
+            from_addr=data.get("from", ""),
+            to=d.get("to", []),
+            subject=d.get("subject"),
+            raw_size_bytes=int(d.get("raw_size_bytes", 0)),
+            received_at=d.get("received_at", ""),
+            auth_user=d.get("auth_user", ""),
+        )
+
+
+@dataclass
+class SesSmtpSubmissionsResponse:
+    submissions: List[SesSmtpSubmission]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SesSmtpSubmissionsResponse:
+        return cls(
+            submissions=[
+                SesSmtpSubmission.from_dict(s) for s in data.get("submissions", [])
+            ]
+        )
+
+
+@dataclass
+class SesEventDestinationDelivery:
+    destination_name: str
+    destination_type: str
+    event_type: str
+    message_id: str
+    dispatched_at: str
+    target_arn: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SesEventDestinationDelivery:
+        d = _convert_keys(data)
+        return cls(
+            destination_name=d.get("destination_name", ""),
+            destination_type=d.get("destination_type", ""),
+            event_type=d.get("event_type", ""),
+            message_id=d.get("message_id", ""),
+            dispatched_at=d.get("dispatched_at", ""),
+            target_arn=d.get("target_arn", ""),
+        )
+
+
+@dataclass
+class SesEventDestinationDeliveriesResponse:
+    deliveries: List[SesEventDestinationDelivery]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SesEventDestinationDeliveriesResponse:
+        return cls(
+            deliveries=[
+                SesEventDestinationDelivery.from_dict(d)
+                for d in data.get("deliveries", [])
+            ]
+        )
+
+
 # ── SNS ─────────────────────────────────────────────────────────────
 
 

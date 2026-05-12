@@ -215,6 +215,10 @@ curl http://localhost:4566/_fakecloud/health
 | `/_fakecloud/ses/identities/{name}/mail-from-status` | POST | Set the custom MAIL FROM verification state. |
 | `/_fakecloud/ses/identities/{name}/dkim-public-key` | GET | Fetch the published DKIM public key for an identity. |
 | `/_fakecloud/ses/metrics` | GET | **NEW** -- Aggregate send metrics (sends, bounces, complaints, deliveries). |
+| `/_fakecloud/ses/bounces` | GET | List bounces queued via `SendBounce` with per-recipient DSN fields. |
+| `/_fakecloud/ses/messages/{message_id}/insights` | GET | Per-message delivery tracking (sends, deliveries, bounces, complaints). |
+| `/_fakecloud/ses/smtp/submissions` | GET | Messages accepted via the SMTP submission listener. |
+| `/_fakecloud/ses/event-destinations/deliveries` | GET | Log of every event dispatched to a configured event destination. |
 
 ## SNS
 

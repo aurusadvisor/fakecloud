@@ -67,8 +67,12 @@ import dev.fakecloud.Types.SesEmailsResponse;
 import dev.fakecloud.Types.SesMailFromStatusRequest;
 import dev.fakecloud.Types.SesMailFromStatusResponse;
 import dev.fakecloud.Types.SesMetrics;
+import dev.fakecloud.Types.SesBouncesResponse;
+import dev.fakecloud.Types.SesEventDestinationDeliveriesResponse;
+import dev.fakecloud.Types.SesMessageInsightsResponse;
 import dev.fakecloud.Types.SesSandboxRequest;
 import dev.fakecloud.Types.SesSandboxResponse;
+import dev.fakecloud.Types.SesSmtpSubmissionsResponse;
 import dev.fakecloud.Types.SetCertificateStatusRequest;
 import dev.fakecloud.Types.SetHealthCheckStatusRequest;
 import dev.fakecloud.Types.SnsMessagesResponse;
@@ -338,6 +342,27 @@ public final class FakeCloud {
                     "/_fakecloud/ses/account/sandbox",
                     new SesSandboxRequest(sandbox),
                     SesSandboxResponse.class);
+        }
+
+        public SesBouncesResponse getBounces() {
+            return http.get("/_fakecloud/ses/bounces", SesBouncesResponse.class);
+        }
+
+        public SesMessageInsightsResponse getMessageInsights(String messageId) {
+            return http.get(
+                    "/_fakecloud/ses/messages/" + messageId + "/insights",
+                    SesMessageInsightsResponse.class);
+        }
+
+        public SesSmtpSubmissionsResponse getSmtpSubmissions() {
+            return http.get(
+                    "/_fakecloud/ses/smtp/submissions", SesSmtpSubmissionsResponse.class);
+        }
+
+        public SesEventDestinationDeliveriesResponse getEventDestinationDeliveries() {
+            return http.get(
+                    "/_fakecloud/ses/event-destinations/deliveries",
+                    SesEventDestinationDeliveriesResponse.class);
         }
     }
 

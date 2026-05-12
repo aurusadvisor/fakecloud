@@ -215,6 +215,87 @@ type SESSandboxResponse struct {
 	ProductionAccessEnabled  bool `json:"productionAccessEnabled"`
 }
 
+// SESBouncedRecipientInfo describes one recipient inside a queued bounce.
+type SESBouncedRecipientInfo struct {
+	Recipient      string `json:"recipient"`
+	BounceType     string `json:"bounceType"`
+	Action         string `json:"action"`
+	Status         string `json:"status"`
+	DiagnosticCode string `json:"diagnosticCode"`
+}
+
+// SESBounce is one bounce queued via SES SendBounce.
+type SESBounce struct {
+	MessageID             string                    `json:"messageId"`
+	BounceType            string                    `json:"bounceType"`
+	BounceSubType         string                    `json:"bounceSubType"`
+	BouncedRecipientInfo  []SESBouncedRecipientInfo `json:"bouncedRecipientInfo"`
+	Explanation           *string                   `json:"explanation,omitempty"`
+	Timestamp             string                    `json:"timestamp"`
+	OriginalMessageID     string                    `json:"originalMessageId"`
+	BounceSender          string                    `json:"bounceSender"`
+}
+
+// SESBouncesResponse contains all queued bounces.
+type SESBouncesResponse struct {
+	Bounces []SESBounce `json:"bounces"`
+}
+
+// SESMessageInsightEvent is one delivery / bounce / complaint observation
+// recorded against a sent SES message.
+type SESMessageInsightEvent struct {
+	Destination            string  `json:"destination"`
+	Timestamp              string  `json:"timestamp"`
+	BounceType             *string `json:"bounceType,omitempty"`
+	BounceSubType          *string `json:"bounceSubType,omitempty"`
+	DiagnosticCode         *string `json:"diagnosticCode,omitempty"`
+	ComplaintFeedbackType  *string `json:"complaintFeedbackType,omitempty"`
+}
+
+// SESMessageInsightsResponse is the per-message MessageInsights shape.
+type SESMessageInsightsResponse struct {
+	MessageID  string                   `json:"messageId"`
+	Sends      []SESMessageInsightEvent `json:"sends"`
+	Deliveries []SESMessageInsightEvent `json:"deliveries"`
+	Opens      []SESMessageInsightEvent `json:"opens"`
+	Clicks     []SESMessageInsightEvent `json:"clicks"`
+	Bounces    []SESMessageInsightEvent `json:"bounces"`
+	Complaints []SESMessageInsightEvent `json:"complaints"`
+	Rejects    []SESMessageInsightEvent `json:"rejects"`
+}
+
+// SESSmtpSubmission is one message accepted via the SES SMTP listener.
+type SESSmtpSubmission struct {
+	MessageID     string   `json:"messageId"`
+	From          string   `json:"from"`
+	To            []string `json:"to"`
+	Subject       *string  `json:"subject,omitempty"`
+	RawSizeBytes  int      `json:"rawSizeBytes"`
+	ReceivedAt    string   `json:"receivedAt"`
+	AuthUser      string   `json:"authUser"`
+}
+
+// SESSmtpSubmissionsResponse contains all SMTP submissions.
+type SESSmtpSubmissionsResponse struct {
+	Submissions []SESSmtpSubmission `json:"submissions"`
+}
+
+// SESEventDestinationDelivery is one event handed off by the SES fanout
+// to a configured event destination.
+type SESEventDestinationDelivery struct {
+	DestinationName string `json:"destinationName"`
+	DestinationType string `json:"destinationType"`
+	EventType       string `json:"eventType"`
+	MessageID       string `json:"messageId"`
+	DispatchedAt    string `json:"dispatchedAt"`
+	TargetArn       string `json:"targetArn"`
+}
+
+// SESEventDestinationDeliveriesResponse contains all event-destination dispatches.
+type SESEventDestinationDeliveriesResponse struct {
+	Deliveries []SESEventDestinationDelivery `json:"deliveries"`
+}
+
 // ── SNS ────────────────────────────────────────────────────────────
 
 // SNSMessage represents a published SNS message.

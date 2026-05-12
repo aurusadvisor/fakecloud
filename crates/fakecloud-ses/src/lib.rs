@@ -8,7 +8,8 @@ pub mod v1;
 
 pub use service::SesV2Service;
 pub use state::{
-    ConfigurationSet, ContactList, DedicatedIpPool, EmailIdentity, EmailTemplate, EventDestination,
-    IpFilter, ReceiptAction, ReceiptFilter, ReceiptRule, ReceiptRuleSet, SentEmail, SesSnapshot,
-    SesState, SharedSesState, SES_SNAPSHOT_SCHEMA_VERSION,
+    BouncedRecipientInfo, ConfigurationSet, ContactList, DedicatedIpPool, EmailIdentity,
+    EmailTemplate, EventDestination, EventDestinationDispatch, IpFilter, ReceiptAction,
+    ReceiptFilter, ReceiptRule, ReceiptRuleSet, SentBounce, SentEmail, SesSnapshot, SesState,
+    SharedSesState, SmtpSubmission, SES_SNAPSHOT_SCHEMA_VERSION,
 };

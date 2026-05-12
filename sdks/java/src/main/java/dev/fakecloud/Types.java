@@ -176,6 +176,74 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record SesSandboxResponse(boolean sandbox, boolean productionAccessEnabled) {}
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SesBouncedRecipientInfo(
+            String recipient,
+            String bounceType,
+            String action,
+            String status,
+            String diagnosticCode) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SesBounce(
+            String messageId,
+            String bounceType,
+            String bounceSubType,
+            List<SesBouncedRecipientInfo> bouncedRecipientInfo,
+            String explanation,
+            String timestamp,
+            String originalMessageId,
+            String bounceSender) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SesBouncesResponse(List<SesBounce> bounces) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SesMessageInsightEvent(
+            String destination,
+            String timestamp,
+            String bounceType,
+            String bounceSubType,
+            String diagnosticCode,
+            String complaintFeedbackType) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SesMessageInsightsResponse(
+            String messageId,
+            List<SesMessageInsightEvent> sends,
+            List<SesMessageInsightEvent> deliveries,
+            List<SesMessageInsightEvent> opens,
+            List<SesMessageInsightEvent> clicks,
+            List<SesMessageInsightEvent> bounces,
+            List<SesMessageInsightEvent> complaints,
+            List<SesMessageInsightEvent> rejects) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SesSmtpSubmission(
+            String messageId,
+            String from,
+            List<String> to,
+            String subject,
+            long rawSizeBytes,
+            String receivedAt,
+            String authUser) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SesSmtpSubmissionsResponse(List<SesSmtpSubmission> submissions) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SesEventDestinationDelivery(
+            String destinationName,
+            String destinationType,
+            String eventType,
+            String messageId,
+            String dispatchedAt,
+            String targetArn) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SesEventDestinationDeliveriesResponse(
+            List<SesEventDestinationDelivery> deliveries) {}
+
     // ── SNS ────────────────────────────────────────────────────────
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record SnsMessage(

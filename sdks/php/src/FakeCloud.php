@@ -293,6 +293,36 @@ final class SesClient
             $this->http->postJson('/_fakecloud/ses/account/sandbox', ['sandbox' => $sandbox])
         );
     }
+
+    public function getBounces(): SesBouncesResponse
+    {
+        return SesBouncesResponse::fromArray(
+            $this->http->get('/_fakecloud/ses/bounces')
+        );
+    }
+
+    public function getMessageInsights(string $messageId): SesMessageInsightsResponse
+    {
+        return SesMessageInsightsResponse::fromArray(
+            $this->http->get(
+                '/_fakecloud/ses/messages/' . rawurlencode($messageId) . '/insights'
+            )
+        );
+    }
+
+    public function getSmtpSubmissions(): SesSmtpSubmissionsResponse
+    {
+        return SesSmtpSubmissionsResponse::fromArray(
+            $this->http->get('/_fakecloud/ses/smtp/submissions')
+        );
+    }
+
+    public function getEventDestinationDeliveries(): SesEventDestinationDeliveriesResponse
+    {
+        return SesEventDestinationDeliveriesResponse::fromArray(
+            $this->http->get('/_fakecloud/ses/event-destinations/deliveries')
+        );
+    }
 }
 
 final class SnsClient
