@@ -958,6 +958,10 @@ export class FakeCloud {
   get athena(): AthenaClient {
     return this._athena;
   }
+
+  get organizations(): OrganizationsClient {
+    return this._organizations;
+  }
 }
 
 export class AthenaClient {
@@ -971,8 +975,7 @@ export class AthenaClient {
    */
   async getNamedQueries(): Promise<AthenaNamedQueriesResponse> {
     const resp = await fetch(`${this.baseUrl}/_fakecloud/athena/named-queries`);
-  get organizations(): OrganizationsClient {
-    return this._organizations;
+    return parse(resp);
   }
 }
 
