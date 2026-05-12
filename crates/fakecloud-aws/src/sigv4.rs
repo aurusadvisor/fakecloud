@@ -110,8 +110,15 @@ fn parse_header_credential(auth_header: &str) -> Option<SigV4Info> {
     let auth = auth_header.strip_prefix("AWS4-HMAC-SHA256 ")?;
     let credential_start = auth.find("Credential=")?;
     let credential_value = &auth[credential_start + "Credential=".len()..];
-    let credential_end = credential_value.find(',')?;
-    let credential = &credential_value[..credential_end];
+    // Real SigV4 headers always carry `SignedHeaders` and `Signature` after
+    // the credential, separated by commas. Some clients (and our conformance
+    // probe historically) send only the credential scope — accept that too
+    // so service routing still works rather than falling through to the
+    // catch-all API Gateway handler.
+    let credential = match credential_value.find(',') {
+        Some(end) => &credential_value[..end],
+        None => credential_value,
+    };
     parse_credential_scope(credential)
 }
 
@@ -517,6 +524,14 @@ mod tests {
         assert_eq!(info.access_key, "AKIAIOSFODNN7EXAMPLE");
         assert_eq!(info.region, "us-east-1");
         assert_eq!(info.service, "sqs");
+    }
+
+    #[test]
+    fn parse_credential_only_no_trailing_parts() {
+        let header = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260101/us-east-1/rds/aws4_request";
+        let info = parse_sigv4(header).unwrap();
+        assert_eq!(info.service, "rds");
+        assert_eq!(info.region, "us-east-1");
     }
 
     #[test]
