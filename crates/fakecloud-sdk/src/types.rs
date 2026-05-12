@@ -1498,6 +1498,8 @@ pub struct GlueJob {
     pub number_of_workers: Option<i64>,
     pub created_on: String,
     pub last_modified_on: String,
+}
+
 // ── Athena ──────────────────────────────────────────────────────────
 
 /// One row in the Athena named-query introspection list returned by
@@ -1549,6 +1551,10 @@ pub struct GlueJobRun {
 #[serde(rename_all = "camelCase")]
 pub struct GlueJobRunsResponse {
     pub runs: Vec<GlueJobRun>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AthenaNamedQueriesResponse {
     pub queries: Vec<AthenaNamedQuery>,
 }

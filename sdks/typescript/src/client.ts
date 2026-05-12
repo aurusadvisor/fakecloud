@@ -913,9 +913,7 @@ export class AthenaClient {
    * `StartQueryExecution` resolves the query string by id.
    */
   async getNamedQueries(): Promise<AthenaNamedQueriesResponse> {
-    const resp = await fetch(
-      `${this.baseUrl}/_fakecloud/athena/named-queries`,
-    );
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/athena/named-queries`);
     return parse(resp);
   }
 }
