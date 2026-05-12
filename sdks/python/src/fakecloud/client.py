@@ -631,9 +631,7 @@ class SesClient:
         _check(resp)
         return SesBouncesResponse.from_dict(resp.json())
 
-    async def get_message_insights(
-        self, message_id: str
-    ) -> SesMessageInsightsResponse:
+    async def get_message_insights(self, message_id: str) -> SesMessageInsightsResponse:
         resp = await self._client.get(
             f"{self._base}/_fakecloud/ses/messages/{message_id}/insights"
         )
@@ -641,9 +639,7 @@ class SesClient:
         return SesMessageInsightsResponse.from_dict(resp.json())
 
     async def get_smtp_submissions(self) -> SesSmtpSubmissionsResponse:
-        resp = await self._client.get(
-            f"{self._base}/_fakecloud/ses/smtp/submissions"
-        )
+        resp = await self._client.get(f"{self._base}/_fakecloud/ses/smtp/submissions")
         _check(resp)
         return SesSmtpSubmissionsResponse.from_dict(resp.json())
 

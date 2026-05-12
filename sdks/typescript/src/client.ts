@@ -250,9 +250,7 @@ export class SesClient {
   }
 
   async getSmtpSubmissions(): Promise<SesSmtpSubmissionsResponse> {
-    const resp = await fetch(
-      `${this.baseUrl}/_fakecloud/ses/smtp/submissions`,
-    );
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/ses/smtp/submissions`);
     return parse(resp);
   }
 

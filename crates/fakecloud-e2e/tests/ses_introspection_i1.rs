@@ -48,9 +48,7 @@ async fn wait_for_smtp(port: u16) -> TcpStream {
 
 #[tokio::test]
 async fn ses_bounces_introspection_returns_sendbounce_details() {
-    use aws_sdk_ses::types::{
-        BouncedRecipientInfo, BounceType, RecipientDsnFields,
-    };
+    use aws_sdk_ses::types::{BounceType, BouncedRecipientInfo, RecipientDsnFields};
     let server = TestServer::start().await;
     let endpoint = server.endpoint();
 
