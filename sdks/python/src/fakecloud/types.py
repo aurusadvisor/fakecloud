@@ -1145,6 +1145,67 @@ class LifecycleTickResponse:
         return cls(**d)
 
 
+@dataclass
+class S3AccessPointEntry:
+    name: str
+    alias: str
+    bucket: str
+    account_id: str
+    network_origin: str
+    created_at: str
+    vpc_configuration: Optional[str] = None
+    public_access_block: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> S3AccessPointEntry:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class S3AccessPointsResponse:
+    access_points: List[S3AccessPointEntry]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> S3AccessPointsResponse:
+        return cls(
+            access_points=[
+                S3AccessPointEntry.from_dict(a) for a in data.get("accessPoints", [])
+            ],
+        )
+
+
+@dataclass
+class S3ObjectLambdaResponse:
+    request_token: str
+    request_route: str
+    body_base64: str
+    body_size: int
+    metadata: Dict[str, str]
+    status_code: Optional[int] = None
+    content_type: Optional[str] = None
+    error_message: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> S3ObjectLambdaResponse:
+        d = _convert_keys(data)
+        d.setdefault("metadata", {})
+        return cls(**d)
+
+
+@dataclass
+class S3ObjectLambdaResponsesResponse:
+    responses: List[S3ObjectLambdaResponse]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> S3ObjectLambdaResponsesResponse:
+        return cls(
+            responses=[
+                S3ObjectLambdaResponse.from_dict(r) for r in data.get("responses", [])
+            ],
+        )
+
+
 # ── DynamoDB ────────────────────────────────────────────────────────
 
 

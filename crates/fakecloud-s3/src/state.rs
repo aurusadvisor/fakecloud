@@ -211,6 +211,7 @@ pub struct ObjectLambdaResponse {
     pub metadata: BTreeMap<String, String>,
     pub encryption: Option<String>,
     pub kms_key_id: Option<String>,
+    pub stored_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]

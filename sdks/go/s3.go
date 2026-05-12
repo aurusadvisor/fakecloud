@@ -24,3 +24,21 @@ func (c *S3Client) TickLifecycle(ctx context.Context) (*LifecycleTickResponse, e
 	}
 	return &out, nil
 }
+
+// GetAccessPoints lists S3 access points across all accounts.
+func (c *S3Client) GetAccessPoints(ctx context.Context) (*S3AccessPointsResponse, error) {
+	var out S3AccessPointsResponse
+	if err := c.fc.doGet(ctx, "/_fakecloud/s3/access-points", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetObjectLambdaResponses lists stored WriteGetObjectResponse bodies.
+func (c *S3Client) GetObjectLambdaResponses(ctx context.Context) (*S3ObjectLambdaResponsesResponse, error) {
+	var out S3ObjectLambdaResponsesResponse
+	if err := c.fc.doGet(ctx, "/_fakecloud/s3/object-lambda-responses", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

@@ -214,6 +214,8 @@ curl http://localhost:4566/_fakecloud/health
 | -------- | ------ | ----------- |
 | `/_fakecloud/s3/notifications` | GET | All bucket notification events captured. |
 | `/_fakecloud/s3/lifecycle-processor/tick` | POST | Run one lifecycle evaluation tick. |
+| `/_fakecloud/s3/access-points` | GET | **NEW** -- Registry of S3 access points across all accounts. |
+| `/_fakecloud/s3/object-lambda-responses` | GET | **NEW** -- Stored bodies from WriteGetObjectResponse calls (S3 Object Lambda). |
 
 ## Scheduler (EventBridge Scheduler)
 

@@ -511,6 +511,16 @@ public final class FakeCloud {
             return http.postEmpty(
                     "/_fakecloud/s3/lifecycle-processor/tick", LifecycleTickResponse.class);
         }
+
+        public Types.S3AccessPointsResponse getAccessPoints() {
+            return http.get("/_fakecloud/s3/access-points", Types.S3AccessPointsResponse.class);
+        }
+
+        public Types.S3ObjectLambdaResponsesResponse getObjectLambdaResponses() {
+            return http.get(
+                    "/_fakecloud/s3/object-lambda-responses",
+                    Types.S3ObjectLambdaResponsesResponse.class);
+        }
     }
 
     public static final class DynamoDbClient {

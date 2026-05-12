@@ -734,6 +734,49 @@ pub struct LifecycleTickResponse {
     pub transitioned_objects: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct S3AccessPointEntry {
+    pub name: String,
+    pub alias: String,
+    pub bucket: String,
+    pub account_id: String,
+    pub network_origin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vpc_configuration: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_access_block: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct S3AccessPointsResponse {
+    pub access_points: Vec<S3AccessPointEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct S3ObjectLambdaResponse {
+    pub request_token: String,
+    pub request_route: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<u16>,
+    pub body_base64: String,
+    pub body_size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    pub metadata: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct S3ObjectLambdaResponsesResponse {
+    pub responses: Vec<S3ObjectLambdaResponse>,
+}
+
 // ── DynamoDB ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

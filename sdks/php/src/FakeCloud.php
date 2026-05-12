@@ -496,6 +496,20 @@ final class S3Client
             $this->http->postEmpty('/_fakecloud/s3/lifecycle-processor/tick')
         );
     }
+
+    public function getAccessPoints(): S3AccessPointsResponse
+    {
+        return S3AccessPointsResponse::fromArray(
+            $this->http->get('/_fakecloud/s3/access-points')
+        );
+    }
+
+    public function getObjectLambdaResponses(): S3ObjectLambdaResponsesResponse
+    {
+        return S3ObjectLambdaResponsesResponse::fromArray(
+            $this->http->get('/_fakecloud/s3/object-lambda-responses')
+        );
+    }
 }
 
 final class DynamoDbClient

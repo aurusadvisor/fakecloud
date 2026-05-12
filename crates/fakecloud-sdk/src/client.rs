@@ -546,6 +546,33 @@ impl S3Client<'_> {
             .await?;
         FakeCloud::parse(resp).await
     }
+
+    /// List S3 access points across all accounts.
+    pub async fn get_access_points(&self) -> Result<S3AccessPointsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/s3/access-points", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// List stored WriteGetObjectResponse bodies (S3 Object Lambda).
+    pub async fn get_object_lambda_responses(
+        &self,
+    ) -> Result<S3ObjectLambdaResponsesResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/s3/object-lambda-responses",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
 }
 
 // ── DynamoDB ────────────────────────────────────────────────────────

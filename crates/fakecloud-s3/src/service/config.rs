@@ -2245,6 +2245,7 @@ impl S3Service {
                 metadata,
                 encryption,
                 kms_key_id,
+                stored_at: chrono::Utc::now(),
             },
         );
 
@@ -2507,6 +2508,8 @@ mod tests {
         assert_eq!(stored.body, b"hello object lambda");
         assert_eq!(stored.content_type, Some("text/plain".to_string()));
         assert_eq!(stored.metadata.get("custom"), Some(&"value".to_string()));
+        // stored_at is recorded for introspection.
+        assert!(stored.stored_at <= chrono::Utc::now());
     }
 
     #[test]
