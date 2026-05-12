@@ -1427,9 +1427,7 @@ mod tests {
         svc.create_delivery(&req).unwrap();
 
         let accounts = svc.state.read();
-        let state = accounts
-            .get("123456789012")
-            .expect("default account state");
+        let state = accounts.get("123456789012").expect("default account state");
         let src = state.delivery_sources.get("intro-src").unwrap();
         assert!(
             src.created_at >= before,
