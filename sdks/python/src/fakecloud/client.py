@@ -657,9 +657,7 @@ class OrganizationsClient:
         """List every member account with lifecycle state, parent OU,
         tags, and directly-attached SCPs. Returns an empty list when
         no org has been created yet."""
-        resp = await self._client.get(
-            f"{self._base}/_fakecloud/organizations/accounts"
-        )
+        resp = await self._client.get(f"{self._base}/_fakecloud/organizations/accounts")
         _check(resp)
         return OrganizationsAccountsResponse.from_dict(resp.json())
 
