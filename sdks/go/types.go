@@ -403,6 +403,40 @@ type LifecycleTickResponse struct {
 	TransitionedObjects uint64 `json:"transitionedObjects"`
 }
 
+// S3AccessPointEntry describes a single S3 access point.
+type S3AccessPointEntry struct {
+	Name               string  `json:"name"`
+	Alias              string  `json:"alias"`
+	Bucket             string  `json:"bucket"`
+	AccountID          string  `json:"accountId"`
+	NetworkOrigin      string  `json:"networkOrigin"`
+	VpcConfiguration   *string `json:"vpcConfiguration,omitempty"`
+	PublicAccessBlock  *string `json:"publicAccessBlock,omitempty"`
+	CreatedAt          string  `json:"createdAt"`
+}
+
+// S3AccessPointsResponse holds the S3 access point registry.
+type S3AccessPointsResponse struct {
+	AccessPoints []S3AccessPointEntry `json:"accessPoints"`
+}
+
+// S3ObjectLambdaResponse is a recorded WriteGetObjectResponse call body.
+type S3ObjectLambdaResponse struct {
+	RequestToken string            `json:"requestToken"`
+	RequestRoute string            `json:"requestRoute"`
+	StatusCode   *uint16           `json:"statusCode,omitempty"`
+	BodyBase64   string            `json:"bodyBase64"`
+	BodySize     uint64            `json:"bodySize"`
+	ContentType  *string           `json:"contentType,omitempty"`
+	ErrorMessage *string           `json:"errorMessage,omitempty"`
+	Metadata     map[string]string `json:"metadata"`
+}
+
+// S3ObjectLambdaResponsesResponse holds stored object-lambda response bodies.
+type S3ObjectLambdaResponsesResponse struct {
+	Responses []S3ObjectLambdaResponse `json:"responses"`
+}
+
 // ── DynamoDB ───────────────────────────────────────────────────────
 
 // TTLTickResponse is returned after ticking the DynamoDB TTL processor.

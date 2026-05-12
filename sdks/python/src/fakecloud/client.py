@@ -65,7 +65,9 @@ from fakecloud.types import (
     ResetResponse,
     ResetServiceResponse,
     RotationTickResponse,
+    S3AccessPointsResponse,
     S3NotificationsResponse,
+    S3ObjectLambdaResponsesResponse,
     SchedulerSchedulesResponse,
     SesDkimPublicKey,
     SesEmailsResponse,
@@ -773,6 +775,18 @@ class S3Client:
         _check(resp)
         return LifecycleTickResponse.from_dict(resp.json())
 
+    async def get_access_points(self) -> S3AccessPointsResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/s3/access-points")
+        _check(resp)
+        return S3AccessPointsResponse.from_dict(resp.json())
+
+    async def get_object_lambda_responses(self) -> S3ObjectLambdaResponsesResponse:
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/s3/object-lambda-responses"
+        )
+        _check(resp)
+        return S3ObjectLambdaResponsesResponse.from_dict(resp.json())
+
 
 class DynamoDbClient:
     """Async DynamoDB introspection client."""
@@ -1258,6 +1272,16 @@ class _SyncS3Client:
         resp = self._client.post(f"{self._base}/_fakecloud/s3/lifecycle-processor/tick")
         _check(resp)
         return LifecycleTickResponse.from_dict(resp.json())
+
+    def get_access_points(self) -> S3AccessPointsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/s3/access-points")
+        _check(resp)
+        return S3AccessPointsResponse.from_dict(resp.json())
+
+    def get_object_lambda_responses(self) -> S3ObjectLambdaResponsesResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/s3/object-lambda-responses")
+        _check(resp)
+        return S3ObjectLambdaResponsesResponse.from_dict(resp.json())
 
 
 class _SyncDynamoDbClient:

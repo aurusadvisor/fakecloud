@@ -303,6 +303,34 @@ public final class Types {
     public record LifecycleTickResponse(
             int processedBuckets, int expiredObjects, int transitionedObjects) {}
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record S3AccessPointEntry(
+            String name,
+            String alias,
+            String bucket,
+            String accountId,
+            String networkOrigin,
+            String vpcConfiguration,
+            String publicAccessBlock,
+            String createdAt) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record S3AccessPointsResponse(List<S3AccessPointEntry> accessPoints) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record S3ObjectLambdaResponse(
+            String requestToken,
+            String requestRoute,
+            Integer statusCode,
+            String bodyBase64,
+            long bodySize,
+            String contentType,
+            String errorMessage,
+            Map<String, String> metadata) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record S3ObjectLambdaResponsesResponse(List<S3ObjectLambdaResponse> responses) {}
+
     // ── DynamoDB ───────────────────────────────────────────────────
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record TtlTickResponse(int expiredItems) {}

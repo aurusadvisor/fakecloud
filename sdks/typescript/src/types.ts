@@ -334,6 +334,36 @@ export interface LifecycleTickResponse {
   transitionedObjects: number;
 }
 
+export interface S3AccessPointEntry {
+  name: string;
+  alias: string;
+  bucket: string;
+  accountId: string;
+  networkOrigin: string;
+  vpcConfiguration?: string;
+  publicAccessBlock?: string;
+  createdAt: string;
+}
+
+export interface S3AccessPointsResponse {
+  accessPoints: S3AccessPointEntry[];
+}
+
+export interface S3ObjectLambdaResponse {
+  requestToken: string;
+  requestRoute: string;
+  statusCode?: number;
+  bodyBase64: string;
+  bodySize: number;
+  contentType?: string;
+  errorMessage?: string;
+  metadata: Record<string, string>;
+}
+
+export interface S3ObjectLambdaResponsesResponse {
+  responses: S3ObjectLambdaResponse[];
+}
+
 // ── DynamoDB ───────────────────────────────────────────────────────
 
 export interface TtlTickResponse {

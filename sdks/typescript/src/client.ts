@@ -44,7 +44,9 @@ import type {
   FireRuleResponse,
   FireScheduleResponse,
   SchedulerSchedulesResponse,
+  S3AccessPointsResponse,
   S3NotificationsResponse,
+  S3ObjectLambdaResponsesResponse,
   LifecycleTickResponse,
   TtlTickResponse,
   RotationTickResponse,
@@ -381,6 +383,18 @@ export class S3Client {
     const resp = await fetch(
       `${this.baseUrl}/_fakecloud/s3/lifecycle-processor/tick`,
       { method: "POST" },
+    );
+    return parse(resp);
+  }
+
+  async getAccessPoints(): Promise<S3AccessPointsResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/s3/access-points`);
+    return parse(resp);
+  }
+
+  async getObjectLambdaResponses(): Promise<S3ObjectLambdaResponsesResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/s3/object-lambda-responses`,
     );
     return parse(resp);
   }

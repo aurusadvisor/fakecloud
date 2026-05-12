@@ -622,6 +622,8 @@ async fn main() {
     let sqs_introspection_state = sqs_state.clone();
     let eb_introspection_state = eb_state.clone();
     let s3_introspection_state = s3_state.clone();
+    let s3_access_points_introspection_state = s3_state.clone();
+    let s3_object_lambda_introspection_state = s3_state.clone();
     let rds_bridge_s3_state = s3_state.clone();
     let rds_introspection_state = rds_state.clone();
     let elasticache_introspection_state = elasticache_state.clone();
@@ -3805,6 +3807,65 @@ async fn main() {
                         })
                         .collect();
                     axum::Json(types::S3NotificationsResponse { notifications })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/s3/access-points",
+            axum::routing::get({
+                let ss = s3_access_points_introspection_state;
+                move || async move {
+                    let mas = ss.read();
+                    let mut access_points: Vec<types::S3AccessPointEntry> = mas
+                        .iter()
+                        .flat_map(|(account_id, state)| {
+                            state.access_points.values().map(move |ap| {
+                                types::S3AccessPointEntry {
+                                    name: ap.name.clone(),
+                                    alias: format!("{}-{}", ap.name, ap.account_id),
+                                    bucket: ap.bucket.clone(),
+                                    account_id: account_id.to_string(),
+                                    network_origin: ap.network_origin.clone(),
+                                    vpc_configuration: ap.vpc_configuration.clone(),
+                                    public_access_block: ap.public_access_block.clone(),
+                                    created_at: ap.creation_date.to_rfc3339(),
+                                }
+                            })
+                        })
+                        .collect();
+                    access_points.sort_by(|a, b| {
+                        a.account_id
+                            .cmp(&b.account_id)
+                            .then(a.name.cmp(&b.name))
+                    });
+                    axum::Json(types::S3AccessPointsResponse { access_points })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/s3/object-lambda-responses",
+            axum::routing::get({
+                let ss = s3_object_lambda_introspection_state;
+                move || async move {
+                    use base64::Engine as _;
+                    let mas = ss.read();
+                    let mut responses: Vec<types::S3ObjectLambdaResponse> = mas
+                        .iter()
+                        .flat_map(|(_, state)| state.object_lambda_responses.values())
+                        .map(|r| types::S3ObjectLambdaResponse {
+                            request_token: r.token.clone(),
+                            request_route: r.route.clone(),
+                            status_code: r.fwd_status,
+                            body_base64: base64::engine::general_purpose::STANDARD
+                                .encode(&r.body),
+                            body_size: r.body.len() as u64,
+                            content_type: r.content_type.clone(),
+                            error_message: r.fwd_error_message.clone(),
+                            metadata: r.metadata.clone(),
+                        })
+                        .collect();
+                    responses.sort_by(|a, b| a.request_token.cmp(&b.request_token));
+                    axum::Json(types::S3ObjectLambdaResponsesResponse { responses })
                 }
             }),
         )

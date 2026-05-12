@@ -893,6 +893,95 @@ final class S3NotificationsResponse
     }
 }
 
+final class S3AccessPointEntry
+{
+    public function __construct(
+        public readonly string $name,
+        public readonly string $alias,
+        public readonly string $bucket,
+        public readonly string $accountId,
+        public readonly string $networkOrigin,
+        public readonly string $createdAt,
+        public readonly ?string $vpcConfiguration = null,
+        public readonly ?string $publicAccessBlock = null,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['name'],
+            $data['alias'],
+            $data['bucket'],
+            $data['accountId'],
+            $data['networkOrigin'],
+            $data['createdAt'],
+            $data['vpcConfiguration'] ?? null,
+            $data['publicAccessBlock'] ?? null,
+        );
+    }
+}
+
+final class S3AccessPointsResponse
+{
+    public function __construct(
+        /** @var S3AccessPointEntry[] */
+        public readonly array $accessPoints,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(
+            S3AccessPointEntry::fromArray(...),
+            $data['accessPoints'] ?? []
+        ));
+    }
+}
+
+final class S3ObjectLambdaResponse
+{
+    public function __construct(
+        public readonly string $requestToken,
+        public readonly string $requestRoute,
+        public readonly string $bodyBase64,
+        public readonly int $bodySize,
+        /** @var array<string,string> */
+        public readonly array $metadata,
+        public readonly ?int $statusCode = null,
+        public readonly ?string $contentType = null,
+        public readonly ?string $errorMessage = null,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['requestToken'],
+            $data['requestRoute'],
+            $data['bodyBase64'],
+            (int) ($data['bodySize'] ?? 0),
+            $data['metadata'] ?? [],
+            isset($data['statusCode']) ? (int) $data['statusCode'] : null,
+            $data['contentType'] ?? null,
+            $data['errorMessage'] ?? null,
+        );
+    }
+}
+
+final class S3ObjectLambdaResponsesResponse
+{
+    public function __construct(
+        /** @var S3ObjectLambdaResponse[] */
+        public readonly array $responses,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(
+            S3ObjectLambdaResponse::fromArray(...),
+            $data['responses'] ?? []
+        ));
+    }
+}
+
 final class LifecycleTickResponse
 {
     public function __construct(
