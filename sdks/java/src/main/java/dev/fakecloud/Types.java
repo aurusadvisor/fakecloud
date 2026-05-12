@@ -273,6 +273,42 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record FireRuleResponse(List<FireRuleTarget> targets) {}
 
+    // ── Glue ───────────────────────────────────────────────────────
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record GlueJob(
+            String accountId,
+            String name,
+            String role,
+            Object command,
+            Map<String, String> defaultArguments,
+            Double maxCapacity,
+            long maxRetries,
+            Long timeout,
+            String glueVersion,
+            String workerType,
+            Long numberOfWorkers,
+            String createdOn,
+            String lastModifiedOn) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record GlueJobsResponse(List<GlueJob> jobs) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record GlueJobRun(
+            String accountId,
+            String id,
+            String jobName,
+            long attempt,
+            String startedOn,
+            String completedOn,
+            String jobRunState,
+            Map<String, String> arguments,
+            String errorMessage,
+            long executionTime) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record GlueJobRunsResponse(List<GlueJobRun> runs) {}
+
     // ── Scheduler (EventBridge Scheduler) ──────────────────────────
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record SchedulerSchedule(

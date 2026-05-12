@@ -6,7 +6,7 @@ weight = 3
 
 fakecloud exposes `/_fakecloud/*` endpoints for testing behaviors that AWS runs asynchronously (TTL expiration, scheduled rotation, lifecycle, etc.) and for asserting on state from within tests. The first-party SDKs wrap these into ergonomic helpers -- see [SDK setup](/docs/getting-started/sdk-setup/) -- but the raw endpoints are documented here as the source of truth.
 
-This page lists every `/_fakecloud/*` endpoint shipped today: 83 routes across 26 service areas. Endpoints marked **NEW** were added in the last two weeks.
+This page lists every `/_fakecloud/*` endpoint shipped today: 85 routes across 27 service areas. Endpoints marked **NEW** were added in the last two weeks.
 
 ## Health and reset
 
@@ -140,6 +140,13 @@ curl http://localhost:4566/_fakecloud/health
 | -------- | ------ | ----------- |
 | `/_fakecloud/events/history` | GET | All events seen plus per-rule delivery results. |
 | `/_fakecloud/events/fire-rule` | POST | Manually fire a rule against the current bus state. |
+
+## Glue
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/glue/jobs` | GET | **NEW** -- All Glue Jobs (CreateJob ledger) across accounts. |
+| `/_fakecloud/glue/job-runs` | GET | **NEW** -- All JobRun state across accounts. Optional `?job_name=foo` filter. |
 
 ## IAM
 

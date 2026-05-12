@@ -290,6 +290,95 @@ async fn partition_lifecycle() {
 }
 
 #[tokio::test]
+async fn jobs_and_job_runs_introspection() {
+    use aws_sdk_glue::types::JobCommand;
+    use serde_json::Value;
+
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+
+    glue.create_job()
+        .name("etl-job")
+        .role("arn:aws:iam::123456789012:role/glue")
+        .command(
+            JobCommand::builder()
+                .name("glueetl")
+                .script_location("s3://example/script.py")
+                .python_version("3")
+                .build(),
+        )
+        .max_retries(2)
+        .send()
+        .await
+        .expect("create job");
+
+    let run = glue
+        .start_job_run()
+        .job_name("etl-job")
+        .send()
+        .await
+        .expect("start run");
+    let run_id = run.job_run_id().expect("run id").to_string();
+
+    let client = reqwest::Client::new();
+    let jobs: Value = client
+        .get(format!("{}/_fakecloud/glue/jobs", server.endpoint()))
+        .send()
+        .await
+        .expect("jobs request")
+        .json()
+        .await
+        .expect("jobs json");
+    let jobs_arr = jobs["jobs"].as_array().expect("jobs array");
+    assert_eq!(jobs_arr.len(), 1);
+    assert_eq!(jobs_arr[0]["name"], "etl-job");
+    assert_eq!(jobs_arr[0]["role"], "arn:aws:iam::123456789012:role/glue");
+    assert_eq!(jobs_arr[0]["maxRetries"], 2);
+    assert_eq!(jobs_arr[0]["command"]["Name"], "glueetl");
+
+    let runs: Value = client
+        .get(format!("{}/_fakecloud/glue/job-runs", server.endpoint()))
+        .send()
+        .await
+        .expect("runs request")
+        .json()
+        .await
+        .expect("runs json");
+    let runs_arr = runs["runs"].as_array().expect("runs array");
+    assert_eq!(runs_arr.len(), 1);
+    assert_eq!(runs_arr[0]["id"], run_id);
+    assert_eq!(runs_arr[0]["jobName"], "etl-job");
+    assert_eq!(runs_arr[0]["jobRunState"], "SUCCEEDED");
+
+    // Filter by job_name
+    let filtered: Value = client
+        .get(format!(
+            "{}/_fakecloud/glue/job-runs?job_name=etl-job",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .expect("filter request")
+        .json()
+        .await
+        .expect("filter json");
+    assert_eq!(filtered["runs"].as_array().unwrap().len(), 1);
+
+    let none: Value = client
+        .get(format!(
+            "{}/_fakecloud/glue/job-runs?job_name=missing",
+            server.endpoint()
+        ))
+        .send()
+        .await
+        .expect("none request")
+        .json()
+        .await
+        .expect("none json");
+    assert!(none["runs"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn table_in_missing_database_returns_not_found() {
     let server = TestServer::start().await;
     let glue = server.glue_client().await;

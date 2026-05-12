@@ -801,6 +801,112 @@ final class FireRuleResponse
     }
 }
 
+// ── Glue ────────────────────────────────────────────────────────
+
+final class GlueJob
+{
+    public function __construct(
+        public readonly string $accountId,
+        public readonly string $name,
+        public readonly string $role,
+        public readonly mixed $command,
+        /** @var array<string,string> */
+        public readonly array $defaultArguments,
+        public readonly ?float $maxCapacity,
+        public readonly int $maxRetries,
+        public readonly ?int $timeout,
+        public readonly ?string $glueVersion,
+        public readonly ?string $workerType,
+        public readonly ?int $numberOfWorkers,
+        public readonly string $createdOn,
+        public readonly string $lastModifiedOn,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['accountId'] ?? '',
+            $data['name'] ?? '',
+            $data['role'] ?? '',
+            $data['command'] ?? null,
+            $data['defaultArguments'] ?? [],
+            isset($data['maxCapacity']) ? (float) $data['maxCapacity'] : null,
+            (int) ($data['maxRetries'] ?? 0),
+            isset($data['timeout']) ? (int) $data['timeout'] : null,
+            $data['glueVersion'] ?? null,
+            $data['workerType'] ?? null,
+            isset($data['numberOfWorkers']) ? (int) $data['numberOfWorkers'] : null,
+            $data['createdOn'] ?? '',
+            $data['lastModifiedOn'] ?? '',
+        );
+    }
+}
+
+final class GlueJobsResponse
+{
+    public function __construct(
+        /** @var GlueJob[] */
+        public readonly array $jobs,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(
+            GlueJob::fromArray(...),
+            $data['jobs'] ?? [],
+        ));
+    }
+}
+
+final class GlueJobRun
+{
+    public function __construct(
+        public readonly string $accountId,
+        public readonly string $id,
+        public readonly string $jobName,
+        public readonly int $attempt,
+        public readonly string $startedOn,
+        public readonly ?string $completedOn,
+        public readonly string $jobRunState,
+        /** @var array<string,string> */
+        public readonly array $arguments,
+        public readonly ?string $errorMessage,
+        public readonly int $executionTime,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['accountId'] ?? '',
+            $data['id'] ?? '',
+            $data['jobName'] ?? '',
+            (int) ($data['attempt'] ?? 0),
+            $data['startedOn'] ?? '',
+            $data['completedOn'] ?? null,
+            $data['jobRunState'] ?? '',
+            $data['arguments'] ?? [],
+            $data['errorMessage'] ?? null,
+            (int) ($data['executionTime'] ?? 0),
+        );
+    }
+}
+
+final class GlueJobRunsResponse
+{
+    public function __construct(
+        /** @var GlueJobRun[] */
+        public readonly array $runs,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(
+            GlueJobRun::fromArray(...),
+            $data['runs'] ?? [],
+        ));
+    }
+}
+
 // ── Scheduler (EventBridge Scheduler) ───────────────────────────
 
 final class SchedulerSchedule

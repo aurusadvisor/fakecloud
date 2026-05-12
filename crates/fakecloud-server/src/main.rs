@@ -2636,6 +2636,8 @@ async fn main() {
     };
     let scheduler_state_for_list = scheduler_state.clone();
     let scheduler_state_for_fire = scheduler_state.clone();
+    let glue_state_for_jobs = glue_state.clone();
+    let glue_state_for_runs = glue_state.clone();
     let delivery_for_scheduler_fire = delivery_for_scheduler.clone();
     let default_account_for_scheduler_fire = cli.account_id.clone();
     let default_region_for_scheduler_fire = cli.region.clone();
@@ -3828,6 +3830,65 @@ async fn main() {
                         })
                         .collect();
                     axum::Json(types::SchedulerSchedulesResponse { schedules })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/glue/jobs",
+            axum::routing::get({
+                let state = glue_state_for_jobs;
+                move || async move {
+                    let rows = fakecloud_glue::introspection::list_all_jobs(&state);
+                    let jobs = rows
+                        .into_iter()
+                        .map(|r| types::GlueJob {
+                            account_id: r.account_id,
+                            name: r.name,
+                            role: r.role,
+                            command: r.command,
+                            default_arguments: r.default_arguments,
+                            max_capacity: r.max_capacity,
+                            max_retries: r.max_retries,
+                            timeout: r.timeout,
+                            glue_version: r.glue_version,
+                            worker_type: r.worker_type,
+                            number_of_workers: r.number_of_workers,
+                            created_on: r.created_on.to_rfc3339(),
+                            last_modified_on: r.last_modified_on.to_rfc3339(),
+                        })
+                        .collect();
+                    axum::Json(types::GlueJobsResponse { jobs })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/glue/job-runs",
+            axum::routing::get({
+                let state = glue_state_for_runs;
+                move |axum::extract::Query(params): axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >| {
+                    let state = state.clone();
+                    async move {
+                        let filter = params.get("job_name").map(String::as_str);
+                        let rows = fakecloud_glue::introspection::list_all_job_runs(&state, filter);
+                        let runs = rows
+                            .into_iter()
+                            .map(|r| types::GlueJobRun {
+                                account_id: r.account_id,
+                                id: r.id,
+                                job_name: r.job_name,
+                                attempt: r.attempt,
+                                started_on: r.started_on.to_rfc3339(),
+                                completed_on: r.completed_on.map(|t| t.to_rfc3339()),
+                                job_run_state: r.job_run_state,
+                                arguments: r.arguments,
+                                error_message: r.error_message,
+                                execution_time: r.execution_time,
+                            })
+                            .collect();
+                        axum::Json(types::GlueJobRunsResponse { runs })
+                    }
                 }
             }),
         )

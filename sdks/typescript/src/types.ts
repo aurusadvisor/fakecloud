@@ -580,6 +580,45 @@ export interface ApiGatewayV2RequestsResponse {
   requests: ApiGatewayV2Request[];
 }
 
+// ── Glue ────────────────────────────────────────────────────────────
+
+export interface GlueJob {
+  accountId: string;
+  name: string;
+  role: string;
+  command: unknown;
+  defaultArguments: Record<string, string>;
+  maxCapacity?: number | null;
+  maxRetries: number;
+  timeout?: number | null;
+  glueVersion?: string | null;
+  workerType?: string | null;
+  numberOfWorkers?: number | null;
+  createdOn: string;
+  lastModifiedOn: string;
+}
+
+export interface GlueJobsResponse {
+  jobs: GlueJob[];
+}
+
+export interface GlueJobRun {
+  accountId: string;
+  id: string;
+  jobName: string;
+  attempt: number;
+  startedOn: string;
+  completedOn?: string | null;
+  jobRunState: string;
+  arguments: Record<string, string>;
+  errorMessage?: string | null;
+  executionTime: number;
+}
+
+export interface GlueJobRunsResponse {
+  runs: GlueJobRun[];
+}
+
 // ── Scheduler (EventBridge Scheduler) ───────────────────────────────
 
 export interface SchedulerSchedule {

@@ -64,6 +64,15 @@ aws --endpoint-url http://localhost:4566 glue get-job-run \
   --job-name daily-rollup --run-id $RUN_ID
 ```
 
+## Introspection
+
+Two IAM-bypass admin endpoints expose Glue state so test assertions don't have to round-trip through the AWS SDK:
+
+- `GET /_fakecloud/glue/jobs` — every Glue Job recorded by `CreateJob`, across every account. Returns `name`, `role`, `command`, `defaultArguments`, capacity / retry / timeout / worker fields, `createdOn`, `lastModifiedOn`.
+- `GET /_fakecloud/glue/job-runs` — every `JobRun` recorded by `StartJobRun`. Returns `id`, `jobName`, `attempt`, `startedOn`, `completedOn`, `jobRunState`, `arguments`, `executionTime`. Accepts `?job_name=foo` to filter to a single job.
+
+All first-party SDKs ship a `glue` sub-client wrapping these endpoints (`getJobs()`, `getJobRuns(jobName?)`). See [`reference/introspection`](/docs/reference/introspection/) for the full endpoint catalog.
+
 ## Caveats
 
 The ETL runtime is not implemented. `StartJobRun` does not fetch your script from S3, does not spin up a Spark / Python Shell worker, and does not produce any output. Runs land in `SUCCEEDED` immediately. Use real Glue for actual ETL execution; use fakecloud for testing the job-orchestration and catalog-management code paths around it.

@@ -43,6 +43,8 @@ import type {
   FireRuleRequest,
   FireRuleResponse,
   FireScheduleResponse,
+  GlueJobRunsResponse,
+  GlueJobsResponse,
   SchedulerSchedulesResponse,
   S3NotificationsResponse,
   LifecycleTickResponse,
@@ -369,6 +371,23 @@ export class SchedulerClient {
   }
 }
 
+export class GlueClient {
+  constructor(private baseUrl: string) {}
+
+  async getJobs(): Promise<GlueJobsResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/glue/jobs`);
+    return parse(resp);
+  }
+
+  async getJobRuns(jobName?: string): Promise<GlueJobRunsResponse> {
+    const url = jobName
+      ? `${this.baseUrl}/_fakecloud/glue/job-runs?job_name=${encodeURIComponent(jobName)}`
+      : `${this.baseUrl}/_fakecloud/glue/job-runs`;
+    const resp = await fetch(url);
+    return parse(resp);
+  }
+}
+
 export class S3Client {
   constructor(private baseUrl: string) {}
 
@@ -653,6 +672,7 @@ export class FakeCloud {
   private readonly _sqs: SqsClient;
   private readonly _events: EventsClient;
   private readonly _scheduler: SchedulerClient;
+  private readonly _glue: GlueClient;
   private readonly _s3: S3Client;
   private readonly _dynamodb: DynamoDbClient;
   private readonly _secretsmanager: SecretsManagerClient;
@@ -681,6 +701,7 @@ export class FakeCloud {
     this._sqs = new SqsClient(this.baseUrl);
     this._events = new EventsClient(this.baseUrl);
     this._scheduler = new SchedulerClient(this.baseUrl);
+    this._glue = new GlueClient(this.baseUrl);
     this._s3 = new S3Client(this.baseUrl);
     this._dynamodb = new DynamoDbClient(this.baseUrl);
     this._secretsmanager = new SecretsManagerClient(this.baseUrl);
@@ -773,6 +794,10 @@ export class FakeCloud {
 
   get scheduler(): SchedulerClient {
     return this._scheduler;
+  }
+
+  get glue(): GlueClient {
+    return this._glue;
   }
 
   get s3(): S3Client {

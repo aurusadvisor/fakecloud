@@ -1,3 +1,4 @@
+pub mod introspection;
 pub mod jobs;
 pub mod partition_filter;
 pub mod service;
