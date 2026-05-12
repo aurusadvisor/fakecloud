@@ -2056,6 +2056,9 @@ class LogsDeliveryConfigResponse:
                 LogsDeliveryConfiguration.from_dict(c)
                 for c in data.get("configurations", [])
             ]
+        )
+
+
 # ── Athena ──────────────────────────────────────────────────────────
 
 
@@ -2115,6 +2118,10 @@ class LogsFieldIndexesResponse:
         return cls(
             log_group_name=data.get("logGroupName", ""),
             indexes=[LogsFieldIndex.from_dict(i) for i in data.get("indexes", [])],
+        )
+
+
+@dataclass
 class AthenaNamedQueriesResponse:
     queries: List[AthenaNamedQuery]
 

@@ -1017,6 +1017,8 @@ type GlueJobRun struct {
 // optionally filtered by job name.
 type GlueJobRunsResponse struct {
 	Runs []GlueJobRun `json:"runs"`
+}
+
 // AthenaNamedQuery is one row in the Athena named-query introspection
 // listing returned by GET /_fakecloud/athena/named-queries.
 type AthenaNamedQuery struct {

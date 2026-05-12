@@ -342,6 +342,8 @@ async fn sdk_elasticache_get_acls() {
         .expect("default user in ACL response");
     assert!(default_user.no_password_required);
     assert_eq!(default_user.password_count, 0);
+}
+
 // ── Athena ─────────────────────────────────────────────────────────
 
 #[tokio::test]
