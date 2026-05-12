@@ -6,6 +6,7 @@ import dev.fakecloud.Types.ApiGatewayV2RequestsResponse;
 import dev.fakecloud.Types.AppAsScheduledTickResponse;
 import dev.fakecloud.Types.AppAsTickResponse;
 import dev.fakecloud.Types.AuthEventsResponse;
+import dev.fakecloud.Types.PreTokenGenInvocationsResponse;
 import dev.fakecloud.Types.MintAuthorizationCodeRequest;
 import dev.fakecloud.Types.MintAuthorizationCodeResponse;
 import dev.fakecloud.Types.CompromisedPasswordsRequest;
@@ -528,6 +529,18 @@ public final class FakeCloud {
 
         public AuthEventsResponse getAuthEvents() {
             return http.get("/_fakecloud/cognito/auth-events", AuthEventsResponse.class);
+        }
+
+        /**
+         * Returns the PreTokenGeneration Lambda trigger invocation log
+         * recorded by {@code InitiateAuth}. Each entry has the full
+         * request/response payloads plus pre-parsed claim additions,
+         * suppressions, and group overrides.
+         */
+        public PreTokenGenInvocationsResponse getPreTokenGenInvocations() {
+            return http.get(
+                    "/_fakecloud/cognito/pretokengen/invocations",
+                    PreTokenGenInvocationsResponse.class);
         }
 
         public MintAuthorizationCodeResponse mintAuthorizationCode(

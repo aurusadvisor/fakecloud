@@ -61,6 +61,7 @@ from fakecloud.types import (
     MintAuthorizationCodeRequest,
     MintAuthorizationCodeResponse,
     PendingConfirmationsResponse,
+    PreTokenGenInvocationsResponse,
     RdsInstancesResponse,
     ResetResponse,
     ResetServiceResponse,
@@ -853,6 +854,16 @@ class CognitoClient:
         _check(resp)
         return AuthEventsResponse.from_dict(resp.json())
 
+    async def get_pre_token_gen_invocations(
+        self,
+    ) -> PreTokenGenInvocationsResponse:
+        """Return the PreTokenGeneration Lambda trigger invocation log."""
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/cognito/pretokengen/invocations"
+        )
+        _check(resp)
+        return PreTokenGenInvocationsResponse.from_dict(resp.json())
+
     async def mint_authorization_code(
         self, req: MintAuthorizationCodeRequest
     ) -> MintAuthorizationCodeResponse:
@@ -1326,6 +1337,14 @@ class _SyncCognitoClient:
         resp = self._client.get(f"{self._base}/_fakecloud/cognito/auth-events")
         _check(resp)
         return AuthEventsResponse.from_dict(resp.json())
+
+    def get_pre_token_gen_invocations(self) -> PreTokenGenInvocationsResponse:
+        """Return the PreTokenGeneration Lambda trigger invocation log."""
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/cognito/pretokengen/invocations"
+        )
+        _check(resp)
+        return PreTokenGenInvocationsResponse.from_dict(resp.json())
 
     def mint_authorization_code(
         self, req: MintAuthorizationCodeRequest

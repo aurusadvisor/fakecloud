@@ -993,6 +993,48 @@ class AuthEventsResponse:
 
 
 @dataclass
+class PreTokenGenInvocation:
+    """One PreTokenGeneration Lambda trigger invocation captured by
+    ``InitiateAuth``. ``claims_added`` / ``claims_overridden`` /
+    ``group_overrides`` are pre-parsed from the Lambda response so test
+    code doesn't have to walk the raw ``claimsAndScopeOverrideDetails``
+    shape itself.
+    """
+
+    pool_id: str
+    user_pool_arn: str
+    username: str
+    trigger_source: str
+    lambda_arn: str
+    request_payload: Dict[str, Any]
+    response_payload: Optional[Dict[str, Any]]
+    claims_added: List[str]
+    claims_overridden: List[str]
+    group_overrides: List[str]
+    invoked_at: str
+    duration_ms: int
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> PreTokenGenInvocation:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class PreTokenGenInvocationsResponse:
+    invocations: List[PreTokenGenInvocation]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> PreTokenGenInvocationsResponse:
+        return cls(
+            invocations=[
+                PreTokenGenInvocation.from_dict(e)
+                for e in data.get("invocations", [])
+            ],
+        )
+
+
+@dataclass
 class MintAuthorizationCodeRequest:
     """Payload for `POST /_fakecloud/cognito/authorization-codes`.
 

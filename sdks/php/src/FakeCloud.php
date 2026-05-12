@@ -513,6 +513,20 @@ final class CognitoClient
         );
     }
 
+    /**
+     * Returns the PreTokenGeneration Lambda trigger invocation log
+     * recorded by `InitiateAuth`. Each entry has the full request /
+     * response payloads plus pre-parsed `claims_added`,
+     * `claims_overridden`, and `group_overrides` so tests can assert
+     * claim mutation flows without inspecting the issued JWT.
+     */
+    public function getPreTokenGenInvocations(): PreTokenGenInvocationsResponse
+    {
+        return PreTokenGenInvocationsResponse::fromArray(
+            $this->http->get('/_fakecloud/cognito/pretokengen/invocations')
+        );
+    }
+
     public function mintAuthorizationCode(
         MintAuthorizationCodeRequest $req
     ): MintAuthorizationCodeResponse {

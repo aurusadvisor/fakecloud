@@ -1099,6 +1099,67 @@ final class AuthEventsResponse
 }
 
 /**
+ * One PreTokenGeneration Lambda trigger invocation captured by
+ * `InitiateAuth`. `claimsAdded` / `claimsOverridden` / `groupOverrides`
+ * are pre-parsed from the Lambda response.
+ */
+final class PreTokenGenInvocation
+{
+    public function __construct(
+        public readonly string $poolId,
+        public readonly string $userPoolArn,
+        public readonly string $username,
+        public readonly string $triggerSource,
+        public readonly string $lambdaArn,
+        /** @var array<string, mixed> */
+        public readonly array $requestPayload,
+        /** @var array<string, mixed>|null */
+        public readonly ?array $responsePayload,
+        /** @var string[] */
+        public readonly array $claimsAdded,
+        /** @var string[] */
+        public readonly array $claimsOverridden,
+        /** @var string[] */
+        public readonly array $groupOverrides,
+        public readonly string $invokedAt,
+        public readonly int $durationMs,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['poolId'],
+            $data['userPoolArn'],
+            $data['username'],
+            $data['triggerSource'],
+            $data['lambdaArn'],
+            $data['requestPayload'] ?? [],
+            $data['responsePayload'] ?? null,
+            $data['claimsAdded'] ?? [],
+            $data['claimsOverridden'] ?? [],
+            $data['groupOverrides'] ?? [],
+            $data['invokedAt'],
+            (int) $data['durationMs'],
+        );
+    }
+}
+
+final class PreTokenGenInvocationsResponse
+{
+    public function __construct(
+        /** @var PreTokenGenInvocation[] */
+        public readonly array $invocations,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            array_map(PreTokenGenInvocation::fromArray(...), $data['invocations'] ?? []),
+        );
+    }
+}
+
+/**
  * Payload for `POST /_fakecloud/cognito/authorization-codes`. Lets
  * test harnesses pre-allocate a single-use OAuth2 authorization code
  * that the `/oauth2/token` `authorization_code` grant later consumes.

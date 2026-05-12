@@ -359,6 +359,31 @@ public final class Types {
     public record AuthEventsResponse(List<AuthEvent> events) {}
 
     /**
+     * One PreTokenGeneration Lambda trigger invocation captured by
+     * {@code InitiateAuth}. {@code claimsAdded} / {@code claimsOverridden} /
+     * {@code groupOverrides} are pre-parsed from the Lambda response so
+     * tests don't have to walk the raw
+     * {@code claimsAndScopeOverrideDetails} shape themselves.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record PreTokenGenInvocation(
+            String poolId,
+            String userPoolArn,
+            String username,
+            String triggerSource,
+            String lambdaArn,
+            Map<String, Object> requestPayload,
+            Map<String, Object> responsePayload,
+            List<String> claimsAdded,
+            List<String> claimsOverridden,
+            List<String> groupOverrides,
+            String invokedAt,
+            long durationMs) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record PreTokenGenInvocationsResponse(List<PreTokenGenInvocation> invocations) {}
+
+    /**
      * Payload for {@code POST /_fakecloud/cognito/authorization-codes}.
      * Lets test harnesses pre-allocate a single-use OAuth2 authorization
      * code that the {@code /oauth2/token} {@code authorization_code}

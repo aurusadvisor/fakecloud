@@ -131,6 +131,19 @@ func (c *CognitoClient) SetCompromisedPasswords(ctx context.Context, req *Compro
 	return &out, nil
 }
 
+// GetPreTokenGenInvocations returns the PreTokenGeneration Lambda
+// trigger invocation log recorded by InitiateAuth. Each entry has the
+// full request/response payloads plus pre-parsed ClaimsAdded,
+// ClaimsOverridden, and GroupOverrides so tests can assert claim
+// mutation flows without inspecting the issued JWT.
+func (c *CognitoClient) GetPreTokenGenInvocations(ctx context.Context) (*PreTokenGenInvocationsResponse, error) {
+	var out PreTokenGenInvocationsResponse
+	if err := c.fc.doGet(ctx, "/_fakecloud/cognito/pretokengen/invocations", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // GetWebAuthnCredentials lists every registered WebAuthn credential
 // across pools and users, including the parsed packed-attestation
 // info captured at registration time.
