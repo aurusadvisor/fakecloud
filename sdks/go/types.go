@@ -924,3 +924,49 @@ type Elbv2Rule struct {
 type Elbv2RulesResponse struct {
 	Rules []Elbv2Rule `json:"rules"`
 }
+
+// ── Glue ────────────────────────────────────────────────────────────
+
+// GlueJob describes one Glue Job recorded by CreateJob. Returned by the
+// /_fakecloud/glue/jobs endpoint.
+type GlueJob struct {
+	AccountID         string            `json:"accountId"`
+	Name              string            `json:"name"`
+	Role              string            `json:"role"`
+	Command           json.RawMessage   `json:"command"`
+	DefaultArguments  map[string]string `json:"defaultArguments"`
+	MaxCapacity       *float64          `json:"maxCapacity,omitempty"`
+	MaxRetries        int64             `json:"maxRetries"`
+	Timeout           *int64            `json:"timeout,omitempty"`
+	GlueVersion       *string           `json:"glueVersion,omitempty"`
+	WorkerType        *string           `json:"workerType,omitempty"`
+	NumberOfWorkers   *int64            `json:"numberOfWorkers,omitempty"`
+	CreatedOn         string            `json:"createdOn"`
+	LastModifiedOn    string            `json:"lastModifiedOn"`
+}
+
+// GlueJobsResponse contains every Glue Job registered on the server.
+type GlueJobsResponse struct {
+	Jobs []GlueJob `json:"jobs"`
+}
+
+// GlueJobRun describes one JobRun recorded by StartJobRun. Returned by
+// the /_fakecloud/glue/job-runs endpoint.
+type GlueJobRun struct {
+	AccountID     string            `json:"accountId"`
+	ID            string            `json:"id"`
+	JobName       string            `json:"jobName"`
+	Attempt       int64             `json:"attempt"`
+	StartedOn     string            `json:"startedOn"`
+	CompletedOn   *string           `json:"completedOn,omitempty"`
+	JobRunState   string            `json:"jobRunState"`
+	Arguments     map[string]string `json:"arguments"`
+	ErrorMessage  *string           `json:"errorMessage,omitempty"`
+	ExecutionTime int64             `json:"executionTime"`
+}
+
+// GlueJobRunsResponse contains every JobRun observed by the server,
+// optionally filtered by job name.
+type GlueJobRunsResponse struct {
+	Runs []GlueJobRun `json:"runs"`
+}

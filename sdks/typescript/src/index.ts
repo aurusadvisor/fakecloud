@@ -10,6 +10,7 @@ export {
   SqsClient,
   EventsClient,
   SchedulerClient,
+  GlueClient,
   S3Client,
   DynamoDbClient,
   SecretsManagerClient,

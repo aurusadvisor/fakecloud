@@ -108,6 +108,7 @@ public final class FakeCloud {
     private final SqsClient sqs;
     private final EventsClient events;
     private final SchedulerClient scheduler;
+    private final GlueClient glue;
     private final S3Client s3;
     private final DynamoDbClient dynamodb;
     private final SecretsManagerClient secretsmanager;
@@ -139,6 +140,7 @@ public final class FakeCloud {
         this.sqs = new SqsClient(http);
         this.events = new EventsClient(http);
         this.scheduler = new SchedulerClient(http);
+        this.glue = new GlueClient(http);
         this.s3 = new S3Client(http);
         this.dynamodb = new DynamoDbClient(http);
         this.secretsmanager = new SecretsManagerClient(http);
@@ -202,6 +204,7 @@ public final class FakeCloud {
     public SqsClient sqs() { return sqs; }
     public EventsClient events() { return events; }
     public SchedulerClient scheduler() { return scheduler; }
+    public GlueClient glue() { return glue; }
     public S3Client s3() { return s3; }
     public DynamoDbClient dynamodb() { return dynamodb; }
     public SecretsManagerClient secretsmanager() { return secretsmanager; }
@@ -424,6 +427,27 @@ public final class FakeCloud {
             return http.postEmpty(
                     "/_fakecloud/scheduler/fire/" + group + "/" + name,
                     Types.FireScheduleResponse.class);
+        }
+    }
+
+    public static final class GlueClient {
+        private final HttpTransport http;
+        GlueClient(HttpTransport http) { this.http = http; }
+
+        public Types.GlueJobsResponse getJobs() {
+            return http.get("/_fakecloud/glue/jobs", Types.GlueJobsResponse.class);
+        }
+
+        public Types.GlueJobRunsResponse getJobRuns() {
+            return getJobRuns(null);
+        }
+
+        public Types.GlueJobRunsResponse getJobRuns(String jobName) {
+            String path = "/_fakecloud/glue/job-runs";
+            if (jobName != null && !jobName.isEmpty()) {
+                path += "?job_name=" + encodePath(jobName);
+            }
+            return http.get(path, Types.GlueJobRunsResponse.class);
         }
     }
 

@@ -79,6 +79,9 @@ func (fc *FakeCloud) Events() *EventsClient { return &EventsClient{fc: fc} }
 // Scheduler returns the EventBridge Scheduler sub-client.
 func (fc *FakeCloud) Scheduler() *SchedulerClient { return &SchedulerClient{fc: fc} }
 
+// Glue returns the Glue sub-client.
+func (fc *FakeCloud) Glue() *GlueClient { return &GlueClient{fc: fc} }
+
 // S3 returns the S3 sub-client.
 func (fc *FakeCloud) S3() *S3Client { return &S3Client{fc: fc} }
 

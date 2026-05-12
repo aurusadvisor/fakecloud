@@ -28,6 +28,7 @@ final class FakeCloud
     private SqsClient $sqs;
     private EventsClient $events;
     private SchedulerClient $scheduler;
+    private GlueClient $glue;
     private S3Client $s3;
     private DynamoDbClient $dynamodb;
     private SecretsManagerClient $secretsmanager;
@@ -56,6 +57,7 @@ final class FakeCloud
         $this->sqs = new SqsClient($this->http);
         $this->events = new EventsClient($this->http);
         $this->scheduler = new SchedulerClient($this->http);
+        $this->glue = new GlueClient($this->http);
         $this->s3 = new S3Client($this->http);
         $this->dynamodb = new DynamoDbClient($this->http);
         $this->secretsmanager = new SecretsManagerClient($this->http);
@@ -121,6 +123,7 @@ final class FakeCloud
     public function events(): EventsClient { return $this->events; }
 
     public function scheduler(): SchedulerClient { return $this->scheduler; }
+    public function glue(): GlueClient { return $this->glue; }
     public function s3(): S3Client { return $this->s3; }
     public function dynamodb(): DynamoDbClient { return $this->dynamodb; }
     public function secretsmanager(): SecretsManagerClient { return $this->secretsmanager; }
@@ -401,6 +404,27 @@ final class SchedulerClient
         return FireScheduleResponse::fromArray(
             $this->http->postEmpty("/_fakecloud/scheduler/fire/{$group}/{$name}")
         );
+    }
+}
+
+final class GlueClient
+{
+    public function __construct(private readonly HttpTransport $http) {}
+
+    public function getJobs(): GlueJobsResponse
+    {
+        return GlueJobsResponse::fromArray(
+            $this->http->get('/_fakecloud/glue/jobs')
+        );
+    }
+
+    public function getJobRuns(?string $jobName = null): GlueJobRunsResponse
+    {
+        $path = '/_fakecloud/glue/job-runs';
+        if ($jobName !== null && $jobName !== '') {
+            $path .= '?job_name=' . rawurlencode($jobName);
+        }
+        return GlueJobRunsResponse::fromArray($this->http->get($path));
     }
 }
 

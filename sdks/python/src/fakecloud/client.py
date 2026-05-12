@@ -60,6 +60,8 @@ from fakecloud.types import (
     LogsAnomalyInjectResponse,
     MintAuthorizationCodeRequest,
     MintAuthorizationCodeResponse,
+    GlueJobRunsResponse,
+    GlueJobsResponse,
     PendingConfirmationsResponse,
     RdsInstancesResponse,
     ResetResponse,
@@ -754,6 +756,29 @@ class SchedulerClient:
         return FireScheduleResponse.from_dict(resp.json())
 
 
+class GlueClient:
+    """Async Glue introspection client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def get_jobs(self) -> GlueJobsResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/glue/jobs")
+        _check(resp)
+        return GlueJobsResponse.from_dict(resp.json())
+
+    async def get_job_runs(
+        self, job_name: Optional[str] = None
+    ) -> GlueJobRunsResponse:
+        params = {"job_name": job_name} if job_name else None
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/glue/job-runs", params=params
+        )
+        _check(resp)
+        return GlueJobRunsResponse.from_dict(resp.json())
+
+
 class S3Client:
     """Async S3 introspection client."""
 
@@ -1244,6 +1269,25 @@ class _SyncSchedulerClient:
         return FireScheduleResponse.from_dict(resp.json())
 
 
+class _SyncGlueClient:
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def get_jobs(self) -> GlueJobsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/glue/jobs")
+        _check(resp)
+        return GlueJobsResponse.from_dict(resp.json())
+
+    def get_job_runs(self, job_name: Optional[str] = None) -> GlueJobRunsResponse:
+        params = {"job_name": job_name} if job_name else None
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/glue/job-runs", params=params
+        )
+        _check(resp)
+        return GlueJobRunsResponse.from_dict(resp.json())
+
+
 class _SyncS3Client:
     def __init__(self, client: httpx.Client, base_url: str) -> None:
         self._client = client
@@ -1551,6 +1595,10 @@ class FakeCloud:
         return SchedulerClient(self._client, self._base)
 
     @property
+    def glue(self) -> GlueClient:
+        return GlueClient(self._client, self._base)
+
+    @property
     def s3(self) -> S3Client:
         return S3Client(self._client, self._base)
 
@@ -1695,6 +1743,10 @@ class FakeCloudSync:
     @property
     def scheduler(self) -> _SyncSchedulerClient:
         return _SyncSchedulerClient(self._client, self._base)
+
+    @property
+    def glue(self) -> _SyncGlueClient:
+        return _SyncGlueClient(self._client, self._base)
 
     @property
     def s3(self) -> _SyncS3Client:

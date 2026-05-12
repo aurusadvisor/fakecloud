@@ -729,6 +729,91 @@ class FireRuleResponse:
         )
 
 
+# ── Glue ────────────────────────────────────────────────────────────
+
+
+@dataclass
+class GlueJob:
+    account_id: str
+    name: str
+    role: str
+    command: Any
+    default_arguments: Dict[str, str]
+    max_retries: int
+    created_on: str
+    last_modified_on: str
+    max_capacity: Optional[float] = None
+    timeout: Optional[int] = None
+    glue_version: Optional[str] = None
+    worker_type: Optional[str] = None
+    number_of_workers: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> GlueJob:
+        return cls(
+            account_id=data.get("accountId", ""),
+            name=data.get("name", ""),
+            role=data.get("role", ""),
+            command=data.get("command"),
+            default_arguments=dict(data.get("defaultArguments") or {}),
+            max_retries=int(data.get("maxRetries", 0)),
+            created_on=data.get("createdOn", ""),
+            last_modified_on=data.get("lastModifiedOn", ""),
+            max_capacity=data.get("maxCapacity"),
+            timeout=data.get("timeout"),
+            glue_version=data.get("glueVersion"),
+            worker_type=data.get("workerType"),
+            number_of_workers=data.get("numberOfWorkers"),
+        )
+
+
+@dataclass
+class GlueJobsResponse:
+    jobs: List[GlueJob]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> GlueJobsResponse:
+        return cls(jobs=[GlueJob.from_dict(j) for j in data.get("jobs", [])])
+
+
+@dataclass
+class GlueJobRun:
+    account_id: str
+    id: str
+    job_name: str
+    attempt: int
+    started_on: str
+    job_run_state: str
+    arguments: Dict[str, str]
+    execution_time: int
+    completed_on: Optional[str] = None
+    error_message: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> GlueJobRun:
+        return cls(
+            account_id=data.get("accountId", ""),
+            id=data.get("id", ""),
+            job_name=data.get("jobName", ""),
+            attempt=int(data.get("attempt", 0)),
+            started_on=data.get("startedOn", ""),
+            job_run_state=data.get("jobRunState", ""),
+            arguments=dict(data.get("arguments") or {}),
+            execution_time=int(data.get("executionTime", 0)),
+            completed_on=data.get("completedOn"),
+            error_message=data.get("errorMessage"),
+        )
+
+
+@dataclass
+class GlueJobRunsResponse:
+    runs: List[GlueJobRun]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> GlueJobRunsResponse:
+        return cls(runs=[GlueJobRun.from_dict(r) for r in data.get("runs", [])])
+
+
 # ── Scheduler (EventBridge Scheduler) ───────────────────────────────
 
 

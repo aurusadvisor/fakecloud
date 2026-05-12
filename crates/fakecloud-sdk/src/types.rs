@@ -1362,6 +1362,59 @@ pub struct AcmCertificateStatusRequest {
     pub reason: Option<String>,
 }
 
+// ── Glue ────────────────────────────────────────────────────────────
+
+/// Curated row for `GET /_fakecloud/glue/jobs`. Mirrors the
+/// configured Glue Job state so tests can assert what `CreateJob`
+/// recorded without re-listing through the AWS surface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlueJob {
+    pub account_id: String,
+    pub name: String,
+    pub role: String,
+    pub command: serde_json::Value,
+    pub default_arguments: std::collections::BTreeMap<String, String>,
+    pub max_capacity: Option<f64>,
+    pub max_retries: i64,
+    pub timeout: Option<i64>,
+    pub glue_version: Option<String>,
+    pub worker_type: Option<String>,
+    pub number_of_workers: Option<i64>,
+    pub created_on: String,
+    pub last_modified_on: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlueJobsResponse {
+    pub jobs: Vec<GlueJob>,
+}
+
+/// Curated row for `GET /_fakecloud/glue/job-runs`. Includes the
+/// full state machine of a JobRun (StartJobRun ledger). Filter by
+/// `?job_name=foo` to scope to a single job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlueJobRun {
+    pub account_id: String,
+    pub id: String,
+    pub job_name: String,
+    pub attempt: i64,
+    pub started_on: String,
+    pub completed_on: Option<String>,
+    pub job_run_state: String,
+    pub arguments: std::collections::BTreeMap<String, String>,
+    pub error_message: Option<String>,
+    pub execution_time: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlueJobRunsResponse {
+    pub runs: Vec<GlueJobRun>,
+}
+
 /// Body for `POST /_fakecloud/cloudfront/distributions/{id}/status`. The
 /// admin endpoint flips a stored CloudFront Distribution's status so
 /// tests can synchronously force it into `Deployed` or `InProgress`
