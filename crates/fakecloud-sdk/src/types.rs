@@ -1141,6 +1141,93 @@ pub struct BedrockStatusResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BedrockAgentAliasSummary {
+    pub alias_id: String,
+    pub alias_name: String,
+    pub agent_version: String,
+    pub alias_arn: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BedrockAgentVersionSummary {
+    pub agent_version: String,
+    pub created_at: String,
+    pub instruction: Option<String>,
+    pub foundation_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BedrockAgentKnowledgeBaseSummary {
+    pub knowledge_base_id: String,
+    pub state: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BedrockAgentCollaboratorSummary {
+    pub collaborator_id: String,
+    pub collaborator_name: String,
+    pub collaborator_alias_arn: String,
+    pub relay_conversation_history: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BedrockAgentRow {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub agent_arn: String,
+    pub agent_status: String,
+    pub foundation_model: Option<String>,
+    pub instruction: Option<String>,
+    pub knowledge_bases: Vec<BedrockAgentKnowledgeBaseSummary>,
+    pub action_groups: Vec<serde_json::Value>,
+    pub collaborators: Vec<BedrockAgentCollaboratorSummary>,
+    pub aliases: Vec<BedrockAgentAliasSummary>,
+    pub versions: Vec<BedrockAgentVersionSummary>,
+    pub prompt_overrides: Option<serde_json::Value>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BedrockAgentAgentsResponse {
+    pub agents: Vec<BedrockAgentRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BedrockAgentRuntimeInvocation {
+    pub invocation_id: String,
+    pub op: String,
+    pub agent_id: Option<String>,
+    pub flow_id: Option<String>,
+    pub session_id: Option<String>,
+    pub input: String,
+    pub output: String,
+    pub output_chunks: u32,
+    pub trace: Option<serde_json::Value>,
+    #[serde(default)]
+    pub citations: Vec<serde_json::Value>,
+    pub invoked_at: String,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BedrockAgentRuntimeInvocationsResponse {
+    pub invocations: Vec<BedrockAgentRuntimeInvocation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EcrRepository {
     pub repository_name: String,
     pub repository_arn: String,

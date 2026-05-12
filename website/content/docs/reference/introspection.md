@@ -66,6 +66,18 @@ curl http://localhost:4566/_fakecloud/health
 | `/_fakecloud/bedrock/models/{model_id}/responses` | POST | Set prompt-conditional response rules. |
 | `/_fakecloud/bedrock/faults` | POST | Inject faults (throttle, timeout, error) into the next N invocations. |
 
+## Bedrock Agent
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/bedrock-agent/agents` | GET | **NEW** -- List agents flattened with aliases, versions, knowledge bases, and collaborators. |
+
+## Bedrock Agent Runtime
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/bedrock-agent-runtime/invocations` | GET | **NEW** -- List InvokeAgent / InvokeInlineAgent / InvokeFlow / Retrieve / RetrieveAndGenerate / CreateInvocation calls. |
+
 ## CloudFront
 
 | Endpoint | Method | Description |

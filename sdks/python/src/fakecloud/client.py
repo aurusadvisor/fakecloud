@@ -12,6 +12,8 @@ from fakecloud.types import (
     AppAsScheduledTickResponse,
     AppAsTickResponse,
     AuthEventsResponse,
+    BedrockAgentAgentsResponse,
+    BedrockAgentRuntimeInvocationsResponse,
     BedrockFaultRule,
     BedrockFaultsResponse,
     BedrockInvocationsResponse,
@@ -1073,30 +1075,31 @@ class BedrockClient:
 
 
 class BedrockAgentClient:
-    """Async Bedrock Agent (control plane) sub-client.
-
-    The fakecloud Bedrock Agent service has no admin/introspection endpoints
-    today; this client exists so callers can hold a typed handle alongside
-    the other Bedrock sub-clients and so future introspection helpers can
-    land here without an API break.
-    """
+    """Async Bedrock Agent (control plane) introspection sub-client."""
 
     def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
         self._client = client
         self._base = base_url
+
+    async def get_agents(self) -> BedrockAgentAgentsResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/bedrock-agent/agents")
+        _check(resp)
+        return BedrockAgentAgentsResponse.from_dict(resp.json())
 
 
 class BedrockAgentRuntimeClient:
-    """Async Bedrock Agent Runtime (data plane) sub-client.
-
-    Placeholder for future introspection helpers around InvokeAgent,
-    Retrieve, and RetrieveAndGenerate. Holds the base URL for parity with
-    the other Bedrock sub-clients.
-    """
+    """Async Bedrock Agent Runtime (data plane) introspection sub-client."""
 
     def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
         self._client = client
         self._base = base_url
+
+    async def get_invocations(self) -> BedrockAgentRuntimeInvocationsResponse:
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/bedrock-agent-runtime/invocations"
+        )
+        _check(resp)
+        return BedrockAgentRuntimeInvocationsResponse.from_dict(resp.json())
 
 
 # ── Sync sub-clients ────────────────────────────────────────────────
@@ -1607,11 +1610,23 @@ class _SyncBedrockAgentClient:
         self._client = client
         self._base = base_url
 
+    def get_agents(self) -> BedrockAgentAgentsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/bedrock-agent/agents")
+        _check(resp)
+        return BedrockAgentAgentsResponse.from_dict(resp.json())
+
 
 class _SyncBedrockAgentRuntimeClient:
     def __init__(self, client: httpx.Client, base_url: str) -> None:
         self._client = client
         self._base = base_url
+
+    def get_invocations(self) -> BedrockAgentRuntimeInvocationsResponse:
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/bedrock-agent-runtime/invocations"
+        )
+        _check(resp)
+        return BedrockAgentRuntimeInvocationsResponse.from_dict(resp.json())
 
 
 # ── Main clients ────────────────────────────────────────────────────

@@ -667,6 +667,81 @@ export interface BedrockStatusResponse {
   status: string;
 }
 
+// ── Bedrock Agent (control plane) ─────────────────────────────────────
+
+export interface BedrockAgentAliasSummary {
+  aliasId: string;
+  aliasName: string;
+  agentVersion: string;
+  aliasArn: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BedrockAgentVersionSummary {
+  agentVersion: string;
+  createdAt: string;
+  instruction: string | null;
+  foundationModel: string | null;
+}
+
+export interface BedrockAgentKnowledgeBaseSummary {
+  knowledgeBaseId: string;
+  state: string;
+  description: string | null;
+}
+
+export interface BedrockAgentCollaboratorSummary {
+  collaboratorId: string;
+  collaboratorName: string;
+  collaboratorAliasArn: string;
+  relayConversationHistory: string;
+}
+
+export interface BedrockAgentRow {
+  agentId: string;
+  agentName: string;
+  agentArn: string;
+  agentStatus: string;
+  foundationModel: string | null;
+  instruction: string | null;
+  knowledgeBases: BedrockAgentKnowledgeBaseSummary[];
+  actionGroups: unknown[];
+  collaborators: BedrockAgentCollaboratorSummary[];
+  aliases: BedrockAgentAliasSummary[];
+  versions: BedrockAgentVersionSummary[];
+  promptOverrides: unknown;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BedrockAgentAgentsResponse {
+  agents: BedrockAgentRow[];
+}
+
+// ── Bedrock Agent Runtime (data plane) ────────────────────────────────
+
+export interface BedrockAgentRuntimeInvocation {
+  invocationId: string;
+  /** invoke_agent | invoke_inline_agent | invoke_flow | retrieve | retrieve_and_generate | create_invocation */
+  op: string;
+  agentId: string | null;
+  flowId: string | null;
+  sessionId: string | null;
+  input: string;
+  output: string;
+  outputChunks: number;
+  trace: unknown;
+  citations: unknown[];
+  invokedAt: string;
+  durationMs: number;
+}
+
+export interface BedrockAgentRuntimeInvocationsResponse {
+  invocations: BedrockAgentRuntimeInvocation[];
+}
+
 // ── IAM ───────────────────────────────────────────────────────────────
 
 export interface CreateAdminRequest {

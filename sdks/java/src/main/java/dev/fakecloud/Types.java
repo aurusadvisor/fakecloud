@@ -629,6 +629,77 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record BedrockStatusResponse(String status) {}
 
+    // ── Bedrock Agent (control plane) ──────────────────────────────
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record BedrockAgentAliasSummary(
+            String aliasId,
+            String aliasName,
+            String agentVersion,
+            String aliasArn,
+            String status,
+            String createdAt,
+            String updatedAt) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record BedrockAgentVersionSummary(
+            String agentVersion,
+            String createdAt,
+            String instruction,
+            String foundationModel) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record BedrockAgentKnowledgeBaseSummary(
+            String knowledgeBaseId,
+            String state,
+            String description) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record BedrockAgentCollaboratorSummary(
+            String collaboratorId,
+            String collaboratorName,
+            String collaboratorAliasArn,
+            String relayConversationHistory) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record BedrockAgentRow(
+            String agentId,
+            String agentName,
+            String agentArn,
+            String agentStatus,
+            String foundationModel,
+            String instruction,
+            List<BedrockAgentKnowledgeBaseSummary> knowledgeBases,
+            List<Object> actionGroups,
+            List<BedrockAgentCollaboratorSummary> collaborators,
+            List<BedrockAgentAliasSummary> aliases,
+            List<BedrockAgentVersionSummary> versions,
+            Object promptOverrides,
+            String createdAt,
+            String updatedAt) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record BedrockAgentAgentsResponse(List<BedrockAgentRow> agents) {}
+
+    // ── Bedrock Agent Runtime (data plane) ────────────────────────
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record BedrockAgentRuntimeInvocation(
+            String invocationId,
+            String op,
+            String agentId,
+            String flowId,
+            String sessionId,
+            String input,
+            String output,
+            long outputChunks,
+            Object trace,
+            List<Object> citations,
+            String invokedAt,
+            long durationMs) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record BedrockAgentRuntimeInvocationsResponse(
+            List<BedrockAgentRuntimeInvocation> invocations) {}
+
     // ── API Gateway v2 ─────────────────────────────────────────────
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record ApiGatewayV2Request(

@@ -73,6 +73,20 @@ REST + JSON. Path-based routing; identifiers are URL-safe strings minted by fake
 
 For the data plane (InvokeAgent, Retrieve, RetrieveAndGenerate), see [Bedrock Agent Runtime](/docs/services/bedrock-agent-runtime/).
 
+## Introspection
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/bedrock-agent/agents` | GET | List every agent with aliases, versions, attached knowledge bases, and collaborators flattened into one row each. |
+
+```sh
+curl http://localhost:4566/_fakecloud/bedrock-agent/agents
+```
+
+The response shape is `{agents: [{agentId, agentName, agentArn, agentStatus, foundationModel, instruction, knowledgeBases[], actionGroups[], collaborators[], aliases[], versions[], promptOverrides, createdAt, updatedAt}]}`. `actionGroups` is currently always `[]` because action-group creation does not yet persist state -- the field is exposed for forward compatibility so callers don't have to migrate their assertion code later.
+
+Wrapped by `getAgents()` on the `bedrockAgent` sub-client in every first-party SDK.
+
 ## Source
 
 - [`crates/fakecloud-bedrock-agent`](https://github.com/faiscadev/fakecloud/tree/main/crates/fakecloud-bedrock-agent)

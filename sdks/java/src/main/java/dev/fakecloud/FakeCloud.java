@@ -708,29 +708,26 @@ public final class FakeCloud {
         }
     }
 
-    /**
-     * Bedrock Agent (control plane) sub-client.
-     *
-     * The fakecloud Bedrock Agent service has no admin/introspection
-     * endpoints today; this client exists so callers can hold a typed handle
-     * alongside the other Bedrock sub-clients and so future helpers can land
-     * here without an API break.
-     */
+    /** Bedrock Agent (control plane) introspection sub-client. */
     public static final class BedrockAgentClient {
-        @SuppressWarnings("unused")
         private final HttpTransport http;
         BedrockAgentClient(HttpTransport http) { this.http = http; }
+
+        public Types.BedrockAgentAgentsResponse getAgents() {
+            return http.get("/_fakecloud/bedrock-agent/agents", Types.BedrockAgentAgentsResponse.class);
+        }
     }
 
-    /**
-     * Bedrock Agent Runtime (data plane) sub-client. Placeholder for future
-     * introspection helpers around InvokeAgent, Retrieve, and
-     * RetrieveAndGenerate.
-     */
+    /** Bedrock Agent Runtime (data plane) introspection sub-client. */
     public static final class BedrockAgentRuntimeClient {
-        @SuppressWarnings("unused")
         private final HttpTransport http;
         BedrockAgentRuntimeClient(HttpTransport http) { this.http = http; }
+
+        public Types.BedrockAgentRuntimeInvocationsResponse getInvocations() {
+            return http.get(
+                "/_fakecloud/bedrock-agent-runtime/invocations",
+                Types.BedrockAgentRuntimeInvocationsResponse.class);
+        }
     }
 
     public static final class EcsClient {

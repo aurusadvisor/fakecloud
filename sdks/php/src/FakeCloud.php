@@ -726,26 +726,30 @@ final class BedrockClient
     }
 }
 
-/**
- * Bedrock Agent (control plane) sub-client.
- *
- * The fakecloud Bedrock Agent service has no admin/introspection endpoints
- * today; this client exists so callers can hold a typed handle alongside the
- * other Bedrock sub-clients and so future helpers can land here without an
- * API break.
- */
+/** Bedrock Agent (control plane) introspection sub-client. */
 final class BedrockAgentClient
 {
     public function __construct(private readonly HttpTransport $http) {}
+
+    public function getAgents(): BedrockAgentAgentsResponse
+    {
+        return BedrockAgentAgentsResponse::fromArray(
+            $this->http->get('/_fakecloud/bedrock-agent/agents')
+        );
+    }
 }
 
-/**
- * Bedrock Agent Runtime (data plane) sub-client. Placeholder for future
- * introspection helpers around InvokeAgent, Retrieve, and RetrieveAndGenerate.
- */
+/** Bedrock Agent Runtime (data plane) introspection sub-client. */
 final class BedrockAgentRuntimeClient
 {
     public function __construct(private readonly HttpTransport $http) {}
+
+    public function getInvocations(): BedrockAgentRuntimeInvocationsResponse
+    {
+        return BedrockAgentRuntimeInvocationsResponse::fromArray(
+            $this->http->get('/_fakecloud/bedrock-agent-runtime/invocations')
+        );
+    }
 }
 
 final class EcsClient
