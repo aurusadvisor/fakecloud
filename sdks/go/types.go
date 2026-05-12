@@ -1078,6 +1078,57 @@ type EcsEventsResponse struct {
 	Events []EcsLifecycleEvent `json:"events"`
 }
 
+// EcsTaskMetadataLimits mirrors the `Limits` block of the ECS
+// container-metadata v4 response.
+type EcsTaskMetadataLimits struct {
+	CPU    *float64 `json:"cpu,omitempty"`
+	Memory *int64   `json:"memory,omitempty"`
+}
+
+// EcsTaskMetadataPort is one entry in a container's published port list.
+type EcsTaskMetadataPort struct {
+	ContainerPort *int64  `json:"containerPort,omitempty"`
+	HostPort      *int64  `json:"hostPort,omitempty"`
+	Protocol      *string `json:"protocol,omitempty"`
+}
+
+// EcsTaskMetadataContainer is one container inside a task-metadata dump.
+type EcsTaskMetadataContainer struct {
+	Name          string                `json:"name"`
+	Image         string                `json:"image"`
+	ImageID       *string               `json:"imageId,omitempty"`
+	Ports         []EcsTaskMetadataPort `json:"ports"`
+	Labels        map[string]string     `json:"labels"`
+	DesiredStatus string                `json:"desiredStatus"`
+	KnownStatus   string                `json:"knownStatus"`
+	Limits        EcsTaskMetadataLimits `json:"limits"`
+	CreatedAt     *string               `json:"createdAt,omitempty"`
+	StartedAt     *string               `json:"startedAt,omitempty"`
+	ExitCode      *int64                `json:"exitCode,omitempty"`
+}
+
+// EcsTaskMetadata is the v4 metadata-URI aggregate for one task.
+type EcsTaskMetadata struct {
+	Cluster          string                     `json:"cluster"`
+	TaskArn          string                     `json:"taskArn"`
+	Family           string                     `json:"family"`
+	Revision         int32                      `json:"revision"`
+	DesiredStatus    string                     `json:"desiredStatus"`
+	KnownStatus      string                     `json:"knownStatus"`
+	Containers       []EcsTaskMetadataContainer `json:"containers"`
+	PullStartedAt    *string                    `json:"pullStartedAt,omitempty"`
+	PullStoppedAt    *string                    `json:"pullStoppedAt,omitempty"`
+	AvailabilityZone string                     `json:"availabilityZone"`
+	LaunchType       string                     `json:"launchType"`
+	VpcID            *string                    `json:"vpcId,omitempty"`
+	EniID            *string                    `json:"eniId,omitempty"`
+}
+
+// EcsTaskMetadataResponse wraps a single task's metadata dump.
+type EcsTaskMetadataResponse struct {
+	Task EcsTaskMetadata `json:"task"`
+}
+
 // ── ELBv2 ──────────────────────────────────────────────────────────
 
 type Elbv2Tag struct {

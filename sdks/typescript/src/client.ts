@@ -85,6 +85,7 @@ import type {
   EcsTaskLogsResponse,
   EcsMarkFailedRequest,
   EcsEventsResponse,
+  EcsTaskMetadataResponse,
   Elbv2LoadBalancersResponse,
   Elbv2TargetGroupsResponse,
   Elbv2ListenersResponse,
@@ -1049,6 +1050,18 @@ export class EcsClient {
   /** Replay the lifecycle event log. */
   async getEvents(): Promise<EcsEventsResponse> {
     const resp = await fetch(`${this.baseUrl}/_fakecloud/ecs/events`);
+    return parse(resp);
+  }
+
+  /**
+   * Return the aggregated v4 metadata dump (the same shape
+   * `ECS_CONTAINER_METADATA_URI_V4` exposes to a container) for the task
+   * with the given full ARN. The ARN is URL-encoded into the path.
+   */
+  async getTaskMetadata(taskArn: string): Promise<EcsTaskMetadataResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ecs/metadata/${encodeURIComponent(taskArn)}`,
+    );
     return parse(resp);
   }
 }

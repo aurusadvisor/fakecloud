@@ -1002,6 +1002,51 @@ export interface EcsEventsResponse {
   events: EcsLifecycleEvent[];
 }
 
+export interface EcsTaskMetadataLimits {
+  cpu?: number;
+  memory?: number;
+}
+
+export interface EcsTaskMetadataPort {
+  containerPort?: number;
+  hostPort?: number;
+  protocol?: string;
+}
+
+export interface EcsTaskMetadataContainer {
+  name: string;
+  image: string;
+  imageId?: string;
+  ports: EcsTaskMetadataPort[];
+  labels: Record<string, string>;
+  desiredStatus: string;
+  knownStatus: string;
+  limits: EcsTaskMetadataLimits;
+  createdAt?: string;
+  startedAt?: string;
+  exitCode?: number;
+}
+
+export interface EcsTaskMetadata {
+  cluster: string;
+  taskArn: string;
+  family: string;
+  revision: number;
+  desiredStatus: string;
+  knownStatus: string;
+  containers: EcsTaskMetadataContainer[];
+  pullStartedAt?: string;
+  pullStoppedAt?: string;
+  availabilityZone: string;
+  launchType: string;
+  vpcId?: string;
+  eniId?: string;
+}
+
+export interface EcsTaskMetadataResponse {
+  task: EcsTaskMetadata;
+}
+
 // ── ELBv2 ───────────────────────────────────────────────────────────
 
 export interface Elbv2Tag {

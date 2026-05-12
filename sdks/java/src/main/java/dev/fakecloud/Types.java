@@ -880,6 +880,45 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record EcsEventsResponse(List<EcsLifecycleEvent> events) {}
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcsTaskMetadataLimits(Double cpu, Long memory) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcsTaskMetadataPort(Long containerPort, Long hostPort, String protocol) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcsTaskMetadataContainer(
+            String name,
+            String image,
+            String imageId,
+            List<EcsTaskMetadataPort> ports,
+            java.util.Map<String, String> labels,
+            String desiredStatus,
+            String knownStatus,
+            EcsTaskMetadataLimits limits,
+            String createdAt,
+            String startedAt,
+            Long exitCode) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcsTaskMetadata(
+            String cluster,
+            String taskArn,
+            String family,
+            Integer revision,
+            String desiredStatus,
+            String knownStatus,
+            List<EcsTaskMetadataContainer> containers,
+            String pullStartedAt,
+            String pullStoppedAt,
+            String availabilityZone,
+            String launchType,
+            String vpcId,
+            String eniId) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcsTaskMetadataResponse(EcsTaskMetadata task) {}
+
     // ── ELBv2 ─────────────────────────────────────────────────────
 
     @JsonIgnoreProperties(ignoreUnknown = true)

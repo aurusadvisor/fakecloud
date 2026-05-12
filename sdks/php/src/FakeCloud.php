@@ -866,6 +866,21 @@ final class EcsClient
             $this->http->get('/_fakecloud/ecs/events')
         );
     }
+
+    /**
+     * Return the aggregated v4 metadata dump (the same shape
+     * `ECS_CONTAINER_METADATA_URI_V4` exposes to a container) for the
+     * task with the given full ARN. The ARN is URL-encoded into the
+     * path before the request is issued.
+     */
+    public function getTaskMetadata(string $taskArn): EcsTaskMetadataResponse
+    {
+        return EcsTaskMetadataResponse::fromArray(
+            $this->http->get(
+                '/_fakecloud/ecs/metadata/' . HttpTransport::encodePath($taskArn)
+            )
+        );
+    }
 }
 
 final class Elbv2Client

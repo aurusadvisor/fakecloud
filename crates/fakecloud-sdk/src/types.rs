@@ -1486,6 +1486,72 @@ pub struct EcsEventsResponse {
     pub events: Vec<EcsLifecycleEvent>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EcsTaskMetadataLimits {
+    pub cpu: Option<f64>,
+    pub memory: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcsTaskMetadataPort {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_port: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_port: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcsTaskMetadataContainer {
+    pub name: String,
+    pub image: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_id: Option<String>,
+    pub ports: Vec<EcsTaskMetadataPort>,
+    pub labels: std::collections::BTreeMap<String, String>,
+    pub desired_status: String,
+    pub known_status: String,
+    pub limits: EcsTaskMetadataLimits,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcsTaskMetadata {
+    pub cluster: String,
+    pub task_arn: String,
+    pub family: String,
+    pub revision: i32,
+    pub desired_status: String,
+    pub known_status: String,
+    pub containers: Vec<EcsTaskMetadataContainer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pull_started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pull_stopped_at: Option<String>,
+    pub availability_zone: String,
+    pub launch_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vpc_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eni_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcsTaskMetadataResponse {
+    pub task: EcsTaskMetadata,
+}
+
 // ── ELBv2 ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

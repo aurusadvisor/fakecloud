@@ -133,6 +133,7 @@ curl http://localhost:4566/_fakecloud/health
 | `/_fakecloud/ecs/creds/{task_id}` | GET | Task IAM credentials (used by the ECS Exec data plane). |
 | `/_fakecloud/ecs/v3/{task_id}` | GET | **NEW** -- ECS metadata v3 endpoint exposed to task containers. |
 | `/_fakecloud/ecs/v4/{task_id}` | GET | **NEW** -- ECS metadata v4 endpoint exposed to task containers. |
+| `/_fakecloud/ecs/metadata/{task_arn}` | GET | Aggregated v4 metadata dump keyed by full task ARN (URL-encoded). Same shape as `ECS_CONTAINER_METADATA_URI_V4`, addressable from tests holding a RunTask response. |
 
 ## ElastiCache
 

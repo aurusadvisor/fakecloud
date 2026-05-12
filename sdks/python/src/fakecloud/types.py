@@ -2201,6 +2201,106 @@ class EcsEventsResponse:
         )
 
 
+@dataclass
+class EcsTaskMetadataLimits:
+    cpu: Optional[float] = None
+    memory: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcsTaskMetadataLimits:
+        return cls(cpu=data.get("cpu"), memory=data.get("memory"))
+
+
+@dataclass
+class EcsTaskMetadataPort:
+    container_port: Optional[int] = None
+    host_port: Optional[int] = None
+    protocol: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcsTaskMetadataPort:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class EcsTaskMetadataContainer:
+    name: str
+    image: str
+    desired_status: str
+    known_status: str
+    ports: List[EcsTaskMetadataPort]
+    labels: Dict[str, str]
+    limits: EcsTaskMetadataLimits
+    image_id: Optional[str] = None
+    created_at: Optional[str] = None
+    started_at: Optional[str] = None
+    exit_code: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcsTaskMetadataContainer:
+        return cls(
+            name=data["name"],
+            image=data["image"],
+            image_id=data.get("imageId"),
+            ports=[EcsTaskMetadataPort.from_dict(p) for p in data.get("ports", [])],
+            labels=data.get("labels", {}) or {},
+            desired_status=data["desiredStatus"],
+            known_status=data["knownStatus"],
+            limits=EcsTaskMetadataLimits.from_dict(data.get("limits", {}) or {}),
+            created_at=data.get("createdAt"),
+            started_at=data.get("startedAt"),
+            exit_code=data.get("exitCode"),
+        )
+
+
+@dataclass
+class EcsTaskMetadata:
+    cluster: str
+    task_arn: str
+    family: str
+    revision: int
+    desired_status: str
+    known_status: str
+    containers: List[EcsTaskMetadataContainer]
+    availability_zone: str
+    launch_type: str
+    pull_started_at: Optional[str] = None
+    pull_stopped_at: Optional[str] = None
+    vpc_id: Optional[str] = None
+    eni_id: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcsTaskMetadata:
+        return cls(
+            cluster=data["cluster"],
+            task_arn=data["taskArn"],
+            family=data["family"],
+            revision=data["revision"],
+            desired_status=data["desiredStatus"],
+            known_status=data["knownStatus"],
+            containers=[
+                EcsTaskMetadataContainer.from_dict(c)
+                for c in data.get("containers", [])
+            ],
+            pull_started_at=data.get("pullStartedAt"),
+            pull_stopped_at=data.get("pullStoppedAt"),
+            availability_zone=data["availabilityZone"],
+            launch_type=data["launchType"],
+            vpc_id=data.get("vpcId"),
+            eni_id=data.get("eniId"),
+        )
+
+
+@dataclass
+class EcsTaskMetadataResponse:
+    task: EcsTaskMetadata
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcsTaskMetadataResponse:
+        return cls(task=EcsTaskMetadata.from_dict(data["task"]))
+
+
 # ── ELBv2 ───────────────────────────────────────────────────────────
 
 

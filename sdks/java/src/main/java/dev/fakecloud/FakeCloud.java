@@ -31,6 +31,7 @@ import dev.fakecloud.Types.EcrPullThroughRulesResponse;
 import dev.fakecloud.Types.EcrRepositoriesResponse;
 import dev.fakecloud.Types.EcsClustersResponse;
 import dev.fakecloud.Types.EcsEventsResponse;
+import dev.fakecloud.Types.EcsTaskMetadataResponse;
 import dev.fakecloud.Types.EcsMarkFailedRequest;
 import dev.fakecloud.Types.EcsTask;
 import dev.fakecloud.Types.EcsTaskLogsResponse;
@@ -822,6 +823,18 @@ public final class FakeCloud {
         /** Replay the lifecycle event log. */
         public EcsEventsResponse getEvents() {
             return http.get("/_fakecloud/ecs/events", EcsEventsResponse.class);
+        }
+
+        /**
+         * Return the aggregated v4 metadata dump (the same shape
+         * {@code ECS_CONTAINER_METADATA_URI_V4} exposes to a container) for
+         * the task with the given full ARN. The ARN is URL-encoded into the
+         * path before the request is issued.
+         */
+        public EcsTaskMetadataResponse getTaskMetadata(String taskArn) {
+            return http.get(
+                    "/_fakecloud/ecs/metadata/" + encodePath(taskArn),
+                    EcsTaskMetadataResponse.class);
         }
     }
 
