@@ -276,6 +276,19 @@ fn validate_json_response(
     output_shape_id: &str,
     response_body: &str,
 ) -> Vec<ShapeViolation> {
+    // Some operations return non-JSON bodies on success — e.g. Bedrock
+    // `InvokeModel` and `InvokeModelWithResponseStream` return raw or
+    // event-stream-framed binary payloads, S3 GetObject returns the object
+    // bytes directly, etc. Smithy marks those with `@streaming` on a member
+    // bound via `@httpPayload`, but we don't thread that flag through here
+    // yet. As a pragmatic guard, treat any response whose first
+    // non-whitespace character isn't `{` or `[` as an opaque streaming body
+    // and trust the HTTP status code that classify_response already saw.
+    let trimmed = response_body.trim_start();
+    if trimmed.is_empty() || !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        return Vec::new();
+    }
+
     let value: Value = match serde_json::from_str(response_body) {
         Ok(v) => v,
         Err(e) => {
@@ -856,7 +869,11 @@ mod tests {
     #[test]
     fn invalid_json_body() {
         let model = test_model();
-        let body = "not json at all";
+        // Malformed JSON that *looks* like JSON (starts with `{`) — parsing
+        // still fails and must surface as a ParseError. Bodies that don't
+        // look like JSON at all are treated as opaque streaming payloads
+        // and are not validated here; see `non_json_body_is_opaque`.
+        let body = "{not valid";
         let violations = validate_response(
             &model,
             "test#CreateQueueOutput",
@@ -867,6 +884,24 @@ mod tests {
         );
         assert_eq!(violations.len(), 1);
         assert!(matches!(&violations[0], ShapeViolation::ParseError { .. }));
+    }
+
+    #[test]
+    fn non_json_body_is_opaque() {
+        // Some operations (Bedrock InvokeModel, S3 GetObject, ...) return
+        // binary or event-stream-framed bodies. Those don't look like JSON
+        // and must not be flagged as parse errors.
+        let model = test_model();
+        let body = "not json at all";
+        let violations = validate_response(
+            &model,
+            "test#CreateQueueOutput",
+            body,
+            Protocol::Json {
+                target_prefix: "Test",
+            },
+        );
+        assert!(violations.is_empty(), "got {:?}", violations);
     }
 
     #[test]
