@@ -2,6 +2,87 @@ mod helpers;
 
 use helpers::TestServer;
 
+fn docker_available() -> bool {
+    std::process::Command::new("docker")
+        .arg("info")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn require_docker_or_skip(test: &str) -> bool {
+    if docker_available() {
+        return true;
+    }
+    if std::env::var("CI").is_ok() {
+        panic!("docker is required for {test} in CI");
+    }
+    eprintln!("Skipping {test}: docker not available");
+    false
+}
+
+/// Cache cluster endpoint survives a restart. Pre-fix, the cluster row
+/// was persisted with `cache_cluster_status=available` but the Docker
+/// container was gone, so the endpoint TCP-port wouldn't accept
+/// connections after restart. Same bug class as RDS #1338.
+#[tokio::test]
+async fn persistence_cache_cluster_endpoint_works_after_restart() {
+    if !require_docker_or_skip("persistence_cache_cluster_endpoint_works_after_restart") {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let data_path = tmp.path().display().to_string();
+    let extra_args = ["--storage-mode", "persistent", "--data-path", &data_path];
+    let mut server = TestServer::start_full(&[], &extra_args).await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_cache_cluster()
+        .cache_cluster_id("restart-cache")
+        .cache_node_type("cache.t3.micro")
+        .preferred_availability_zone("us-east-1a")
+        .send()
+        .await
+        .unwrap();
+
+    drop(client);
+    server.restart().await;
+    let client = server.elasticache_client().await;
+
+    // Poll status back to available after recovery.
+    let mut status_ok = false;
+    let mut port = 0;
+    for _ in 0..60 {
+        let resp = client
+            .describe_cache_clusters()
+            .cache_cluster_id("restart-cache")
+            .show_cache_node_info(true)
+            .send()
+            .await
+            .unwrap();
+        let clusters = resp.cache_clusters();
+        if let Some(cluster) = clusters.first() {
+            if cluster.cache_cluster_status() == Some("available") {
+                let endpoint = cluster.cache_nodes()[0]
+                    .endpoint()
+                    .expect("cache node endpoint");
+                port = endpoint.port().expect("port");
+                status_ok = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    assert!(status_ok, "cache cluster did not recover to `available`");
+    let stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await;
+    assert!(
+        stream.is_ok(),
+        "recovered cache cluster endpoint must accept connections: {stream:?}",
+    );
+}
+
 /// Users and user groups survive a restart.
 #[tokio::test]
 async fn persistence_round_trip_user_and_group() {

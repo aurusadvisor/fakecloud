@@ -186,26 +186,253 @@ impl ElastiCacheService {
     }
 
     async fn save_snapshot(&self) {
-        let Some(store) = self.snapshot_store.clone() else {
+        save_snapshot_static(
+            self.state.clone(),
+            self.snapshot_store.clone(),
+            self.snapshot_lock.clone(),
+        )
+        .await;
+    }
+
+    /// Recreate the backing Docker/Podman containers for persisted cache
+    /// clusters, replication groups, and serverless caches after a
+    /// fakecloud restart. Same bug class as RDS #1338 — without this,
+    /// describe ops report the cluster as `available` while the
+    /// container is gone, so the endpoint is dead.
+    pub async fn recover_persisted_containers(&self) {
+        let Some(runtime) = self.runtime.clone() else {
             return;
         };
-        let _guard = self.snapshot_lock.lock().await;
-        let snapshot = ElastiCacheSnapshot {
-            schema_version: ELASTICACHE_SNAPSHOT_SCHEMA_VERSION,
-            state: None,
-            accounts: Some(self.state.read().clone()),
-        };
-        let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            let bytes = serde_json::to_vec(&snapshot)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-            store.save(&bytes)
-        })
-        .await;
-        match join {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => tracing::error!(%err, "failed to write elasticache snapshot"),
-            Err(err) => tracing::error!(%err, "elasticache snapshot task panicked"),
+
+        struct PendingCluster {
+            account_id: String,
+            id: String,
+            engine: String,
         }
+        struct PendingReplication {
+            account_id: String,
+            id: String,
+            engine: String,
+        }
+        struct PendingServerless {
+            account_id: String,
+            name: String,
+        }
+
+        let (clusters, replications, serverless) = {
+            let mut accounts = self.state.write();
+            let mut clusters = Vec::new();
+            let mut replications = Vec::new();
+            let mut serverless = Vec::new();
+            for (_, state) in accounts.iter_mut() {
+                let account_id = state.account_id.clone();
+                for (id, cluster) in state.cache_clusters.iter_mut() {
+                    if cluster.cache_cluster_status == "available" {
+                        cluster.cache_cluster_status = "starting".to_string();
+                        clusters.push(PendingCluster {
+                            account_id: account_id.clone(),
+                            id: id.clone(),
+                            engine: cluster.engine.clone(),
+                        });
+                    }
+                }
+                for (id, rg) in state.replication_groups.iter_mut() {
+                    if rg.status == "available" {
+                        rg.status = "starting".to_string();
+                        replications.push(PendingReplication {
+                            account_id: account_id.clone(),
+                            id: id.clone(),
+                            engine: rg.engine.clone(),
+                        });
+                    }
+                }
+                for (name, sc) in state.serverless_caches.iter_mut() {
+                    if sc.status == "available" {
+                        sc.status = "creating".to_string();
+                        serverless.push(PendingServerless {
+                            account_id: account_id.clone(),
+                            name: name.clone(),
+                        });
+                    }
+                }
+            }
+            (clusters, replications, serverless)
+        };
+
+        let total = clusters.len() + replications.len() + serverless.len();
+        if total == 0 {
+            return;
+        }
+        tracing::info!(
+            count = total,
+            "recovering backing containers for persisted elasticache resources",
+        );
+
+        for c in clusters {
+            let runtime = runtime.clone();
+            let state = self.state.clone();
+            let snapshot_store = self.snapshot_store.clone();
+            let snapshot_lock = self.snapshot_lock.clone();
+            tokio::spawn(async move {
+                let result = if c.engine == "memcached" {
+                    runtime.ensure_memcached(&c.id).await
+                } else {
+                    runtime.ensure_redis(&c.id, None).await
+                };
+                match result {
+                    Ok(running) => {
+                        {
+                            let mut accounts = state.write();
+                            if let Some(s) = accounts.get_mut(&c.account_id) {
+                                if let Some(cluster) = s.cache_clusters.get_mut(&c.id) {
+                                    cluster.cache_cluster_status = "available".to_string();
+                                    cluster.endpoint_address = "127.0.0.1".to_string();
+                                    cluster.endpoint_port = running.host_port;
+                                    cluster.host_port = running.host_port;
+                                    cluster.container_id = running.container_id;
+                                }
+                            }
+                        }
+                        save_snapshot_static(state, snapshot_store, snapshot_lock).await;
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            cache_cluster_id = %c.id,
+                            "failed to recover elasticache cache cluster after restart",
+                        );
+                        {
+                            let mut accounts = state.write();
+                            if let Some(s) = accounts.get_mut(&c.account_id) {
+                                if let Some(cluster) = s.cache_clusters.get_mut(&c.id) {
+                                    cluster.cache_cluster_status =
+                                        "incompatible-network".to_string();
+                                }
+                            }
+                        }
+                        save_snapshot_static(state, snapshot_store, snapshot_lock).await;
+                    }
+                }
+            });
+        }
+
+        for r in replications {
+            let runtime = runtime.clone();
+            let state = self.state.clone();
+            let snapshot_store = self.snapshot_store.clone();
+            let snapshot_lock = self.snapshot_lock.clone();
+            tokio::spawn(async move {
+                let result = if r.engine == "memcached" {
+                    runtime.ensure_memcached(&r.id).await
+                } else {
+                    runtime.ensure_redis(&r.id, None).await
+                };
+                match result {
+                    Ok(running) => {
+                        {
+                            let mut accounts = state.write();
+                            if let Some(s) = accounts.get_mut(&r.account_id) {
+                                if let Some(rg) = s.replication_groups.get_mut(&r.id) {
+                                    rg.status = "available".to_string();
+                                    rg.endpoint_address = "127.0.0.1".to_string();
+                                    rg.endpoint_port = running.host_port;
+                                    rg.host_port = running.host_port;
+                                    rg.container_id = running.container_id;
+                                }
+                            }
+                        }
+                        save_snapshot_static(state, snapshot_store, snapshot_lock).await;
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            replication_group_id = %r.id,
+                            "failed to recover elasticache replication group after restart",
+                        );
+                        {
+                            let mut accounts = state.write();
+                            if let Some(s) = accounts.get_mut(&r.account_id) {
+                                if let Some(rg) = s.replication_groups.get_mut(&r.id) {
+                                    rg.status = "incompatible-network".to_string();
+                                }
+                            }
+                        }
+                        save_snapshot_static(state, snapshot_store, snapshot_lock).await;
+                    }
+                }
+            });
+        }
+
+        for s in serverless {
+            let runtime = runtime.clone();
+            let state = self.state.clone();
+            let snapshot_store = self.snapshot_store.clone();
+            let snapshot_lock = self.snapshot_lock.clone();
+            tokio::spawn(async move {
+                match runtime.ensure_redis(&s.name, None).await {
+                    Ok(running) => {
+                        {
+                            let mut accounts = state.write();
+                            if let Some(st) = accounts.get_mut(&s.account_id) {
+                                if let Some(cache) = st.serverless_caches.get_mut(&s.name) {
+                                    cache.status = "available".to_string();
+                                    cache.endpoint.address = "127.0.0.1".to_string();
+                                    cache.endpoint.port = running.host_port;
+                                    cache.reader_endpoint.address = "127.0.0.1".to_string();
+                                    cache.reader_endpoint.port = running.host_port;
+                                    cache.host_port = running.host_port;
+                                    cache.container_id = running.container_id;
+                                }
+                            }
+                        }
+                        save_snapshot_static(state, snapshot_store, snapshot_lock).await;
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            serverless_cache_name = %s.name,
+                            "failed to recover elasticache serverless cache after restart",
+                        );
+                        {
+                            let mut accounts = state.write();
+                            if let Some(st) = accounts.get_mut(&s.account_id) {
+                                if let Some(cache) = st.serverless_caches.get_mut(&s.name) {
+                                    cache.status = "create-failed".to_string();
+                                }
+                            }
+                        }
+                        save_snapshot_static(state, snapshot_store, snapshot_lock).await;
+                    }
+                }
+            });
+        }
+    }
+}
+
+async fn save_snapshot_static(
+    state: SharedElastiCacheState,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: Arc<AsyncMutex<()>>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = ElastiCacheSnapshot {
+        schema_version: ELASTICACHE_SNAPSHOT_SCHEMA_VERSION,
+        state: None,
+        accounts: Some(state.read().clone()),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write elasticache snapshot"),
+        Err(err) => tracing::error!(%err, "elasticache snapshot task panicked"),
     }
 }
 
