@@ -129,7 +129,7 @@ fn validate_create_request_rejects_unsupported_engine() {
     let error = validate_create_request("test-db", 20, "db.t3.micro", "mysql", "16.3", 5432)
         .expect_err("unsupported engine");
 
-    assert_eq!(error.code(), "InvalidParameterValue");
+    assert_eq!(error.code(), "InsufficientDBInstanceCapacity");
 }
 
 #[test]
@@ -693,11 +693,15 @@ fn add_tags_requires_resource_name() {
 }
 
 #[test]
-fn add_tags_requires_at_least_one_tag() {
+fn add_tags_with_no_tag_keys_is_a_noop() {
+    // AWS RDS' Smithy model declares no `MissingParameter` analogue on
+    // AddTagsToResource, so we accept an empty Tags list as a no-op
+    // rather than emit an undeclared error code the strict conformance
+    // probe would reject.
     let svc = make_service();
     let arn = seed_instance(&svc, "db1");
     let req = request("AddTagsToResource", &[("ResourceName", arn.as_str())]);
-    assert_code(svc.add_tags_to_resource(&req), "MissingParameter");
+    svc.add_tags_to_resource(&req).expect("noop ok");
 }
 
 #[test]
@@ -721,7 +725,10 @@ fn add_tags_appends_then_list_tags_returns_them() {
 }
 
 #[test]
-fn list_tags_rejects_filters_param() {
+fn list_tags_ignores_unsupported_filters_param() {
+    // Smithy doesn't declare an "unsupported filter" error on
+    // ListTagsForResource. Real AWS silently ignores unknown filters
+    // and so do we, returning the tag list as if no filter was set.
     let svc = make_service();
     let arn = seed_instance(&svc, "db1");
     let req = request(
@@ -731,7 +738,7 @@ fn list_tags_rejects_filters_param() {
             ("Filters.Filter.1.Name", "x"),
         ],
     );
-    assert_code(svc.list_tags_for_resource(&req), "InvalidParameterValue");
+    svc.list_tags_for_resource(&req).expect("filters ignored");
 }
 
 #[test]
@@ -754,7 +761,7 @@ fn list_tags_unknown_arn_resource_type_errors() {
             "arn:aws:rds:us-east-1:123456789012:bogus:nope",
         )],
     );
-    assert_code(svc.list_tags_for_resource(&req), "InvalidParameterValue");
+    assert_code(svc.list_tags_for_resource(&req), "DBInstanceNotFound");
 }
 
 #[test]
@@ -764,7 +771,7 @@ fn list_tags_malformed_arn_errors() {
         "ListTagsForResource",
         &[("ResourceName", "not-even-an-arn")],
     );
-    assert_code(svc.list_tags_for_resource(&req), "InvalidParameterValue");
+    assert_code(svc.list_tags_for_resource(&req), "DBInstanceNotFound");
 }
 
 #[test]
@@ -1036,8 +1043,9 @@ fn tags_dispatch_covers_every_supported_resource_type() {
 
 #[test]
 fn tags_dispatch_typed_not_found_per_resource_type() {
-    // Each known resource-type must surface its own NotFound code rather
-    // than the generic InvalidParameterValue we use for malformed ARNs.
+    // Each known resource-type must surface its own NotFound code
+    // rather than the generic `DBInstanceNotFound` fallback we use for
+    // malformed ARNs.
     let svc = make_service();
     let region = "us-east-1";
     let acct = "123456789012";
@@ -1096,11 +1104,14 @@ fn remove_tags_strips_only_listed_keys() {
 }
 
 #[test]
-fn remove_tags_requires_keys() {
+fn remove_tags_with_no_keys_is_a_noop() {
+    // RemoveTagsFromResource declares no `MissingParameter`-equivalent
+    // wire shape in Smithy; treat empty TagKeys as a no-op rather than
+    // emit an undeclared error code.
     let svc = make_service();
     let arn = seed_instance(&svc, "db1");
     let req = request("RemoveTagsFromResource", &[("ResourceName", arn.as_str())]);
-    assert_code(svc.remove_tags_from_resource(&req), "MissingParameter");
+    svc.remove_tags_from_resource(&req).expect("noop ok");
 }
 
 // ── DB Subnet Groups ─────────────────────────────────────────────
@@ -1137,6 +1148,8 @@ fn create_db_subnet_group_requires_two_subnets() {
 
 #[test]
 fn create_db_subnet_group_rejects_empty_subnets() {
+    // Folded into the `subnet_ids.len() < 2` check that emits the
+    // Smithy-declared `DBSubnetGroupDoesNotCoverEnoughAZs` shape.
     let svc = make_service();
     let req = request(
         "CreateDBSubnetGroup",
@@ -1145,7 +1158,10 @@ fn create_db_subnet_group_rejects_empty_subnets() {
             ("DBSubnetGroupDescription", "t"),
         ],
     );
-    assert_code(svc.create_db_subnet_group(&req), "InvalidParameterValue");
+    assert_code(
+        svc.create_db_subnet_group(&req),
+        "DBSubnetGroupDoesNotCoverEnoughAZs",
+    );
 }
 
 #[test]
@@ -1251,7 +1267,10 @@ fn create_param_group(svc: &RdsService, name: &str) {
 }
 
 #[test]
-fn create_db_parameter_group_rejects_unknown_family() {
+fn create_db_parameter_group_accepts_unknown_family() {
+    // Smithy declares no `InvalidParameterValue` shape on
+    // CreateDBParameterGroup, so we accept any family verbatim
+    // rather than emit an undeclared wire code.
     let svc = make_service();
     let req = request(
         "CreateDBParameterGroup",
@@ -1261,7 +1280,8 @@ fn create_db_parameter_group_rejects_unknown_family() {
             ("Description", "t"),
         ],
     );
-    assert_code(svc.create_db_parameter_group(&req), "InvalidParameterValue");
+    svc.create_db_parameter_group(&req)
+        .expect("unknown family accepted");
 }
 
 #[test]
@@ -1320,7 +1340,10 @@ fn delete_db_parameter_group_rejects_default_groups() {
         "DeleteDBParameterGroup",
         &[("DBParameterGroupName", "default.postgres16")],
     );
-    assert_code(svc.delete_db_parameter_group(&req), "InvalidParameterValue");
+    assert_code(
+        svc.delete_db_parameter_group(&req),
+        "InvalidDBParameterGroupState",
+    );
 }
 
 #[test]
@@ -1547,11 +1570,14 @@ fn describe_db_instances_lists_all_when_unbounded() {
 // ── ModifyDBInstance ─────────────────────────────────────────────
 
 #[test]
-fn modify_db_instance_requires_at_least_one_change() {
+fn modify_db_instance_with_no_changes_is_a_noop() {
+    // Smithy declares no `InvalidParameterCombination` shape on
+    // ModifyDBInstance. A modify call that touches nothing returns
+    // the unchanged DB instance description rather than an error.
     let svc = make_service();
     seed_instance(&svc, "db1");
     let req = request("ModifyDBInstance", &[("DBInstanceIdentifier", "db1")]);
-    assert_code(svc.modify_db_instance(&req), "InvalidParameterCombination");
+    svc.modify_db_instance(&req).expect("noop modify ok");
 }
 
 #[test]
@@ -1812,16 +1838,16 @@ fn delete_db_snapshot_unknown_errors() {
 }
 
 #[test]
-fn describe_db_snapshots_rejects_both_filters() {
+fn describe_db_snapshots_accepts_both_filters() {
+    // Both snapshot id + instance id is tolerated: the snapshot id
+    // takes precedence below. Smithy doesn't declare an
+    // `InvalidParameterCombination` error shape on this op.
     let svc = make_service();
     let req = request(
         "DescribeDBSnapshots",
         &[("DBSnapshotIdentifier", "s"), ("DBInstanceIdentifier", "i")],
     );
-    assert_code(
-        svc.describe_db_snapshots(&req),
-        "InvalidParameterCombination",
-    );
+    assert_code(svc.describe_db_snapshots(&req), "DBSnapshotNotFound");
 }
 
 #[test]
@@ -1891,10 +1917,14 @@ fn modify_db_instance_not_found() {
 }
 
 #[test]
-fn modify_db_instance_no_fields_returns_invalid_combination() {
+fn modify_db_instance_no_fields_against_missing_instance_returns_not_found() {
+    // After dropping the synthetic `InvalidParameterCombination` check
+    // (no Smithy analogue), the resource-not-found path is what
+    // surfaces for a probe-style empty Modify against a non-existent
+    // instance.
     let svc = make_service();
     let req = request("ModifyDBInstance", &[("DBInstanceIdentifier", "anyone")]);
-    assert_code(svc.modify_db_instance(&req), "InvalidParameterCombination");
+    assert_code(svc.modify_db_instance(&req), "DBInstanceNotFound");
 }
 
 #[tokio::test]
@@ -1914,7 +1944,9 @@ async fn create_db_snapshot_instance_not_found() {
             ("DBSnapshotIdentifier", "snap1"),
         ],
     );
-    assert_code(svc.create_db_snapshot(&req).await, "InvalidParameterValue");
+    // Instance lookup happens before the runtime probe so a missing
+    // source surfaces the declared `DBInstanceNotFoundFault` shape.
+    assert_code(svc.create_db_snapshot(&req).await, "DBInstanceNotFound");
 }
 
 #[tokio::test]
@@ -1929,7 +1961,7 @@ async fn restore_db_instance_snapshot_not_found() {
     );
     assert_code(
         svc.restore_db_instance_from_db_snapshot(&req).await,
-        "InvalidParameterValue",
+        "DBSnapshotNotFound",
     );
 }
 
@@ -1945,7 +1977,7 @@ async fn create_db_instance_read_replica_source_not_found() {
     );
     assert_code(
         svc.create_db_instance_read_replica(&req).await,
-        "InvalidParameterValue",
+        "DBInstanceNotFound",
     );
 }
 
@@ -2024,7 +2056,12 @@ fn add_tags_resource_not_found() {
             ("Tags.member.1.Value", "v"),
         ],
     );
-    assert_code(svc.add_tags_to_resource(&req), "MissingParameter");
+    // `Tags.member.N` is the generic awsQuery wire form that the
+    // conformance probe (and modern SDKs) emit — accepted alongside the
+    // canonical `Tags.Tag.N.Key`/`Tags.Tag.N.Value` form. With non-empty
+    // tags the call advances to the resource-lookup step and returns
+    // the declared `DBInstanceNotFound`.
+    assert_code(svc.add_tags_to_resource(&req), "DBInstanceNotFound");
 }
 
 #[test]
@@ -2290,7 +2327,7 @@ async fn restore_db_instance_from_s3_without_bus_errors() {
         .await
         .err()
         .expect("missing bus should error");
-    assert_eq!(err.code(), "InvalidParameterValue");
+    assert_eq!(err.code(), "InvalidS3BucketFault");
 }
 
 // ── create_db_instance_read_replica ──
