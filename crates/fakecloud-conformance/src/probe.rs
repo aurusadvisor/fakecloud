@@ -619,6 +619,60 @@ fn rest_request_config(
                 format!("{}/account-settings", LAMBDA_PREFIX),
                 None,
             ),
+            // Function URL config (uses 2021-10-31 prefix in AWS but the
+            // route is prefix-agnostic in fakecloud).
+            "CreateFunctionUrlConfig" => (
+                reqwest::Method::POST,
+                format!("/2021-10-31/functions/{}/url", FUNC),
+                None,
+            ),
+            "GetFunctionUrlConfig" => (
+                reqwest::Method::GET,
+                format!("/2021-10-31/functions/{}/url", FUNC),
+                None,
+            ),
+            "UpdateFunctionUrlConfig" => (
+                reqwest::Method::PUT,
+                format!("/2021-10-31/functions/{}/url", FUNC),
+                None,
+            ),
+            "DeleteFunctionUrlConfig" => (
+                reqwest::Method::DELETE,
+                format!("/2021-10-31/functions/{}/url", FUNC),
+                None,
+            ),
+            "ListFunctionUrlConfigs" => (
+                reqwest::Method::GET,
+                format!("/2021-10-31/functions/{}/urls", FUNC),
+                None,
+            ),
+            // Per-function code-signing config (2020-06-30 in AWS).
+            "PutFunctionCodeSigningConfig" => (
+                reqwest::Method::PUT,
+                format!("/2020-06-30/functions/{}/code-signing-config", FUNC),
+                None,
+            ),
+            "GetFunctionCodeSigningConfig" => (
+                reqwest::Method::GET,
+                format!("/2020-06-30/functions/{}/code-signing-config", FUNC),
+                None,
+            ),
+            "DeleteFunctionCodeSigningConfig" => (
+                reqwest::Method::DELETE,
+                format!("/2020-06-30/functions/{}/code-signing-config", FUNC),
+                None,
+            ),
+            // Runtime management config (2021-07-20 in AWS).
+            "PutRuntimeManagementConfig" => (
+                reqwest::Method::PUT,
+                format!("/2021-07-20/functions/{}/runtime-management-config", FUNC),
+                None,
+            ),
+            "GetRuntimeManagementConfig" => (
+                reqwest::Method::GET,
+                format!("/2021-07-20/functions/{}/runtime-management-config", FUNC),
+                None,
+            ),
             // Default: POST to functions path
             _ => (
                 reqwest::Method::POST,
