@@ -21,9 +21,25 @@ pub(crate) fn create_custom_model(
         req.region, req.account_id, model_id
     );
 
+    let base_model_name = body["baseModelIdentifier"]
+        .as_str()
+        .or_else(|| body["baseModelName"].as_str())
+        .unwrap_or("amazon.titan-text-express-v1")
+        .to_string();
+    let base_model_arn = if base_model_name.starts_with("arn:") {
+        base_model_name.clone()
+    } else {
+        format!(
+            "arn:aws:bedrock:{}::foundation-model/{}",
+            req.region, base_model_name
+        )
+    };
+
     let model = CustomModel {
         model_arn: model_arn.clone(),
         model_name: model_name.to_string(),
+        base_model_arn,
+        base_model_name,
         model_source_config: body.get("modelSourceConfig").cloned().unwrap_or(json!({})),
         model_kms_key_arn: body["modelKmsKeyArn"].as_str().map(|s| s.to_string()),
         role_arn: body["roleArn"].as_str().map(|s| s.to_string()),
@@ -69,6 +85,7 @@ pub(crate) fn get_custom_model(
     Ok(AwsResponse::ok_json(json!({
         "modelArn": model.model_arn,
         "modelName": model.model_name,
+        "baseModelArn": model.base_model_arn,
         "modelStatus": model.model_status,
         "creationTime": model.creation_time.to_rfc3339(),
     })))
@@ -109,6 +126,8 @@ pub(crate) fn list_custom_models(
             json!({
                 "modelArn": m.model_arn,
                 "modelName": m.model_name,
+                "baseModelArn": m.base_model_arn,
+                "baseModelName": m.base_model_name,
                 "modelStatus": m.model_status,
                 "creationTime": m.creation_time.to_rfc3339(),
             })

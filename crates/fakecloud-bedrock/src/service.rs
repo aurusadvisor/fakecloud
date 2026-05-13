@@ -746,7 +746,7 @@ impl BedrockService {
                     continue;
                 }
             }
-            model_summaries.push(model.to_summary_json());
+            model_summaries.push(model.to_summary_json(&req.region));
         }
 
         Ok(AwsResponse::ok_json(json!({

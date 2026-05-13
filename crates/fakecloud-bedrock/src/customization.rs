@@ -156,7 +156,7 @@ pub(crate) fn list_model_customization_jobs(
                 "jobArn": j.job_arn,
                 "jobName": j.job_name,
                 "status": j.status,
-                "baseModelIdentifier": j.base_model_identifier,
+                "baseModelArn": base_model_arn(&j.base_model_identifier, &req.region),
                 "customModelName": j.custom_model_name,
                 "creationTime": j.created_at.to_rfc3339(),
                 "lastModifiedTime": j.last_modified_at.to_rfc3339(),
@@ -173,6 +173,16 @@ pub(crate) fn list_model_customization_jobs(
     }
 
     Ok(AwsResponse::ok_json(resp))
+}
+
+/// Normalize the customization job's stored base model identifier into a
+/// full foundation-model ARN, since the Smithy summary requires `baseModelArn`.
+fn base_model_arn(base_model_identifier: &str, region: &str) -> String {
+    if base_model_identifier.starts_with("arn:") {
+        base_model_identifier.to_string()
+    } else {
+        format!("arn:aws:bedrock:{region}::foundation-model/{base_model_identifier}")
+    }
 }
 
 pub(crate) fn stop_model_customization_job(

@@ -88,9 +88,11 @@ pub(crate) fn get_inference_profile(
 
     Ok(AwsResponse::ok_json(json!({
         "inferenceProfileArn": profile.inference_profile_arn,
+        "inferenceProfileId": profile_id_from_arn(&profile.inference_profile_arn),
         "inferenceProfileName": profile.inference_profile_name,
         "description": profile.description,
         "modelSource": profile.model_source,
+        "models": profile_models(&profile.model_source),
         "status": profile.status,
         "type": profile.inference_profile_type,
         "createdAt": profile.created_at.to_rfc3339(),
@@ -132,8 +134,10 @@ pub(crate) fn list_inference_profiles(
         .map(|p| {
             json!({
                 "inferenceProfileArn": p.inference_profile_arn,
+                "inferenceProfileId": profile_id_from_arn(&p.inference_profile_arn),
                 "inferenceProfileName": p.inference_profile_name,
                 "description": p.description,
+                "models": profile_models(&p.model_source),
                 "status": p.status,
                 "type": p.inference_profile_type,
                 "createdAt": p.created_at.to_rfc3339(),
@@ -151,6 +155,25 @@ pub(crate) fn list_inference_profiles(
     }
 
     Ok(AwsResponse::ok_json(resp))
+}
+
+/// The last segment of the inference-profile ARN is the unique ID Bedrock
+/// echoes back in the summary, so we just split on `/`.
+fn profile_id_from_arn(arn: &str) -> String {
+    arn.rsplit('/').next().unwrap_or(arn).to_string()
+}
+
+/// Build the `models` summary list. We try to extract a copyFrom model ARN
+/// from the user-supplied `modelSource`, otherwise emit one synthesized entry
+/// pointing at a real foundation-model ARN so the response satisfies the
+/// `min: 1` length constraint on `InferenceProfileModels`.
+fn profile_models(model_source: &Value) -> Value {
+    if let Some(copy_from) = model_source.get("copyFrom").and_then(Value::as_str) {
+        return json!([{ "modelArn": copy_from }]);
+    }
+    json!([{
+        "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-text-express-v1"
+    }])
 }
 
 pub(crate) fn delete_inference_profile(
