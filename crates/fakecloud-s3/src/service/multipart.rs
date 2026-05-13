@@ -711,10 +711,13 @@ impl S3Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
+        // AbortMultipartUpload only declares NoSuchUpload per the Smithy
+        // model; collapse missing-bucket into NoSuchUpload for strict
+        // conformance (no bucket -> no upload to abort).
         let b = state
             .buckets
             .get_mut(bucket)
-            .ok_or_else(|| no_such_bucket(bucket))?;
+            .ok_or_else(|| no_such_upload(upload_id))?;
 
         // Validate upload exists and belongs to the requested key
         match b.multipart_uploads.get(upload_id) {
