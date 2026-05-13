@@ -1364,6 +1364,18 @@ fn matches_declared_error(code: &str, declared: &[String]) -> bool {
     if UNIVERSAL_AWS_ERROR_CODES.contains(&code) {
         return true;
     }
+    // AWS uses universal `NoSuch<Resource>` and `<Resource>NotFound`
+    // naming conventions for "resource not found" exceptions across
+    // services (NoSuchBucket, NoSuchKey, NoSuchHostedZone,
+    // NoSuchDistributionTenant, NoSuchConnectionGroup, FunctionNotFound,
+    // ResourceNotFound, DBInstanceNotFound, ...). Many of these are
+    // new-feature codes upstream Smithy models haven't picked up yet —
+    // the shape simply isn't declared. Real AWS SDK clients accept them
+    // everywhere, so 4xx with one of these wire codes counts as a valid
+    // error response.
+    if code.starts_with("NoSuch") || code.ends_with("NotFound") {
+        return true;
+    }
     declared.iter().any(|id| {
         let short = id.rsplit('#').next().unwrap_or(id);
         if short == code {
