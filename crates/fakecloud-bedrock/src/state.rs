@@ -340,6 +340,8 @@ pub struct AsyncInvocation {
 pub struct CustomModel {
     pub model_arn: String,
     pub model_name: String,
+    pub base_model_arn: String,
+    pub base_model_name: String,
     pub model_source_config: serde_json::Value,
     pub model_kms_key_arn: Option<String>,
     pub role_arn: Option<String>,

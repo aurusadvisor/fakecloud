@@ -62,8 +62,8 @@ pub(crate) fn get_model_invocation_job(
         "modelId": job.model_id,
         "roleArn": job.role_arn,
         "status": job.status,
-        "inputDataConfig": job.input_data_config,
-        "outputDataConfig": job.output_data_config,
+        "inputDataConfig": ensure_input_data_config(&job.input_data_config),
+        "outputDataConfig": ensure_output_data_config(&job.output_data_config),
         "submitTime": job.submit_time.to_rfc3339(),
         "lastModifiedTime": job.last_modified_time.to_rfc3339(),
     });
@@ -110,9 +110,12 @@ pub(crate) fn list_model_invocation_jobs(
                 "jobArn": j.job_arn,
                 "jobName": j.job_name,
                 "modelId": j.model_id,
+                "roleArn": j.role_arn,
                 "status": j.status,
                 "submitTime": j.submit_time.to_rfc3339(),
                 "lastModifiedTime": j.last_modified_time.to_rfc3339(),
+                "inputDataConfig": ensure_input_data_config(&j.input_data_config),
+                "outputDataConfig": ensure_output_data_config(&j.output_data_config),
             })
         })
         .collect();
@@ -155,6 +158,28 @@ pub(crate) fn stop_model_invocation_job(
     job.end_time = Some(now);
 
     Ok(AwsResponse::json(StatusCode::OK, "{}".to_string()))
+}
+
+fn ensure_input_data_config(cfg: &Value) -> Value {
+    if cfg.get("s3InputDataConfig").is_some() {
+        return cfg.clone();
+    }
+    json!({
+        "s3InputDataConfig": {
+            "s3Uri": "s3://fakecloud-bedrock-batch/input/"
+        }
+    })
+}
+
+fn ensure_output_data_config(cfg: &Value) -> Value {
+    if cfg.get("s3OutputDataConfig").is_some() {
+        return cfg.clone();
+    }
+    json!({
+        "s3OutputDataConfig": {
+            "s3Uri": "s3://fakecloud-bedrock-batch/output/"
+        }
+    })
 }
 
 fn find_job<'a>(

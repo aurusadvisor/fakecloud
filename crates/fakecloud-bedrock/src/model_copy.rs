@@ -72,6 +72,7 @@ pub(crate) fn get_model_copy_job(
         "jobArn": job.job_arn,
         "status": job.status,
         "creationTime": job.creation_time.to_rfc3339(),
+        "sourceAccountId": source_account_id(&job.source_model_arn, &req.account_id),
         "sourceModelArn": job.source_model_arn,
         "targetModelArn": job.target_model_arn,
         "targetModelName": job.target_model_name,
@@ -114,8 +115,10 @@ pub(crate) fn list_model_copy_jobs(
                 "jobArn": j.job_arn,
                 "status": j.status,
                 "creationTime": j.creation_time.to_rfc3339(),
+                "sourceAccountId": source_account_id(&j.source_model_arn, &req.account_id),
                 "sourceModelArn": j.source_model_arn,
                 "targetModelArn": j.target_model_arn,
+                "targetModelName": j.target_model_name,
             })
         })
         .collect();
@@ -129,6 +132,17 @@ pub(crate) fn list_model_copy_jobs(
     }
 
     Ok(AwsResponse::ok_json(resp))
+}
+
+/// Extract the AWS account ID from an ARN, falling back to the caller's
+/// account when the ARN is malformed or missing.
+fn source_account_id(source_model_arn: &str, fallback: &str) -> String {
+    source_model_arn
+        .split(':')
+        .nth(4)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback)
+        .to_string()
 }
 
 #[cfg(test)]

@@ -113,6 +113,7 @@ pub(crate) fn list_evaluation_jobs(
                 "status": j.status,
                 "jobType": j.job_type,
                 "creationTime": j.creation_time.to_rfc3339(),
+                "evaluationTaskTypes": ["Generation"],
             })
         })
         .collect();

@@ -14,8 +14,13 @@ pub struct FoundationModel {
 }
 
 impl FoundationModel {
-    pub(crate) fn to_summary_json(&self) -> Value {
+    pub(crate) fn to_summary_json(&self, region: &str) -> Value {
+        let arn = format!(
+            "arn:aws:bedrock:{}::foundation-model/{}",
+            region, self.model_id
+        );
         json!({
+            "modelArn": arn,
             "modelId": self.model_id,
             "modelName": self.model_name,
             "providerName": self.provider_name,
@@ -271,8 +276,12 @@ mod tests {
     #[test]
     fn summary_json_shape() {
         let m = find_model("amazon.titan-embed-text-v1").unwrap();
-        let v = m.to_summary_json();
+        let v = m.to_summary_json("us-east-1");
         assert_eq!(v["modelId"], "amazon.titan-embed-text-v1");
+        assert_eq!(
+            v["modelArn"],
+            "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v1"
+        );
         assert_eq!(v["providerName"], "Amazon");
         assert_eq!(v["outputModalities"][0], "EMBEDDING");
         assert_eq!(v["responseStreamingSupported"], false);

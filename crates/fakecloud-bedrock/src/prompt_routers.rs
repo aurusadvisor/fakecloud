@@ -74,9 +74,9 @@ pub(crate) fn get_prompt_router(
         "promptRouterArn": router.prompt_router_arn,
         "promptRouterName": router.prompt_router_name,
         "description": router.description,
-        "models": router.models,
-        "routingCriteria": router.routing_criteria,
-        "fallbackModel": router.fallback_model,
+        "models": ensure_router_models(&router.models),
+        "routingCriteria": ensure_routing_criteria(&router.routing_criteria),
+        "fallbackModel": ensure_fallback_model(&router.fallback_model),
         "status": router.status,
         "type": router.prompt_router_type,
         "createdAt": router.created_at.to_rfc3339(),
@@ -120,6 +120,9 @@ pub(crate) fn list_prompt_routers(
                 "promptRouterArn": r.prompt_router_arn,
                 "promptRouterName": r.prompt_router_name,
                 "description": r.description,
+                "routingCriteria": ensure_routing_criteria(&r.routing_criteria),
+                "models": ensure_router_models(&r.models),
+                "fallbackModel": ensure_fallback_model(&r.fallback_model),
                 "status": r.status,
                 "type": r.prompt_router_type,
                 "createdAt": r.created_at.to_rfc3339(),
@@ -137,6 +140,39 @@ pub(crate) fn list_prompt_routers(
     }
 
     Ok(AwsResponse::ok_json(resp))
+}
+
+/// Synthesize a minimal default `routingCriteria` when the router was created
+/// without one, so the summary satisfies the Smithy required field.
+fn ensure_routing_criteria(criteria: &Value) -> Value {
+    if criteria.get("responseQualityDifference").is_some() {
+        return criteria.clone();
+    }
+    json!({ "responseQualityDifference": 0.0 })
+}
+
+/// Default the router's target models to a single Titan entry when none were
+/// supplied at create time, matching the required Smithy field.
+fn ensure_router_models(models: &Value) -> Value {
+    if let Some(arr) = models.as_array() {
+        if !arr.is_empty() {
+            return models.clone();
+        }
+    }
+    json!([{
+        "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-text-express-v1"
+    }])
+}
+
+/// Default the fallback model when not provided. `fallbackModel` is required
+/// in the summary even though it's optional on create.
+fn ensure_fallback_model(fallback: &Value) -> Value {
+    if fallback.get("modelArn").is_some() {
+        return fallback.clone();
+    }
+    json!({
+        "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-text-express-v1"
+    })
 }
 
 pub(crate) fn delete_prompt_router(

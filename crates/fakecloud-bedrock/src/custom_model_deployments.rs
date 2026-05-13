@@ -201,7 +201,7 @@ fn deployment_to_json(d: &CustomModelDeployment) -> Value {
 fn deployment_summary_json(d: &CustomModelDeployment) -> Value {
     let mut obj = json!({
         "customModelDeploymentArn": d.deployment_arn,
-        "modelDeploymentName": d.deployment_name,
+        "customModelDeploymentName": d.deployment_name,
         "modelArn": d.model_arn,
         "status": d.status,
         "createdAt": d.created_at.to_rfc3339(),
