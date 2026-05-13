@@ -2148,6 +2148,12 @@ async fn main() {
     if let Some(ref rt) = ecs_runtime {
         ecs_service = ecs_service.with_runtime(rt.clone());
     }
+    // Reconcile persisted task state with reality: persisted tasks
+    // marked RUNNING survive a restart but the docker container does
+    // not, so flip them to STOPPED and zero service counts. The
+    // scheduler ticker brings services back to desiredCount. Same
+    // restart-bug class as RDS #1338.
+    ecs_service.reconcile_persisted_tasks().await;
     let ecs_service = Arc::new(ecs_service);
     let ecs_service_for_scheduler = ecs_service.clone();
     registry.register(ecs_service);
