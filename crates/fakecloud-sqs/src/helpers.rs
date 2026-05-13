@@ -315,7 +315,7 @@ pub(crate) fn validate_redrive_policy_target(
     let Some(dlq) = dlq else {
         return Err(AwsServiceError::aws_error_with_headers(
             StatusCode::BAD_REQUEST,
-            "QueueDoesNotExist",
+            "AWS.SimpleQueueService.NonExistentQueue",
             format!(
                 "Dead letter target does not exist: {}",
                 rp.dead_letter_target_arn
@@ -1159,9 +1159,16 @@ pub(crate) fn missing_param(name: &str) -> AwsServiceError {
 }
 
 pub(crate) fn queue_not_found() -> AwsServiceError {
+    // AWS SQS uses the awsQueryError-renamed wire code
+    // `AWS.SimpleQueueService.NonExistentQueue` for the `QueueDoesNotExist`
+    // shape (see `aws.protocols#awsQueryError.code` on the shape in the
+    // upstream Smithy model). Real AWS puts this string in `<Code>`, and
+    // it's also what's listed in each op's declared `errors`. Returning the
+    // short shape name `QueueDoesNotExist` instead would be undeclared by
+    // every operation per the model.
     AwsServiceError::aws_error_with_headers(
         StatusCode::BAD_REQUEST,
-        "QueueDoesNotExist",
+        "AWS.SimpleQueueService.NonExistentQueue",
         "The specified queue does not exist.",
         vec![(
             "x-amzn-query-error".to_string(),
