@@ -541,6 +541,14 @@ fn extract_service_from_auth(headers: &HeaderMap) -> Option<String> {
 fn normalize_service_name(service: &str) -> &str {
     match service {
         "bedrock-runtime" => "bedrock",
+        // Real AWS API Gateway V2 SDK signs with `apigateway` as the SigV4
+        // service (per the model's `aws.api#service.endpointPrefix`), but
+        // tools driven by the Smithy service shape name (including our own
+        // conformance probe) may send `apigatewayv2`. Both refer to the
+        // same fakecloud service registry entry — the v2 handler is path-
+        // routed under `/v2/...` and the v1 handler under `/restapis/...`,
+        // both reachable behind the `apigateway` SigV4 service.
+        "apigatewayv2" => "apigateway",
         other => other,
     }
 }
@@ -857,6 +865,15 @@ mod tests {
         let query = HashMap::new();
         let body = Bytes::new();
         assert!(detect_service(&headers, &query, &body).is_none());
+    }
+
+    #[test]
+    fn normalize_service_name_aliases_apigatewayv2_to_apigateway() {
+        // Real AWS API Gateway V2 SDK signs with `apigateway` per the
+        // model's `endpointPrefix`, but Smithy-driven tooling (including
+        // our conformance probe) sends `apigatewayv2`. Both routes resolve
+        // to the same fakecloud service registry entry.
+        assert_eq!(normalize_service_name("apigatewayv2"), "apigateway");
     }
 
     #[test]
