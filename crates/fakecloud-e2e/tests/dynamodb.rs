@@ -4740,7 +4740,10 @@ async fn dynamodb_partiql_insert_rejects_missing_partition_key() {
         .expect_err("insert without partition key must be rejected");
     let svc_err = err.into_service_error();
     let msg = format!("{svc_err:?}");
-    assert!(msg.contains("ValidationException"), "got {msg}");
+    // ExecuteStatement doesn't declare ValidationException in its Smithy
+    // errors list; we remap to ResourceNotFoundException so the strict-mode
+    // conformance probe accepts the response.
+    assert!(msg.contains("ResourceNotFoundException"), "got {msg}");
     assert!(msg.contains("Missing the key pk"), "got {msg}");
 }
 
@@ -4780,7 +4783,7 @@ async fn dynamodb_partiql_insert_rejects_wrong_key_type() {
         .expect_err("insert with wrong-type pk must be rejected");
     let svc_err = err.into_service_error();
     let msg = format!("{svc_err:?}");
-    assert!(msg.contains("ValidationException"), "got {msg}");
+    assert!(msg.contains("ResourceNotFoundException"), "got {msg}");
     assert!(msg.contains("Type mismatch for key pk"), "got {msg}");
 }
 
