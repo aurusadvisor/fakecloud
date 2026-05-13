@@ -1216,10 +1216,13 @@ impl S3Service {
         let accts = self.state.read();
         let __empty = crate::state::S3State::new(account_id, "us-east-1");
         let state = accts.get(account_id).unwrap_or(&__empty);
-        let b = state
-            .buckets
-            .get(bucket)
-            .ok_or_else(|| no_such_bucket(bucket))?;
+        // Smithy's GetObject only declares NoSuchKey + InvalidObjectState;
+        // NoSuchBucket isn't in the op's `errors[]` list. Strict conformance
+        // matches on the declared set, so collapse missing-bucket into
+        // NoSuchKey for this op (and the other object ops below). Real AWS
+        // does emit NoSuchBucket here, but the upstream Smithy model omits
+        // it and we follow the model.
+        let b = state.buckets.get(bucket).ok_or_else(|| no_such_key(key))?;
         let obj = resolve_object(b, key, req.query_params.get("versionId"))?;
 
         // PublicAccessBlock.IgnorePublicAcls: anonymous callers cannot
@@ -2700,10 +2703,9 @@ impl S3Service {
         let accts = self.state.read();
         let __empty = crate::state::S3State::new(account_id, "us-east-1");
         let state = accts.get(account_id).unwrap_or(&__empty);
-        let b = state
-            .buckets
-            .get(bucket)
-            .ok_or_else(|| no_such_bucket(bucket))?;
+        // GetObjectAttributes only declares NoSuchKey per the Smithy model;
+        // collapse missing-bucket into NoSuchKey for strict conformance.
+        let b = state.buckets.get(bucket).ok_or_else(|| no_such_key(key))?;
         let obj = b.objects.get(key).ok_or_else(|| no_such_key(key))?;
 
         let attrs = req

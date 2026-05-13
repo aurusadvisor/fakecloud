@@ -1940,10 +1940,16 @@ impl S3Service {
             let accts = self.state.read();
             let __empty = crate::state::S3State::new(account_id, "us-east-1");
             let state = accts.get(account_id).unwrap_or(&__empty);
-            let b = state
-                .buckets
-                .get(bucket)
-                .ok_or_else(|| no_such_bucket(bucket))?;
+            // UpdateObjectEncryption only declares AccessDenied / InvalidRequest
+            // / NoSuchKey per the Smithy model; collapse missing-bucket into
+            // NoSuchKey for strict conformance.
+            let b = state.buckets.get(bucket).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NoSuchKey",
+                    format!("Key {key} does not exist."),
+                )
+            })?;
             let obj = b.objects.get(key).ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,

@@ -1360,11 +1360,13 @@ fn bucket_ownership_controls_put_get_delete_round_trip() {
 
 #[test]
 fn get_object_nonexistent_bucket() {
+    // GetObject's Smithy `errors` declares NoSuchKey + InvalidObjectState;
+    // missing-bucket collapses into NoSuchKey for strict conformance.
     let svc = make_service();
     let req = make_request(Method::GET, "/no-bucket/key", &[], b"");
     assert_aws_err(
         svc.get_object("123456789012", &req, "no-bucket", "key"),
-        "NoSuchBucket",
+        "NoSuchKey",
     );
 }
 
@@ -1728,11 +1730,12 @@ fn get_object_attributes_nonexistent_key() {
 
 #[test]
 fn get_object_attributes_nonexistent_bucket() {
+    // GetObjectAttributes only declares NoSuchKey in its Smithy `errors`.
     let svc = make_service();
     let req = make_request(Method::GET, "/nope/key", &[("attributes", "")], b"");
     assert_aws_err(
         svc.get_object_attributes("123456789012", &req, "nope", "key"),
-        "NoSuchBucket",
+        "NoSuchKey",
     );
 }
 
@@ -1893,11 +1896,12 @@ fn get_object_acl_default() {
 
 #[test]
 fn get_object_acl_nonexistent_bucket() {
+    // GetObjectAcl only declares NoSuchKey in its Smithy `errors`.
     let svc = make_service();
     let req = make_request(Method::GET, "/nope/key", &[("acl", "")], b"");
     assert_aws_err(
         svc.get_object_acl("123456789012", &req, "nope", "key"),
-        "NoSuchBucket",
+        "NoSuchKey",
     );
 }
 
@@ -3404,11 +3408,13 @@ fn get_object_key_not_found() {
 
 #[test]
 fn get_object_bucket_not_found() {
+    // Strict conformance: GetObject's Smithy `errors` excludes NoSuchBucket,
+    // so missing-bucket collapses to NoSuchKey.
     let svc = make_service();
     let req = make_request(Method::GET, "/ghost/k", &[], b"");
     assert_aws_err(
         svc.get_object("123456789012", &req, "ghost", "k"),
-        "NoSuchBucket",
+        "NoSuchKey",
     );
 }
 
