@@ -171,6 +171,69 @@ impl EcsService {
             Err(err) => tracing::error!(%err, "ecs snapshot task panicked"),
         }
     }
+
+    /// Reconcile persisted task state with reality after a fakecloud
+    /// restart. Same bug class as RDS #1338: tasks were persisted with
+    /// `lastStatus = RUNNING` but their docker containers are gone, so
+    /// DescribeTasks reported phantom-running tasks and `docker exec`
+    /// (for ECS Exec) would fail.
+    ///
+    /// Mark every non-STOPPED task as STOPPED with a `stoppedReason`
+    /// that explains the restart, and reset service `runningCount` /
+    /// `pendingCount` to zero. The service scheduler ticker then
+    /// reconciles desiredCount and launches fresh tasks. Standalone
+    /// `RunTask` tasks aren't auto-respawned because we don't have
+    /// enough context to replay them safely; callers re-invoke.
+    pub async fn reconcile_persisted_tasks(&self) {
+        let touched = {
+            let mut accounts = self.state.write();
+            let mut touched_tasks = 0usize;
+            let mut touched_services = 0usize;
+            let now = chrono::Utc::now();
+            for (_, state) in accounts.iter_mut() {
+                for task in state.tasks.values_mut() {
+                    if task.last_status != "STOPPED" {
+                        task.last_status = "STOPPED".to_string();
+                        task.desired_status = "STOPPED".to_string();
+                        task.stop_code = Some("EssentialContainerExited".to_string());
+                        task.stopped_reason = Some(
+                            "fakecloud restart - backing container lost".to_string(),
+                        );
+                        if task.stopping_at.is_none() {
+                            task.stopping_at = Some(now);
+                        }
+                        if task.stopped_at.is_none() {
+                            task.stopped_at = Some(now);
+                        }
+                        for container in task.containers.iter_mut() {
+                            container.last_status = "STOPPED".to_string();
+                        }
+                        touched_tasks += 1;
+                    }
+                }
+                for service in state.services.values_mut() {
+                    if service.running_count != 0 || service.pending_count != 0 {
+                        service.running_count = 0;
+                        service.pending_count = 0;
+                        for deployment in service.deployments.iter_mut() {
+                            deployment.running_count = 0;
+                            deployment.pending_count = 0;
+                        }
+                        touched_services += 1;
+                    }
+                }
+            }
+            (touched_tasks, touched_services)
+        };
+        if touched.0 + touched.1 > 0 {
+            tracing::info!(
+                tasks = touched.0,
+                services = touched.1,
+                "reconciled persisted ecs tasks / service counts after restart",
+            );
+            self.save_snapshot().await;
+        }
+    }
 }
 
 #[async_trait]
