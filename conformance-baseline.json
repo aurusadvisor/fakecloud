@@ -1,5 +1,5 @@
 {
-  "variants_passed": 78602,
+  "variants_passed": 79381,
   "total_variants": 86666,
   "per_service": {
     "acm": {
@@ -7,7 +7,7 @@
       "total": 601
     },
     "apigatewayv1": {
-      "passed": 3111,
+      "passed": 3205,
       "total": 3375
     },
     "apigatewayv2": {
@@ -19,19 +19,19 @@
       "total": 951
     },
     "athena": {
-      "passed": 2133,
+      "passed": 2163,
       "total": 2320
     },
     "bedrock": {
-      "passed": 2893,
+      "passed": 2946,
       "total": 3841
     },
     "bedrock-agent": {
-      "passed": 2157,
+      "passed": 2217,
       "total": 2532
     },
     "bedrock-agent-runtime": {
-      "passed": 332,
+      "passed": 370,
       "total": 1173
     },
     "bedrock-runtime": {
@@ -51,7 +51,7 @@
       "total": 779
     },
     "cognito-idp": {
-      "passed": 4370,
+      "passed": 4368,
       "total": 4484
     },
     "dynamodb": {
@@ -63,7 +63,7 @@
       "total": 1805
     },
     "ecs": {
-      "passed": 2282,
+      "passed": 2308,
       "total": 2401
     },
     "elasticache": {
@@ -87,11 +87,11 @@
       "total": 1611
     },
     "kms": {
-      "passed": 2157,
+      "passed": 2144,
       "total": 2231
     },
     "lambda": {
-      "passed": 2211,
+      "passed": 2617,
       "total": 3176
     },
     "logs": {
@@ -111,7 +111,7 @@
       "total": 3669
     },
     "scheduler": {
-      "passed": 417,
+      "passed": 433,
       "total": 508
     },
     "secretsmanager": {
@@ -119,7 +119,7 @@
       "total": 875
     },
     "ses": {
-      "passed": 2691,
+      "passed": 2730,
       "total": 2867
     },
     "sns": {
@@ -143,7 +143,7 @@
       "total": 448
     },
     "wafv2": {
-      "passed": 1920,
+      "passed": 1952,
       "total": 2141
     }
   }
