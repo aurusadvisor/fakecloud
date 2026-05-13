@@ -142,6 +142,11 @@ pub fn service_protocol(service_name: &str) -> Protocol {
         "bedrock-agent" => Protocol::Rest,
         "bedrock-agent-runtime" => Protocol::Rest,
         "scheduler" => Protocol::Rest,
+        // REST-XML services — distinct wire format from restJson1 but the
+        // probe uses the same `@http` trait-driven URL builder for both
+        // and reads response bodies as opaque text.
+        "route53" => Protocol::Rest,
+        "cloudfront" => Protocol::Rest,
         // awsQuery services — RDS, ElastiCache, ELBv2 — explicitly listed
         // for clarity instead of relying on the default fall-through.
         "rds" => Protocol::Query,
