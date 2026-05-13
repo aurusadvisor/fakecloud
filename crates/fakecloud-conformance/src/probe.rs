@@ -156,6 +156,16 @@ pub fn service_protocol(service_name: &str) -> Protocol {
     }
 }
 
+/// Services whose wire format is awsJson1.x but which carry the
+/// `aws.protocols#awsQueryCompatible` trait, so their `__type` values
+/// follow the awsQuery `<Code>` convention (preserved for legacy
+/// SDK compatibility). The shape-level `awsQueryError` trait is the
+/// authoritative wire code for these services even though they speak
+/// JSON. Currently SQS is the only such service in the vendored models.
+fn is_aws_query_compatible_service(service_name: &str) -> bool {
+    matches!(service_name, "sqs")
+}
+
 /// Probe a single test variant against a running fakecloud server.
 /// If `model` and `output_shape_id` are provided, also validates the response shape.
 pub fn probe_variant(
@@ -215,9 +225,20 @@ pub fn probe_variant_with_model(
     // against the right service, not silently accepted.
     //
     // For each declared shape we derive the wire code: the
-    // `aws.protocols#awsQueryError.code` trait if present (covers
-    // IAM/RDS/etc. where the shape name and wire `<Code>` differ), else
-    // the shape's short name (after `#`).
+    // `aws.protocols#awsQueryError.code` trait if present AND the service
+    // wire format is awsQuery or awsQueryCompatible (covers IAM/RDS/etc.
+    // where the shape name and `<Code>` differ, and SQS which is awsJson1.0
+    // + awsQueryCompatible), else the shape's short name (after `#`).
+    //
+    // Why the protocol gate: a handful of awsJson1.x services (KMS, ACM,
+    // DynamoDB, SSM, application-autoscaling) carry `awsQueryError` traits
+    // on their error shapes for historical reasons (the same shape is
+    // shared with sibling awsQuery models). For awsJson1.x wire encoding
+    // the trait is inert — the wire `__type` is the shape's short name.
+    // Using the trait there mis-resolves codes like `NotFoundException`
+    // to `NotFound` and flags every real handler error as undeclared.
+    let honor_query_error_trait =
+        matches!(protocol, Protocol::Query) || is_aws_query_compatible_service(service_name);
     let op_error_shapes: Option<Vec<String>> = model_info.map(|(m, _)| {
         let declared_shape_ids: Vec<String> = m
             .operations
@@ -228,9 +249,11 @@ pub fn probe_variant_with_model(
         declared_shape_ids
             .iter()
             .map(|shape_id| {
-                if let Some(shape) = m.shapes.get(shape_id) {
-                    if let Some(code) = &shape.traits.aws_query_error_code {
-                        return code.clone();
+                if honor_query_error_trait {
+                    if let Some(shape) = m.shapes.get(shape_id) {
+                        if let Some(code) = &shape.traits.aws_query_error_code {
+                            return code.clone();
+                        }
                     }
                 }
                 shape_id.rsplit('#').next().unwrap_or(shape_id).to_string()
@@ -2209,5 +2232,19 @@ mod tests {
         // Routing-miss body shape — no recognisable AWS error code.
         let body = r#"{"message":"Unknown URL"}"#;
         assert_eq!(extract_aws_error_code(body), None);
+    }
+
+    #[test]
+    fn aws_query_error_trait_gated_by_protocol() {
+        // KMS is awsJson1.1; its `NotFoundException` shape carries a
+        // legacy `awsQueryError.code = "NotFound"` trait that is inert
+        // for JSON wire encoding. The probe must NOT honor the trait
+        // for non-query services — the wire `__type` is the shape's
+        // short name. SQS (awsJson1.0 + awsQueryCompatible) is the
+        // only awsJson service where the trait does apply.
+        assert!(matches!(service_protocol("kms"), Protocol::Json { .. }));
+        assert!(!is_aws_query_compatible_service("kms"));
+        assert!(is_aws_query_compatible_service("sqs"));
+        assert!(matches!(service_protocol("iam"), Protocol::Query));
     }
 }
