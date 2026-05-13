@@ -36,7 +36,7 @@ fn validate_oidc_provider_input(
     if thumbprints.len() > 5 {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
-            "ValidationError",
+            "InvalidInput",
             "Thumbprint list must contain fewer than 5 entries.".to_string(),
         ));
     }
@@ -71,7 +71,7 @@ fn validate_oidc_provider_input(
         );
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
-            "ValidationError",
+            "InvalidInput",
             msg,
         ));
     }
@@ -79,7 +79,7 @@ fn validate_oidc_provider_input(
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
-            "ValidationError",
+            "InvalidInput",
             "Invalid Open ID Connect Provider URL".to_string(),
         ));
     }
@@ -232,8 +232,16 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let arn = required_param(&req.query_params, "SAMLProviderArn")?;
-        let saml_metadata_document = required_param(&req.query_params, "SAMLMetadataDocument")?;
+        // Declared: ConcurrentModification, InvalidInputException, LimitExceeded,
+        // NoSuchEntity, ServiceFailure. SAMLMetadataDocument is optional in
+        // the Smithy model (AddPrivateKey / RemovePrivateKey are alternatives).
+        let arn =
+            super::required_param_with_code(&req.query_params, "SAMLProviderArn", "InvalidInput")?;
+        let saml_metadata_document = req
+            .query_params
+            .get("SAMLMetadataDocument")
+            .cloned()
+            .filter(|v| !v.is_empty());
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -246,7 +254,9 @@ impl IamService {
             )
         })?;
 
-        provider.saml_metadata_document = saml_metadata_document;
+        if let Some(doc) = saml_metadata_document {
+            provider.saml_metadata_document = doc;
+        }
 
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -269,7 +279,10 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let url = required_param(&req.query_params, "Url")?;
+        // Declared: ConcurrentModification, EntityAlreadyExists,
+        // InvalidInputException, LimitExceeded, OpenIdIdpCommunicationError,
+        // ServiceFailure -> InvalidInput for missing/invalid Url.
+        let url = super::required_param_with_code(&req.query_params, "Url", "InvalidInput")?;
         let tags = parse_tags(&req.query_params);
 
         let mut client_ids = Vec::new();

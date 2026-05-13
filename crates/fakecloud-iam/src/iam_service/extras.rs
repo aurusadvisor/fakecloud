@@ -13,7 +13,10 @@ use crate::state::{
     IamState, OrganizationsAccessReport, ServiceLastAccessedJob, ServiceSpecificCredential,
 };
 
-use super::{empty_response, parse_tags, tags_xml, IamService};
+use super::{
+    empty_response, parse_tags, required_param_with_code, resolve_calling_user, tags_xml,
+    validate_string_length_with_code, IamService,
+};
 use fakecloud_core::query::required_param;
 
 use fakecloud_aws::xml::xml_escape;
@@ -291,8 +294,29 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
-        let cred_id = required_param(&req.query_params, "ServiceSpecificCredentialId")?;
+        // Declared: NoSuchEntity (only). UserName optional per Smithy.
+        let cred_id = required_param_with_code(
+            &req.query_params,
+            "ServiceSpecificCredentialId",
+            "NoSuchEntity",
+        )?;
+        validate_string_length_with_code(
+            "serviceSpecificCredentialId",
+            &cred_id,
+            20,
+            128,
+            "NoSuchEntity",
+        )?;
+        let user_name = req
+            .query_params
+            .get("UserName")
+            .cloned()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| {
+                let accts = self.state.read();
+                let st = accts.get(&req.account_id);
+                resolve_calling_user(st.unwrap_or(accts.default_ref()), &req.account_id)
+            });
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         if let Some(list) = state.service_specific_credentials.get_mut(&user_name) {
@@ -308,11 +332,18 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
+        // Declared: NoSuchEntity, ServiceNotSupportedException. UserName
+        // optional per Smithy (defaults to caller).
         let service_name = req.query_params.get("ServiceName").cloned();
         let accounts = self.state.read();
         let empty = IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let user_name = req
+            .query_params
+            .get("UserName")
+            .cloned()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| resolve_calling_user(state, &req.account_id));
         let creds: Vec<&ServiceSpecificCredential> = state
             .service_specific_credentials
             .get(&user_name)

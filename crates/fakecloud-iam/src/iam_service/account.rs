@@ -6,7 +6,10 @@ use fakecloud_core::validation::*;
 
 use crate::state::{AccountPasswordPolicy, IamState, VirtualMfaDevice};
 
-use super::{attached_policy_name, empty_response, parse_tags, tags_xml, url_encode, IamService};
+use super::{
+    attached_policy_name, empty_response, parse_tags, required_param_with_code,
+    resolve_calling_user, tags_xml, url_encode, validate_string_length_with_code, IamService,
+};
 use fakecloud_core::query::required_param;
 
 use fakecloud_aws::xml::xml_escape;
@@ -737,7 +740,11 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let virtual_mfa_device_name = required_param(&req.query_params, "VirtualMFADeviceName")?;
+        // Declared: ConcurrentModification, EntityAlreadyExists,
+        // InvalidInputException, LimitExceeded, ServiceFailure -> InvalidInput
+        // for all bad inputs (path/name).
+        let virtual_mfa_device_name =
+            required_param_with_code(&req.query_params, "VirtualMFADeviceName", "InvalidInput")?;
         let path = req
             .query_params
             .get("Path")
@@ -749,7 +756,7 @@ impl IamService {
         if path.len() > 512 {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationError",
+                "InvalidInput",
                 format!(
                     "1 validation error detected: Value \"{}\" at \"path\" failed to satisfy constraint: Member must have length less than or equal to 512",
                     path
@@ -761,7 +768,7 @@ impl IamService {
         if !is_valid_iam_path(&path) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationError",
+                "InvalidInput",
                 "The specified value for path is invalid. It must begin and end with / and contain only alphanumeric characters and/or / characters.",
             ));
         }
@@ -1009,8 +1016,13 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let _user_name = required_param(&req.query_params, "UserName")?;
-        let serial_number = required_param(&req.query_params, "SerialNumber")?;
+        // Declared: ConcurrentModification, EntityTemporarilyUnmodifiable,
+        // LimitExceeded, NoSuchEntity, ServiceFailure -> NoSuchEntity for bad
+        // UserName/SerialNumber input.
+        let _user_name = required_param_with_code(&req.query_params, "UserName", "NoSuchEntity")?;
+        let serial_number =
+            required_param_with_code(&req.query_params, "SerialNumber", "NoSuchEntity")?;
+        validate_string_length_with_code("serialNumber", &serial_number, 9, 256, "NoSuchEntity")?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -1028,10 +1040,16 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
+        // UserName optional per Smithy; only NoSuchEntity + ServiceFailure declared.
         let accounts = self.state.read();
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let user_name = req
+            .query_params
+            .get("UserName")
+            .cloned()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| resolve_calling_user(state, &req.account_id));
 
         let devices: Vec<&VirtualMfaDevice> = state
             .virtual_mfa_devices

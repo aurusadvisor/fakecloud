@@ -499,8 +499,19 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let policy_arn = required_param(&req.query_params, "PolicyArn")?;
-        let version_id = required_param(&req.query_params, "VersionId")?;
+        // Declared: InvalidInputException, LimitExceeded, NoSuchEntity,
+        // ServiceFailure -> InvalidInput for all generic input validation.
+        let policy_arn =
+            super::required_param_with_code(&req.query_params, "PolicyArn", "InvalidInput")?;
+        super::validate_string_length_with_code(
+            "policyArn",
+            &policy_arn,
+            20,
+            2048,
+            "InvalidInput",
+        )?;
+        let version_id =
+            super::required_param_with_code(&req.query_params, "VersionId", "InvalidInput")?;
 
         // Validate version ID format: must match v[1-9][0-9]*(\.[A-Za-z0-9-]*)?
         let valid_format = version_id.starts_with('v')
@@ -520,7 +531,7 @@ impl IamService {
         if !valid_format {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationError",
+                "InvalidInput",
                 format!(
                     "Value '{}' at 'versionId' failed to satisfy constraint: Member must satisfy regular expression pattern: v[1-9][0-9]*(\\.[A-Za-z0-9-]*)?",
                     version_id
