@@ -152,6 +152,7 @@ pub fn parse_model(path: &Path) -> Result<ServiceModel, String> {
     // Find the service shape and extract operations
     let mut service_name = String::new();
     let mut operation_targets: Vec<String> = Vec::new();
+    let mut service_level_errors: Vec<String> = Vec::new();
 
     for (shape_id, shape_def) in raw_shapes {
         if shape_def.get("type").and_then(|v| v.as_str()) == Some("service") {
@@ -168,6 +169,18 @@ pub fn parse_model(path: &Path) -> Result<ServiceModel, String> {
                 for res in resources {
                     if let Some(target) = res.get("target").and_then(|v| v.as_str()) {
                         collect_resource_operations(raw_shapes, target, &mut operation_targets);
+                    }
+                }
+            }
+            // Smithy lets services declare common errors once at the service
+            // shape instead of repeating them on every operation. AWS uses
+            // this for ThrottlingException, AccessDeniedException, etc., and
+            // also for service-wide "not found" forms like IAM's NoSuchEntity
+            // or S3's NoSuchBucket. They apply to every operation.
+            if let Some(errs) = shape_def.get("errors").and_then(|v| v.as_array()) {
+                for err in errs {
+                    if let Some(target) = err.get("target").and_then(|v| v.as_str()) {
+                        service_level_errors.push(target.to_string());
                     }
                 }
             }
@@ -198,7 +211,7 @@ pub fn parse_model(path: &Path) -> Result<ServiceModel, String> {
                 .and_then(|v| v.get("target"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let error_shapes = shape_def
+            let mut error_shapes: Vec<String> = shape_def
                 .get("errors")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
@@ -211,6 +224,12 @@ pub fn parse_model(path: &Path) -> Result<ServiceModel, String> {
                         .collect()
                 })
                 .unwrap_or_default();
+            // Union service-level errors into every op's acceptance set.
+            for svc_err in &service_level_errors {
+                if !error_shapes.contains(svc_err) {
+                    error_shapes.push(svc_err.clone());
+                }
+            }
 
             let (http_method, http_uri, http_code) = shape_def
                 .get("traits")
