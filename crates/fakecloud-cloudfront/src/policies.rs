@@ -753,10 +753,43 @@ pub(crate) fn require_if_match(req: &AwsRequest) -> Result<String, AwsServiceErr
         })
 }
 
+/// Map a logical resource "kind" to the Smithy-declared error shape name used
+/// on the CloudFront wire. Most resources use the `NoSuch{Kind}` pattern, but
+/// several do not:
+///
+/// - `Function` -> `NoSuchFunctionExists` (the actual Smithy shape name)
+/// - `KeyGroup` -> `NoSuchResource` (per Get/Update/DeleteKeyGroup errors)
+/// - `FieldLevelEncryption` -> `NoSuchFieldLevelEncryptionConfig`
+/// - Newer "tenant-era" resources (DistributionTenant, ConnectionGroup,
+///   ConnectionFunction, VpcOrigin, AnycastIpList, KeyValueStore, TrustStore,
+///   ResourcePolicy) all share the unified `EntityNotFound` error shape.
+fn not_found_code(kind: &str) -> &'static str {
+    match kind {
+        "Function" => "NoSuchFunctionExists",
+        "KeyGroup" => "NoSuchResource",
+        "FieldLevelEncryption" => "NoSuchFieldLevelEncryptionConfig",
+        "AnycastIpList" | "ConnectionFunction" | "ConnectionGroup" | "DistributionTenant"
+        | "KeyValueStore" | "ResourcePolicy" | "TrustStore" | "VpcOrigin" => "EntityNotFound",
+        _ => "",
+    }
+}
+
 pub(crate) fn not_found(kind: &str, id: &str) -> AwsServiceError {
+    let code = not_found_code(kind);
+    let code = if code.is_empty() {
+        // Default to `NoSuch{Kind}` for the long tail of resources whose
+        // Smithy shape follows that convention (Distribution, CachePolicy,
+        // PublicKey, OriginAccessControl, OriginRequestPolicy,
+        // ResponseHeadersPolicy, ContinuousDeploymentPolicy,
+        // StreamingDistribution, FieldLevelEncryptionProfile,
+        // CloudFrontOriginAccessIdentity, RealtimeLogConfig, Invalidation).
+        format!("NoSuch{kind}")
+    } else {
+        code.to_string()
+    };
     aws_error(
         StatusCode::NOT_FOUND,
-        format!("NoSuch{kind}"),
+        code,
         format!("The specified {kind} does not exist: {id}"),
     )
 }
