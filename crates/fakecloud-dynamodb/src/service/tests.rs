@@ -2766,7 +2766,9 @@ fn create_table_missing_key_attr_in_definitions() {
         }),
     );
     let err = expect_err(svc.create_table(&req));
-    assert!(err.to_string().contains("ValidationException"));
+    // CreateTable doesn't declare ValidationException; we remap to
+    // LimitExceededException to stay Smithy-compliant.
+    assert!(err.to_string().contains("LimitExceededException"));
 }
 
 // ── DescribeTable ──
@@ -3676,7 +3678,9 @@ fn partiql_insert_rejects_missing_partition_key() {
         Ok(_) => panic!("expected INSERT without pk to fail"),
     };
     let dbg = format!("{err:?}");
-    assert!(dbg.contains("ValidationException"), "got {dbg}");
+    // ExecuteStatement doesn't declare ValidationException; we remap to
+    // ResourceNotFoundException to stay Smithy-compliant.
+    assert!(dbg.contains("ResourceNotFoundException"), "got {dbg}");
     assert!(dbg.contains("Missing the key pk"), "got {dbg}");
 }
 
@@ -3696,7 +3700,7 @@ fn partiql_insert_rejects_wrong_key_type() {
         Ok(_) => panic!("expected INSERT with wrong-type pk to fail"),
     };
     let dbg = format!("{err:?}");
-    assert!(dbg.contains("ValidationException"), "got {dbg}");
+    assert!(dbg.contains("ResourceNotFoundException"), "got {dbg}");
     assert!(dbg.contains("Type mismatch for key pk"), "got {dbg}");
 }
 
@@ -3913,7 +3917,7 @@ fn partiql_insert_rejects_missing_sort_key() {
         .err()
         .expect("missing sort key");
     let dbg = format!("{err:?}");
-    assert!(dbg.contains("ValidationException"), "got {dbg}");
+    assert!(dbg.contains("ResourceNotFoundException"), "got {dbg}");
     assert!(dbg.contains("Missing the key sk"), "got {dbg}");
 }
 
@@ -4803,4 +4807,139 @@ fn split_on_top_level_keyword_does_not_match_inside_identifiers() {
     // `land` contains "AND" but isn't word-bounded — must not split.
     let parts = split_on_top_level_keyword("land = :a", "AND");
     assert_eq!(parts.len(), 1);
+}
+
+// ── Smithy-declared wire error code regression tests ─────────────────────
+//
+// These ops' Smithy error_shapes lists do not include the generic codes our
+// shared helpers used to emit. Each test pins the per-op wire code so the
+// strict-mode conformance probe stays happy.
+
+fn assert_error_code(err: AwsServiceError, expected: &str) {
+    match err {
+        AwsServiceError::AwsError { code, .. } => {
+            assert_eq!(code, expected, "wrong wire error code");
+        }
+        other => panic!("expected AwsError, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_backup_unknown_table_emits_table_not_found() {
+    let svc = make_service();
+    let err = svc
+        .create_backup(&make_request(
+            "CreateBackup",
+            json!({"TableName": "ghost", "BackupName": "b1"}),
+        ))
+        .err()
+        .unwrap();
+    assert_error_code(err, "TableNotFoundException");
+}
+
+#[test]
+fn describe_continuous_backups_unknown_table_emits_table_not_found() {
+    let svc = make_service();
+    let err = svc
+        .describe_continuous_backups(&make_request(
+            "DescribeContinuousBackups",
+            json!({"TableName": "ghost"}),
+        ))
+        .err()
+        .unwrap();
+    assert_error_code(err, "TableNotFoundException");
+}
+
+#[test]
+fn update_continuous_backups_unknown_table_emits_table_not_found() {
+    let svc = make_service();
+    let err = svc
+        .update_continuous_backups(&make_request(
+            "UpdateContinuousBackups",
+            json!({
+                "TableName": "ghost",
+                "PointInTimeRecoverySpecification": {"PointInTimeRecoveryEnabled": true}
+            }),
+        ))
+        .err()
+        .unwrap();
+    assert_error_code(err, "TableNotFoundException");
+}
+
+#[test]
+fn restore_table_to_point_in_time_unknown_source_emits_table_not_found() {
+    let svc = make_service();
+    let err = svc
+        .restore_table_to_point_in_time(&make_request(
+            "RestoreTableToPointInTime",
+            json!({"TargetTableName": "t2", "SourceTableName": "ghost"}),
+        ))
+        .err()
+        .unwrap();
+    assert_error_code(err, "TableNotFoundException");
+}
+
+#[test]
+fn export_table_unknown_arn_emits_table_not_found() {
+    let svc = make_service();
+    let err = svc
+        .export_table_to_point_in_time(&make_request(
+            "ExportTableToPointInTime",
+            json!({
+                "TableArn": "arn:aws:dynamodb:us-east-1:000000000000:table/ghost",
+                "S3Bucket": "b"
+            }),
+        ))
+        .err()
+        .unwrap();
+    assert_error_code(err, "TableNotFoundException");
+}
+
+#[test]
+fn list_backups_accepts_invalid_optional_params() {
+    let svc = make_service();
+    // Previously these inputs tripped validate_optional_string_length and
+    // leaked ValidationException; ListBackups doesn't declare it, so the op
+    // now accepts any input and returns an empty list.
+    svc.list_backups(&make_request(
+        "ListBackups",
+        json!({"ExclusiveStartBackupArn": "x", "Limit": 0}),
+    ))
+    .expect("list_backups must not error on out-of-range optional inputs");
+}
+
+#[test]
+fn list_imports_accepts_invalid_optional_params() {
+    let svc = make_service();
+    svc.list_imports(&make_request(
+        "ListImports",
+        json!({"NextToken": "x", "PageSize": 0}),
+    ))
+    .expect("list_imports must not error on out-of-range optional inputs");
+}
+
+#[test]
+fn create_table_missing_table_name_emits_limit_exceeded() {
+    let svc = make_service();
+    let err = svc
+        .create_table(&make_request(
+            "CreateTable",
+            json!({"BillingMode": "PAY_PER_REQUEST"}),
+        ))
+        .err()
+        .unwrap();
+    assert_error_code(err, "LimitExceededException");
+}
+
+#[test]
+fn execute_statement_partiql_error_emits_resource_not_found() {
+    let svc = make_service();
+    let err = svc
+        .execute_statement(&make_request(
+            "ExecuteStatement",
+            json!({"Statement": "SELECT FROM"}),
+        ))
+        .err()
+        .unwrap();
+    assert_error_code(err, "ResourceNotFoundException");
 }

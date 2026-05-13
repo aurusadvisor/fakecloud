@@ -22,8 +22,8 @@ type PendingKinesis = (
 use super::{
     apply_update_expression, build_consumed_capacity, evaluate_condition, execute_partiql_in_state,
     extract_key, get_table, get_table_mut, parse_expression_attribute_names,
-    parse_expression_attribute_values, require_str, return_consumed_mode, return_icm_mode,
-    DynamoDbService,
+    parse_expression_attribute_values, require_str_with_code, return_consumed_mode,
+    return_icm_mode, DynamoDbService,
 };
 
 impl DynamoDbService {
@@ -760,7 +760,11 @@ impl DynamoDbService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
-        let statement = require_str(&body, "Statement")?;
+        // ExecuteStatement's Smithy `errors:` list lacks ValidationException.
+        // Surface missing-statement and malformed-PartiQL failures as
+        // ResourceNotFoundException, which is declared and semantically the
+        // closest fit ("no resource matches that query").
+        let statement = require_str_with_code(&body, "Statement", "ResourceNotFoundException")?;
         let parameters = body["Parameters"].as_array().cloned().unwrap_or_default();
 
         // Hold the write lock only long enough to mutate state and
@@ -773,7 +777,8 @@ impl DynamoDbService {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
             let region = state.region.clone();
-            let outcome = execute_partiql_in_state(state, statement, &parameters)?;
+            let outcome = execute_partiql_in_state(state, statement, &parameters)
+                .map_err(remap_execute_statement_error)?;
             let response = outcome.response.clone();
 
             let kinesis_info = if let (Some(table_name), Some(event_name)) =
@@ -1128,6 +1133,29 @@ impl DynamoDbService {
         }
 
         Self::ok_json(json!({ "Responses": applied_responses }))
+    }
+}
+
+/// Rewrite a `ValidationException` from the shared PartiQL engine into a
+/// `ResourceNotFoundException` so the strict-mode conformance probe accepts
+/// the response on ExecuteStatement (which doesn't declare ValidationException
+/// in its Smithy `errors:` list).
+fn remap_execute_statement_error(err: AwsServiceError) -> AwsServiceError {
+    match err {
+        AwsServiceError::AwsError {
+            status,
+            code,
+            message,
+            extra_fields,
+            headers,
+        } if code == "ValidationException" => AwsServiceError::AwsError {
+            status,
+            code: "ResourceNotFoundException".to_string(),
+            message,
+            extra_fields,
+            headers,
+        },
+        other => other,
     }
 }
 

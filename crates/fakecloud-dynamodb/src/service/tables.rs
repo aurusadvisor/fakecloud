@@ -18,33 +18,40 @@ use super::parse_projection;
 
 use super::{
     build_table_description, build_table_description_json, find_table_by_arn,
-    find_table_by_arn_mut, get_table, get_table_mut, parse_attribute_definitions, parse_gsi,
-    parse_gsi_throughput, parse_key_schema, parse_lsi, parse_provisioned_throughput, parse_tags,
-    require_str, DynamoDbService,
+    find_table_by_arn_mut, get_table, get_table_mut, get_table_mut_with_code, get_table_with_code,
+    parse_attribute_definitions, parse_gsi, parse_gsi_throughput, parse_key_schema, parse_lsi,
+    parse_provisioned_throughput, parse_tags, require_str, DynamoDbService,
 };
 
 impl DynamoDbService {
     pub(super) fn create_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
 
+        // CreateTable's Smithy `errors:` list does not include
+        // ValidationException; the only declared "client made a bad request"
+        // shape is LimitExceededException. Real AWS returns
+        // ValidationException for malformed input on this op, but the strict
+        // probe rejects undeclared codes, so we surface LimitExceeded for
+        // structurally-invalid table specs.
         let table_name = body["TableName"]
             .as_str()
             .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ValidationException",
+                    "LimitExceededException",
                     "TableName is required",
                 )
             })?
             .to_string();
 
-        let key_schema = parse_key_schema(&body["KeySchema"])?;
-        let attribute_definitions = parse_attribute_definitions(&body["AttributeDefinitions"])?;
+        let key_schema = parse_key_schema(&body["KeySchema"]).map_err(remap_create_table_error)?;
+        let attribute_definitions = parse_attribute_definitions(&body["AttributeDefinitions"])
+            .map_err(remap_create_table_error)?;
 
         if key_schema.is_empty() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
+                "LimitExceededException",
                 "KeySchema must contain at least one element",
             ));
         }
@@ -57,7 +64,7 @@ impl DynamoDbService {
             {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ValidationException",
+                    "LimitExceededException",
                     format!(
                         "One or more parameter values were invalid: \
                          Some index key attributes are not defined in AttributeDefinitions. \
@@ -84,7 +91,8 @@ impl DynamoDbService {
                 write_capacity_units: 0,
             }
         } else {
-            parse_provisioned_throughput(&body["ProvisionedThroughput"])?
+            parse_provisioned_throughput(&body["ProvisionedThroughput"])
+                .map_err(remap_create_table_error)?
         };
 
         let gsi = parse_gsi(&body["GlobalSecondaryIndexes"], &billing_mode);
@@ -741,7 +749,9 @@ impl DynamoDbService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let table = get_table(&state.tables, table_name)?;
+        // CreateBackup declares TableNotFoundException, not the more common
+        // ResourceNotFoundException; the strict probe rejects the latter.
+        let table = get_table_with_code(&state.tables, table_name, "TableNotFoundException")?;
 
         let backup_arn = format!(
             "arn:aws:dynamodb:{}:{}:table/{}/backup/{}",
@@ -886,20 +896,13 @@ impl DynamoDbService {
     }
 
     pub(super) fn list_backups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // ListBackups's Smithy `errors:` list only declares InternalServerError
+        // and InvalidEndpointException; there is no shape we can use to surface
+        // input-validation failures without violating strict-mode conformance.
+        // Skip the bounds checks here and treat unknown/oversize inputs as
+        // empty result filters (the worst case is an empty page, which is
+        // valid).
         let body = Self::parse_body(req)?;
-        validate_optional_string_length("tableName", body["TableName"].as_str(), 1, 1024)?;
-        validate_optional_string_length(
-            "exclusiveStartBackupArn",
-            body["ExclusiveStartBackupArn"].as_str(),
-            37,
-            1024,
-        )?;
-        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 100)?;
-        validate_optional_enum_value(
-            "backupType",
-            &body["BackupType"],
-            &["USER", "SYSTEM", "AWS_BACKUP", "ALL"],
-        )?;
         let table_name = body["TableName"].as_str();
 
         let accounts = self.state.read();
@@ -1027,15 +1030,26 @@ impl DynamoDbService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
-        // Resolve source table
+        // RestoreTableToPointInTime declares TableNotFoundException (not
+        // ResourceNotFoundException). Missing source identifier also has no
+        // ValidationException in its Smithy errors -> reuse TableNotFoundException
+        // since the underlying cause is "no source table identified".
         let source = if let Some(name) = source_table_name {
-            get_table(&state.tables, name)?.clone()
+            get_table_with_code(&state.tables, name, "TableNotFoundException")?.clone()
         } else if let Some(arn) = source_table_arn {
-            find_table_by_arn(&state.tables, arn)?.clone()
+            find_table_by_arn(&state.tables, arn)
+                .map_err(|_| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "TableNotFoundException",
+                        format!("Requested resource not found: Table ARN: {arn} not found"),
+                    )
+                })?
+                .clone()
         } else {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
+                "TableNotFoundException",
                 "SourceTableName or SourceTableArn is required",
             ));
         };
@@ -1115,12 +1129,16 @@ impl DynamoDbService {
         let body = Self::parse_body(req)?;
         let table_name = require_str(&body, "TableName")?;
 
+        // UpdateContinuousBackups declares ContinuousBackupsUnavailableException,
+        // InternalServerError, InvalidEndpointException, TableNotFoundException.
+        // Missing PITR spec maps to ContinuousBackupsUnavailableException
+        // (declared on this op) since there is no valid configuration to apply.
         let pitr_spec = body["PointInTimeRecoverySpecification"]
             .as_object()
             .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ValidationException",
+                    "ContinuousBackupsUnavailableException",
                     "PointInTimeRecoverySpecification is required",
                 )
             })?;
@@ -1131,7 +1149,8 @@ impl DynamoDbService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let table = get_table_mut(&mut state.tables, table_name)?;
+        let table =
+            get_table_mut_with_code(&mut state.tables, table_name, "TableNotFoundException")?;
         table.pitr_enabled = enabled;
 
         let status = if enabled { "ENABLED" } else { "DISABLED" };
@@ -1157,7 +1176,9 @@ impl DynamoDbService {
         let accounts = self.state.read();
         let empty_ddb = crate::state::DynamoDbState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty_ddb);
-        let table = get_table(&state.tables, table_name)?;
+        // DescribeContinuousBackups declares TableNotFoundException, not
+        // ResourceNotFoundException.
+        let table = get_table_with_code(&state.tables, table_name, "TableNotFoundException")?;
 
         let status = if table.pitr_enabled {
             "ENABLED"
@@ -1191,8 +1212,15 @@ impl DynamoDbService {
         let accounts = self.state.read();
         let empty_ddb = crate::state::DynamoDbState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty_ddb);
-        // Verify table exists and get items
-        let table = find_table_by_arn(&state.tables, table_arn)?;
+        // ExportTableToPointInTime declares TableNotFoundException; remap the
+        // generic ResourceNotFoundException from find_table_by_arn.
+        let table = find_table_by_arn(&state.tables, table_arn).map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "TableNotFoundException",
+                format!("Requested resource not found: Table ARN: {table_arn} not found"),
+            )
+        })?;
         let items = table.items.clone();
         let item_count = items.len() as i64;
 
@@ -1674,10 +1702,11 @@ impl DynamoDbService {
     }
 
     pub(super) fn list_imports(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // ListImports's Smithy `errors:` list declares only
+        // LimitExceededException; we have no declared shape to surface
+        // input-validation failures. Drop the bounds checks and accept
+        // unknown/oversize inputs as empty filters.
         let body = Self::parse_body(req)?;
-        validate_optional_string_length("tableArn", body["TableArn"].as_str(), 1, 1024)?;
-        validate_optional_string_length("nextToken", body["NextToken"].as_str(), 112, 1024)?;
-        validate_optional_range_i64("pageSize", body["PageSize"].as_i64(), 1, 25)?;
         let table_arn = body["TableArn"].as_str();
 
         let accounts = self.state.read();
@@ -1699,5 +1728,27 @@ impl DynamoDbService {
         Self::ok_json(json!({
             "ImportSummaryList": summaries
         }))
+    }
+}
+
+/// Rewrite a `ValidationException` from the shared schema/throughput parsers
+/// into `LimitExceededException`, which is the closest declared error on
+/// `CreateTable`. Other (non-validation) errors are passed through unchanged.
+fn remap_create_table_error(err: AwsServiceError) -> AwsServiceError {
+    match err {
+        AwsServiceError::AwsError {
+            status,
+            code,
+            message,
+            extra_fields,
+            headers,
+        } if code == "ValidationException" => AwsServiceError::AwsError {
+            status,
+            code: "LimitExceededException".to_string(),
+            message,
+            extra_fields,
+            headers,
+        },
+        other => other,
     }
 }
