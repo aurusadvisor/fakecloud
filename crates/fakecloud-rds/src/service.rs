@@ -325,6 +325,284 @@ impl RdsService {
         )
         .await;
     }
+
+    /// Recreate the backing Docker/Podman containers for persisted DB
+    /// instances after a fakecloud restart. Without this, persistent
+    /// mode loads the row back into memory with `db_instance_status =
+    /// available` but the container is gone, so the endpoint is dead
+    /// (issue #1338). Each candidate is flipped to `starting`
+    /// synchronously, then a background task brings the container back
+    /// and flips it back to `available`. Instances persisted as
+    /// `stopped` are skipped — `StartDBInstance` revives those.
+    pub async fn recover_persisted_containers(&self) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+
+        struct Pending {
+            account_id: String,
+            region: String,
+            id: String,
+            arn: String,
+            engine: String,
+            engine_version: String,
+            username: String,
+            password: String,
+            db_name: String,
+        }
+
+        let pending: Vec<Pending> = {
+            let mut accounts = self.state.write();
+            let mut out = Vec::new();
+            for (_, state) in accounts.iter_mut() {
+                let account_id = state.account_id.clone();
+                let region = state.region.clone();
+                for (id, inst) in state.instances.iter_mut() {
+                    if !matches!(
+                        inst.db_instance_status.as_str(),
+                        "available" | "starting" | "modifying" | "rebooting" | "backing-up"
+                    ) {
+                        continue;
+                    }
+                    inst.db_instance_status = "starting".to_string();
+                    out.push(Pending {
+                        account_id: account_id.clone(),
+                        region: region.clone(),
+                        id: id.clone(),
+                        arn: inst.db_instance_arn.clone(),
+                        engine: inst.engine.clone(),
+                        engine_version: inst.engine_version.clone(),
+                        username: inst.master_username.clone(),
+                        password: inst.master_user_password.clone(),
+                        db_name: inst
+                            .db_name
+                            .clone()
+                            .unwrap_or_else(|| default_db_name(&inst.engine).to_string()),
+                    });
+                }
+            }
+            out
+        };
+
+        if pending.is_empty() {
+            return;
+        }
+        tracing::info!(
+            count = pending.len(),
+            "recovering backing containers for persisted rds instances",
+        );
+
+        for p in pending {
+            let runtime = runtime.clone();
+            let state = self.state.clone();
+            let snapshot_store = self.snapshot_store.clone();
+            let snapshot_lock = self.snapshot_lock.clone();
+            let delivery_bus = self.delivery_bus.clone();
+            tokio::spawn(async move {
+                match runtime
+                    .ensure_postgres(
+                        &p.id,
+                        &p.engine,
+                        &p.engine_version,
+                        &p.username,
+                        &p.password,
+                        &p.db_name,
+                        &p.account_id,
+                        &p.region,
+                    )
+                    .await
+                {
+                    Ok(running) => {
+                        {
+                            let mut accounts = state.write();
+                            if let Some(s) = accounts.get_mut(&p.account_id) {
+                                if let Some(inst) = s.instances.get_mut(&p.id) {
+                                    inst.db_instance_status = "available".to_string();
+                                    inst.endpoint_address = "127.0.0.1".to_string();
+                                    inst.port = i32::from(running.host_port);
+                                    inst.host_port = running.host_port;
+                                    inst.container_id = running.container_id;
+                                }
+                            }
+                        }
+                        save_snapshot_static(
+                            state.clone(),
+                            snapshot_store.clone(),
+                            snapshot_lock.clone(),
+                        )
+                        .await;
+                        emit_event_static(
+                            delivery_bus.as_ref(),
+                            RdsSourceType::DbInstance,
+                            &p.id,
+                            &p.arn,
+                            "RDS-EVENT-0088",
+                            &["notification"],
+                            "DB instance restarted after fakecloud restart",
+                        );
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            db_instance_identifier = %p.id,
+                            "failed to recover rds backing container after restart",
+                        );
+                        {
+                            let mut accounts = state.write();
+                            if let Some(s) = accounts.get_mut(&p.account_id) {
+                                if let Some(inst) = s.instances.get_mut(&p.id) {
+                                    inst.db_instance_status = "failed".to_string();
+                                }
+                            }
+                        }
+                        save_snapshot_static(state, snapshot_store, snapshot_lock).await;
+                    }
+                }
+            });
+        }
+    }
+
+    /// Stop the backing container for `db_instance_identifier` and mark
+    /// the row `stopped`. Synchronous wrt the runtime so callers see a
+    /// real `stopped` status by the time the response goes back; mirrors
+    /// the AWS contract that `StartDBInstance`/`StopDBInstance` change
+    /// the visible status immediately.
+    async fn stop_db_instance(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
+        let runtime = self.require_runtime()?;
+
+        let arn = {
+            let accounts = self.state.read();
+            let empty = RdsState::new(&request.account_id, &request.region);
+            let state = accounts.get(&request.account_id).unwrap_or(&empty);
+            state
+                .instances
+                .get(&db_instance_identifier)
+                .map(|i| i.db_instance_arn.clone())
+                .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?
+        };
+
+        runtime.stop_container(&db_instance_identifier).await;
+
+        let instance = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
+            let inst = state
+                .instances
+                .get_mut(&db_instance_identifier)
+                .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
+            inst.db_instance_status = "stopped".to_string();
+            inst.container_id = String::new();
+            inst.clone()
+        };
+
+        self.emit_event(
+            RdsSourceType::DbInstance,
+            &db_instance_identifier,
+            &arn,
+            "RDS-EVENT-0089",
+            &["notification"],
+            "DB instance stopped",
+        );
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            query_response_xml(
+                "StopDBInstance",
+                RDS_NS,
+                &format!(
+                    "<DBInstance>{}</DBInstance>",
+                    db_instance_xml(&instance, Some("stopped"))
+                ),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    /// Restart a stopped DB instance: spin up the backing container and
+    /// flip the row back to `available`. Mirrors AWS `StartDBInstance`.
+    async fn start_db_instance(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
+        let runtime = self.require_runtime()?;
+
+        let instance = {
+            let accounts = self.state.read();
+            let empty = RdsState::new(&request.account_id, &request.region);
+            let state = accounts.get(&request.account_id).unwrap_or(&empty);
+            state
+                .instances
+                .get(&db_instance_identifier)
+                .cloned()
+                .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?
+        };
+
+        // Flip to `starting` so concurrent DescribeDBInstances callers
+        // see the in-flight state.
+        {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
+            if let Some(inst) = state.instances.get_mut(&db_instance_identifier) {
+                inst.db_instance_status = "starting".to_string();
+            }
+        }
+
+        let running = runtime
+            .ensure_postgres(
+                &db_instance_identifier,
+                &instance.engine,
+                &instance.engine_version,
+                &instance.master_username,
+                &instance.master_user_password,
+                instance
+                    .db_name
+                    .as_deref()
+                    .unwrap_or(default_db_name(&instance.engine)),
+                &request.account_id,
+                &request.region,
+            )
+            .await
+            .map_err(runtime_error_to_service_error)?;
+
+        let instance = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
+            let inst = state
+                .instances
+                .get_mut(&db_instance_identifier)
+                .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
+            inst.db_instance_status = "available".to_string();
+            inst.endpoint_address = "127.0.0.1".to_string();
+            inst.port = i32::from(running.host_port);
+            inst.host_port = running.host_port;
+            inst.container_id = running.container_id;
+            inst.clone()
+        };
+
+        self.emit_event(
+            RdsSourceType::DbInstance,
+            &db_instance_identifier,
+            &instance.db_instance_arn,
+            "RDS-EVENT-0088",
+            &["notification"],
+            "DB instance started",
+        );
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            query_response_xml(
+                "StartDBInstance",
+                RDS_NS,
+                &format!(
+                    "<DBInstance>{}</DBInstance>",
+                    db_instance_xml(&instance, None)
+                ),
+                &request.request_id,
+            ),
+        ))
+    }
 }
 
 /// Persist the current `RdsState` to the configured snapshot store. Free
@@ -408,6 +686,8 @@ impl AwsService for RdsService {
             "ModifyDBParameterGroup" => self.modify_db_parameter_group(&request),
             "ModifyDBSubnetGroup" => self.modify_db_subnet_group(&request),
             "RebootDBInstance" => self.reboot_db_instance(&request).await,
+            "StartDBInstance" => self.start_db_instance(&request).await,
+            "StopDBInstance" => self.stop_db_instance(&request).await,
             "RemoveTagsFromResource" => self.remove_tags_from_resource(&request),
             "RestoreDBInstanceFromDBSnapshot" => {
                 self.restore_db_instance_from_db_snapshot(&request).await

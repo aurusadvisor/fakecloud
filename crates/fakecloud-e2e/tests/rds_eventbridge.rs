@@ -1,6 +1,7 @@
 //! RDS lifecycle ops emit `aws.rds` events on the default EventBridge
-//! bus, deliverable to rule targets. Start/StopDBInstance take the no-
-//! runtime path so the test runs on every CI shard.
+//! bus, deliverable to rule targets. Start/StopDBInstance now drive
+//! real container lifecycle (see #1338) so these tests need Docker to
+//! create the instance before toggling it.
 
 mod helpers;
 
@@ -8,8 +9,48 @@ use aws_sdk_eventbridge::types::Target;
 use aws_sdk_sqs::types::QueueAttributeName;
 use helpers::TestServer;
 
+fn docker_available() -> bool {
+    std::process::Command::new("docker")
+        .arg("info")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn require_docker_or_skip(test: &str) -> bool {
+    if docker_available() {
+        return true;
+    }
+    if std::env::var("CI").is_ok() {
+        panic!("docker is required for {test} in CI");
+    }
+    eprintln!("Skipping {test}: docker not available");
+    false
+}
+
+async fn create_running_db(rds: &aws_sdk_rds::Client, id: &str) {
+    rds.create_db_instance()
+        .db_instance_identifier(id)
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .send()
+        .await
+        .unwrap();
+    let _ = helpers::wait_for_db_available(rds, id, 240).await;
+}
+
 #[tokio::test]
 async fn rds_start_db_instance_emits_eventbridge_event() {
+    if !require_docker_or_skip("rds_start_db_instance_emits_eventbridge_event") {
+        return;
+    }
     let server = TestServer::start().await;
     let rds = server.rds_client().await;
     let eb = server.eventbridge_client().await;
@@ -61,6 +102,12 @@ async fn rds_start_db_instance_emits_eventbridge_event() {
         .await
         .unwrap();
 
+    create_running_db(&rds, "my-db").await;
+    rds.stop_db_instance()
+        .db_instance_identifier("my-db")
+        .send()
+        .await
+        .unwrap();
     rds.start_db_instance()
         .db_instance_identifier("my-db")
         .send()
@@ -105,6 +152,9 @@ async fn rds_start_db_instance_emits_eventbridge_event() {
 
 #[tokio::test]
 async fn rds_stop_db_instance_emits_eventbridge_event() {
+    if !require_docker_or_skip("rds_stop_db_instance_emits_eventbridge_event") {
+        return;
+    }
     let server = TestServer::start().await;
     let rds = server.rds_client().await;
     let eb = server.eventbridge_client().await;
@@ -150,6 +200,7 @@ async fn rds_stop_db_instance_emits_eventbridge_event() {
         .await
         .unwrap();
 
+    create_running_db(&rds, "prod-db").await;
     rds.stop_db_instance()
         .db_instance_identifier("prod-db")
         .send()
@@ -187,6 +238,9 @@ async fn rds_stop_db_instance_emits_eventbridge_event() {
 
 #[tokio::test]
 async fn rds_event_delivers_to_sns_target() {
+    if !require_docker_or_skip("rds_event_delivers_to_sns_target") {
+        return;
+    }
     let server = TestServer::start().await;
     let rds = server.rds_client().await;
     let eb = server.eventbridge_client().await;
@@ -249,6 +303,12 @@ async fn rds_event_delivers_to_sns_target() {
         .await
         .unwrap();
 
+    create_running_db(&rds, "sns-db").await;
+    rds.stop_db_instance()
+        .db_instance_identifier("sns-db")
+        .send()
+        .await
+        .unwrap();
     rds.start_db_instance()
         .db_instance_identifier("sns-db")
         .send()
