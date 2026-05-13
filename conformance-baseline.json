@@ -1,146 +1,146 @@
 {
-  "variants_passed": 62866,
+  "variants_passed": 65181,
   "total_variants": 86666,
   "per_service": {
-    "acm": {
-      "passed": 571,
-      "total": 601
-    },
-    "apigatewayv1": {
-      "passed": 3110,
-      "total": 3375
-    },
-    "apigatewayv2": {
-      "passed": 198,
-      "total": 2794
-    },
     "application-autoscaling": {
       "passed": 762,
       "total": 951
     },
-    "athena": {
-      "passed": 2153,
-      "total": 2320
-    },
-    "bedrock": {
-      "passed": 2913,
-      "total": 3841
-    },
     "bedrock-agent": {
-      "passed": 0,
+      "passed": 2177,
       "total": 2532
-    },
-    "bedrock-agent-runtime": {
-      "passed": 0,
-      "total": 1173
-    },
-    "bedrock-runtime": {
-      "passed": 150,
-      "total": 447
-    },
-    "cloudformation": {
-      "passed": 2818,
-      "total": 3433
-    },
-    "cloudfront": {
-      "passed": 2960,
-      "total": 4115
-    },
-    "cognito-identity": {
-      "passed": 640,
-      "total": 779
-    },
-    "cognito-idp": {
-      "passed": 4412,
-      "total": 4484
-    },
-    "dynamodb": {
-      "passed": 1834,
-      "total": 2134
-    },
-    "ecr": {
-      "passed": 1734,
-      "total": 1805
-    },
-    "ecs": {
-      "passed": 2097,
-      "total": 2401
-    },
-    "elasticache": {
-      "passed": 1537,
-      "total": 2258
-    },
-    "elasticloadbalancing": {
-      "passed": 643,
-      "total": 1587
-    },
-    "events": {
-      "passed": 1940,
-      "total": 2119
-    },
-    "iam": {
-      "passed": 2208,
-      "total": 6000
-    },
-    "kinesis": {
-      "passed": 1569,
-      "total": 1611
-    },
-    "kms": {
-      "passed": 2029,
-      "total": 2231
-    },
-    "lambda": {
-      "passed": 2097,
-      "total": 3176
-    },
-    "logs": {
-      "passed": 3814,
-      "total": 3914
-    },
-    "rds": {
-      "passed": 4101,
-      "total": 5497
-    },
-    "route53": {
-      "passed": 439,
-      "total": 2400
     },
     "s3": {
       "passed": 2948,
       "total": 3669
     },
-    "scheduler": {
-      "passed": 437,
-      "total": 508
+    "cognito-identity": {
+      "passed": 640,
+      "total": 779
     },
-    "secretsmanager": {
-      "passed": 822,
-      "total": 875
-    },
-    "ses": {
-      "passed": 2595,
-      "total": 2867
-    },
-    "sns": {
-      "passed": 411,
-      "total": 1027
-    },
-    "sqs": {
-      "passed": 436,
-      "total": 549
+    "sts": {
+      "passed": 331,
+      "total": 448
     },
     "ssm": {
       "passed": 4994,
       "total": 5309
     },
+    "sns": {
+      "passed": 411,
+      "total": 1027
+    },
+    "cloudfront": {
+      "passed": 2960,
+      "total": 4115
+    },
+    "apigatewayv1": {
+      "passed": 3108,
+      "total": 3375
+    },
+    "cognito-idp": {
+      "passed": 4428,
+      "total": 4484
+    },
+    "kinesis": {
+      "passed": 1569,
+      "total": 1611
+    },
+    "bedrock": {
+      "passed": 2909,
+      "total": 3841
+    },
+    "route53": {
+      "passed": 439,
+      "total": 2400
+    },
+    "rds": {
+      "passed": 4101,
+      "total": 5497
+    },
+    "kms": {
+      "passed": 2023,
+      "total": 2231
+    },
+    "scheduler": {
+      "passed": 437,
+      "total": 508
+    },
     "states": {
       "passed": 1223,
       "total": 1295
     },
-    "sts": {
-      "passed": 331,
-      "total": 448
+    "logs": {
+      "passed": 3814,
+      "total": 3914
+    },
+    "bedrock-runtime": {
+      "passed": 150,
+      "total": 447
+    },
+    "athena": {
+      "passed": 2153,
+      "total": 2320
+    },
+    "bedrock-agent-runtime": {
+      "passed": 211,
+      "total": 1173
+    },
+    "ecr": {
+      "passed": 1734,
+      "total": 1805
+    },
+    "acm": {
+      "passed": 571,
+      "total": 601
+    },
+    "dynamodb": {
+      "passed": 1834,
+      "total": 2134
+    },
+    "lambda": {
+      "passed": 2096,
+      "total": 3176
+    },
+    "ses": {
+      "passed": 2598,
+      "total": 2867
+    },
+    "elasticache": {
+      "passed": 1458,
+      "total": 2258
+    },
+    "sqs": {
+      "passed": 436,
+      "total": 549
+    },
+    "iam": {
+      "passed": 2208,
+      "total": 6000
+    },
+    "secretsmanager": {
+      "passed": 822,
+      "total": 875
+    },
+    "ecs": {
+      "passed": 2097,
+      "total": 2401
+    },
+    "elasticloadbalancing": {
+      "passed": 643,
+      "total": 1587
+    },
+    "cloudformation": {
+      "passed": 2818,
+      "total": 3433
+    },
+    "apigatewayv2": {
+      "passed": 198,
+      "total": 2794
+    },
+    "events": {
+      "passed": 1940,
+      "total": 2119
     },
     "wafv2": {
       "passed": 1940,

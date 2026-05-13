@@ -139,6 +139,8 @@ pub fn service_protocol(service_name: &str) -> Protocol {
         "ses" => Protocol::Rest,
         "bedrock" => Protocol::Rest,
         "bedrock-runtime" => Protocol::Rest,
+        "bedrock-agent" => Protocol::Rest,
+        "bedrock-agent-runtime" => Protocol::Rest,
         "scheduler" => Protocol::Rest,
         // awsQuery services — RDS, ElastiCache, ELBv2 — explicitly listed
         // for clarity instead of relying on the default fall-through.
