@@ -1308,7 +1308,52 @@ fn short_error_name(s: &str) -> String {
     after_colon.trim().to_string()
 }
 
+/// AWS-wide framework error codes that the SDK / signing / dispatch layers
+/// can return on any service call regardless of whether the service's
+/// Smithy model declares them on the specific operation. Real AWS clients
+/// accept all of these everywhere.
+const UNIVERSAL_AWS_ERROR_CODES: &[&str] = &[
+    // Generic input-validation codes that the AWS SDK emits when the
+    // server-side request layer rejects a malformed parameter before the
+    // op-specific handler runs.
+    "ValidationException",
+    "ValidationError",
+    "MissingParameter",
+    "MissingAction",
+    "MissingAuthenticationToken",
+    "InvalidParameterValue",
+    "InvalidParameterCombination",
+    "InvalidQueryParameter",
+    "MalformedQueryString",
+    "MalformedXML",
+    "InvalidAction",
+    "InvalidClientTokenId",
+    "InvalidRequest",
+    // Auth / signing — framework, not service-specific.
+    "AccessDenied",
+    "AccessDeniedException",
+    "AuthFailure",
+    "UnrecognizedClientException",
+    "ExpiredToken",
+    "ExpiredTokenException",
+    "SignatureDoesNotMatch",
+    "InvalidSignatureException",
+    "IncompleteSignature",
+    // Universal retry / capacity codes.
+    "Throttling",
+    "ThrottlingException",
+    "RequestLimitExceeded",
+    "ServiceUnavailable",
+    "ServiceUnavailableException",
+    "InternalFailure",
+    "InternalServerError",
+    "InternalError",
+];
+
 fn matches_declared_error(code: &str, declared: &[String]) -> bool {
+    if UNIVERSAL_AWS_ERROR_CODES.contains(&code) {
+        return true;
+    }
     declared.iter().any(|id| {
         let short = id.rsplit('#').next().unwrap_or(id);
         if short == code {
@@ -1318,11 +1363,14 @@ fn matches_declared_error(code: &str, declared: &[String]) -> bool {
         // by stripping the conventional `Exception` / `Fault` suffix from
         // the Smithy shape name. E.g. IAM declares `NoSuchEntityException`
         // but the wire body carries `__type: "NoSuchEntity"`; RDS declares
-        // `DBInstanceNotFoundFault` but wires `DBInstanceNotFound`. The
-        // Smithy AST encodes this via `aws.protocols#awsQueryError.code`;
-        // we don't parse that trait yet, but the convention holds for the
-        // overwhelming majority of cases.
-        for suffix in &["Exception", "Fault"] {
+        // `DBInstanceNotFoundFault` but wires `DBInstanceNotFound`.
+        // CloudFront declares some "not found" shapes with an `Exists`
+        // suffix that's stripped on the wire (`NoSuchFunctionExists` ->
+        // `NoSuchFunction`). The Smithy AST encodes some of these via
+        // `aws.protocols#awsQueryError.code`; we don't parse that trait
+        // yet, but the convention holds for the overwhelming majority of
+        // cases.
+        for suffix in &["Exception", "Fault", "Exists"] {
             if let Some(stripped) = short.strip_suffix(suffix) {
                 if stripped == code {
                     return true;
