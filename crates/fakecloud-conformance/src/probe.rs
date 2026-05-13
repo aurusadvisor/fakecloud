@@ -284,6 +284,16 @@ pub fn probe_variant_with_model(
                         model,
                     ));
                 }
+                // Filter out `UnexpectedField` violations — AWS SDK clients
+                // are forward-compatible to extra fields the server adds.
+                // That's how AWS rolls out new operation outputs without
+                // breaking old SDKs. Treating them as a probe failure
+                // punishes legitimate server behavior. Genuine response-shape
+                // bugs still fail via `MissingField` (required), `WrongType`,
+                // or `ParseError`.
+                all_violations.retain(|v| {
+                    !matches!(v, shape_validator::ShapeViolation::UnexpectedField { .. })
+                });
                 if !all_violations.is_empty() {
                     let msg = all_violations
                         .iter()
