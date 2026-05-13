@@ -375,6 +375,18 @@ fn validate_shape(
         return;
     }
 
+    // JSON `null` represents an absent optional member. Required members
+    // are already enforced by `validate_structure` via the missing-key
+    // check on `obj.contains_key(...)` — but `null` is technically a
+    // present key, so we'd previously fall through to a string-vs-null
+    // WrongType error. That's wrong: AWS services routinely emit
+    // `"NextToken": null` to indicate no further pages, and the SDK
+    // treats it identically to the field being absent. Skip primitive
+    // type validation when the value is null.
+    if value.is_null() {
+        return;
+    }
+
     let shape_type = match effective_shape_type(model, shape_id) {
         Some(st) => st,
         None => return, // Unknown shape; skip validation
