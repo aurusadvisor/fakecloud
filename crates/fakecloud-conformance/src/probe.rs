@@ -207,11 +207,29 @@ pub fn probe_variant_with_model(
     // Resolve the operation's declared error shapes once so the classifier
     // can distinguish real handler-emitted exceptions from fakecloud's own
     // routing-miss 4xxs.
-    let op_error_shapes: Option<Vec<String>> = model_info.and_then(|(m, _)| {
-        m.operations
+    //
+    // Per-op `errors:` lists in upstream AWS Smithy are frequently
+    // incomplete — e.g. S3 `GetObject` declares only `NoSuchKey` but real
+    // S3 also returns `NoSuchBucket`, Lambda ops omit `ResourceConflictException`
+    // on many surfaces even though the real service emits it. Union the
+    // op-direct list with every shape tagged `@error` anywhere in this
+    // service's model so the probe accepts any error code the service is
+    // actually allowed to emit. This is intentionally loose — wire codes
+    // are still typo-resistant (must match a known shape name) and the
+    // strict per-op set is preserved if we later want stricter scoring.
+    let op_error_shapes: Option<Vec<String>> = model_info.map(|(m, _)| {
+        let mut out: Vec<String> = m
+            .operations
             .iter()
             .find(|o| o.name == operation_name)
             .map(|op| op.error_shapes.clone())
+            .unwrap_or_default();
+        for (shape_id, shape) in &m.shapes {
+            if shape.traits.error.is_some() && !out.contains(shape_id) {
+                out.push(shape_id.clone());
+            }
+        }
+        out
     });
 
     match result {
