@@ -1288,7 +1288,25 @@ fn short_error_name(s: &str) -> String {
 fn matches_declared_error(code: &str, declared: &[String]) -> bool {
     declared.iter().any(|id| {
         let short = id.rsplit('#').next().unwrap_or(id);
-        short == code
+        if short == code {
+            return true;
+        }
+        // AWS awsQuery / awsQueryCompat services rename the wire error code
+        // by stripping the conventional `Exception` / `Fault` suffix from
+        // the Smithy shape name. E.g. IAM declares `NoSuchEntityException`
+        // but the wire body carries `__type: "NoSuchEntity"`; RDS declares
+        // `DBInstanceNotFoundFault` but wires `DBInstanceNotFound`. The
+        // Smithy AST encodes this via `aws.protocols#awsQueryError.code`;
+        // we don't parse that trait yet, but the convention holds for the
+        // overwhelming majority of cases.
+        for suffix in &["Exception", "Fault"] {
+            if let Some(stripped) = short.strip_suffix(suffix) {
+                if stripped == code {
+                    return true;
+                }
+            }
+        }
+        false
     })
 }
 
