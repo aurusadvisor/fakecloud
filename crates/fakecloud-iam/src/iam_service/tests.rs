@@ -4178,10 +4178,7 @@ fn set_default_policy_version_short_arn_emits_invalid_input() {
 fn create_login_profile_missing_password_emits_password_policy_violation() {
     let svc = make_service();
     let err = svc
-        .create_login_profile(&make_request(
-            "CreateLoginProfile",
-            vec![("UserName", "u")],
-        ))
+        .create_login_profile(&make_request("CreateLoginProfile", vec![("UserName", "u")]))
         .err()
         .unwrap();
     assert_error_code(err, "PasswordPolicyViolation");
