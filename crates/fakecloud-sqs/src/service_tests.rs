@@ -200,7 +200,9 @@ fn get_queue_url_nonexistent() {
     let svc = make_service();
     let req = make_request("GetQueueUrl", json!({ "QueueName": "nope" }));
     let err = expect_err(svc.get_queue_url(&req));
-    assert!(err.to_string().contains("QueueDoesNotExist"));
+    assert!(err
+        .to_string()
+        .contains("AWS.SimpleQueueService.NonExistentQueue"));
 }
 
 #[test]
@@ -1224,7 +1226,7 @@ fn get_queue_url_not_found() {
     let svc = make_service();
     let req = make_request("GetQueueUrl", json!({"QueueName": "ghost"}));
     let err = expect_err(svc.get_queue_url(&req));
-    assert_eq!(err.code(), "QueueDoesNotExist");
+    assert_eq!(err.code(), "AWS.SimpleQueueService.NonExistentQueue");
 }
 
 #[test]
@@ -1235,7 +1237,7 @@ fn delete_queue_not_found() {
         json!({"QueueUrl": "http://localhost/123/ghost"}),
     );
     let err = expect_err(svc.delete_queue(&req));
-    assert_eq!(err.code(), "QueueDoesNotExist");
+    assert_eq!(err.code(), "AWS.SimpleQueueService.NonExistentQueue");
 }
 
 #[test]
@@ -1246,7 +1248,7 @@ fn send_message_queue_not_found() {
         json!({"QueueUrl": "http://localhost/123/ghost", "MessageBody": "hi"}),
     );
     let err = expect_err(svc.send_message(&req));
-    assert_eq!(err.code(), "QueueDoesNotExist");
+    assert_eq!(err.code(), "AWS.SimpleQueueService.NonExistentQueue");
 }
 
 #[tokio::test]
@@ -1257,7 +1259,7 @@ async fn receive_message_queue_not_found() {
         json!({"QueueUrl": "http://localhost/123/ghost"}),
     );
     let err = expect_err(svc.receive_message(&req).await);
-    assert_eq!(err.code(), "QueueDoesNotExist");
+    assert_eq!(err.code(), "AWS.SimpleQueueService.NonExistentQueue");
 }
 
 #[test]
@@ -1268,7 +1270,7 @@ fn get_queue_attributes_not_found() {
         json!({"QueueUrl": "http://localhost/123/ghost", "AttributeNames": ["All"]}),
     );
     let err = expect_err(svc.get_queue_attributes(&req));
-    assert_eq!(err.code(), "QueueDoesNotExist");
+    assert_eq!(err.code(), "AWS.SimpleQueueService.NonExistentQueue");
 }
 
 #[test]
@@ -1279,7 +1281,7 @@ fn set_queue_attributes_not_found() {
         json!({"QueueUrl": "http://localhost/123/ghost", "Attributes": {"VisibilityTimeout": "30"}}),
     );
     let err = expect_err(svc.set_queue_attributes(&req));
-    assert_eq!(err.code(), "QueueDoesNotExist");
+    assert_eq!(err.code(), "AWS.SimpleQueueService.NonExistentQueue");
 }
 
 #[test]
@@ -1290,7 +1292,7 @@ fn purge_queue_not_found() {
         json!({"QueueUrl": "http://localhost/123/ghost"}),
     );
     let err = expect_err(svc.purge_queue(&req));
-    assert_eq!(err.code(), "QueueDoesNotExist");
+    assert_eq!(err.code(), "AWS.SimpleQueueService.NonExistentQueue");
 }
 
 #[test]
@@ -1301,7 +1303,7 @@ fn tag_queue_not_found() {
         json!({"QueueUrl": "http://localhost/123/ghost", "Tags": {"k": "v"}}),
     );
     let err = expect_err(svc.tag_queue(&req));
-    assert_eq!(err.code(), "QueueDoesNotExist");
+    assert_eq!(err.code(), "AWS.SimpleQueueService.NonExistentQueue");
 }
 
 #[test]
@@ -1312,7 +1314,7 @@ fn untag_queue_not_found() {
         json!({"QueueUrl": "http://localhost/123/ghost", "TagKeys": ["k"]}),
     );
     let err = expect_err(svc.untag_queue(&req));
-    assert_eq!(err.code(), "QueueDoesNotExist");
+    assert_eq!(err.code(), "AWS.SimpleQueueService.NonExistentQueue");
 }
 
 #[test]
@@ -1323,7 +1325,7 @@ fn list_queue_tags_not_found() {
         json!({"QueueUrl": "http://localhost/123/ghost"}),
     );
     let err = expect_err(svc.list_queue_tags(&req));
-    assert_eq!(err.code(), "QueueDoesNotExist");
+    assert_eq!(err.code(), "AWS.SimpleQueueService.NonExistentQueue");
 }
 
 #[test]
@@ -1334,7 +1336,7 @@ fn change_message_visibility_not_found() {
         json!({"QueueUrl": "http://localhost/123/ghost", "ReceiptHandle": "rh", "VisibilityTimeout": 30}),
     );
     let err = expect_err(svc.change_message_visibility(&req));
-    assert_eq!(err.code(), "QueueDoesNotExist");
+    assert_eq!(err.code(), "AWS.SimpleQueueService.NonExistentQueue");
 }
 
 #[test]
@@ -1345,7 +1347,7 @@ fn delete_message_queue_not_found() {
         json!({"QueueUrl": "http://localhost/123/ghost", "ReceiptHandle": "rh"}),
     );
     let err = expect_err(svc.delete_message(&req));
-    assert_eq!(err.code(), "QueueDoesNotExist");
+    assert_eq!(err.code(), "AWS.SimpleQueueService.NonExistentQueue");
 }
 
 #[test]
