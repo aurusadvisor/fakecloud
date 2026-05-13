@@ -305,8 +305,8 @@ impl ElastiCacheService {
                             let mut accounts = state.write();
                             if let Some(s) = accounts.get_mut(&c.account_id) {
                                 if let Some(cluster) = s.cache_clusters.get_mut(&c.id) {
-                                    cluster.cache_cluster_status = "incompatible-network"
-                                        .to_string();
+                                    cluster.cache_cluster_status =
+                                        "incompatible-network".to_string();
                                 }
                             }
                         }
