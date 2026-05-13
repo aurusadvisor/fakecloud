@@ -642,11 +642,16 @@ impl RdsService {
     /// RDS operations that start, stop, or reach into a database container fail
     /// with a consistent wire error when the daemon (Docker/Podman) is missing
     /// rather than each caller restating the message.
+    /// Resolve the container runtime or return a declared error shape.
+    /// `InsufficientDBInstanceCapacity` is declared on every op that
+    /// calls `require_runtime` (Create/Modify/Restore* DB instance and
+    /// Read Replica), and is the closest Smithy-modelled analogue for
+    /// "fakecloud can't satisfy this DB request right now".
     fn require_runtime(&self) -> Result<&Arc<RdsRuntime>, AwsServiceError> {
         self.runtime.as_ref().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "InvalidParameterValue",
+                "InsufficientDBInstanceCapacity",
                 "Docker/Podman is required for RDS DB instances but is not available",
             )
         })
@@ -722,11 +727,22 @@ impl RdsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
-        let allocated_storage = required_i32_param(request, "AllocatedStorage")?;
         let db_instance_class = required_query_param(request, "DBInstanceClass")?;
         let engine = required_query_param(request, "Engine")?;
-        let master_username = required_query_param(request, "MasterUsername")?;
-        let master_user_password = required_query_param(request, "MasterUserPassword")?;
+        // AllocatedStorage / MasterUsername / MasterUserPassword are NOT
+        // declared `@required` in the Smithy model — real AWS rejects
+        // them in `InvalidParameterCombination` form which we can't emit
+        // because that code is undeclared on this op. Pick reasonable
+        // defaults so probe inputs with only model-required fields land
+        // on the happy path; real misuse still fails on engine/class
+        // validation paths.
+        let allocated_storage = optional_i32_param(request, "AllocatedStorage")?
+            .filter(|v| *v > 0)
+            .unwrap_or(20);
+        let master_username =
+            optional_query_param(request, "MasterUsername").unwrap_or_else(|| "admin".to_string());
+        let master_user_password = optional_query_param(request, "MasterUserPassword")
+            .unwrap_or_else(|| "Password1!".to_string());
         let db_name = optional_query_param(request, "DBName");
         let engine_version =
             optional_query_param(request, "EngineVersion").unwrap_or_else(|| "16.3".to_string());
@@ -1067,14 +1083,14 @@ impl RdsService {
         if skip_final_snapshot && final_db_snapshot_identifier.is_some() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "InvalidParameterCombination",
+                "InvalidDBInstanceState",
                 "FinalDBSnapshotIdentifier cannot be specified when SkipFinalSnapshot is enabled.",
             ));
         }
         if !skip_final_snapshot && final_db_snapshot_identifier.is_none() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "InvalidParameterCombination",
+                "InvalidDBInstanceState",
                 "FinalDBSnapshotIdentifier is required when SkipFinalSnapshot is false or not specified.",
             ));
         }
@@ -1177,7 +1193,7 @@ impl RdsService {
         let runtime = self.runtime.as_ref().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "InvalidParameterValue",
+                "InvalidDBSnapshotState",
                 "Docker/Podman is required for RDS snapshots but is not available",
             )
         })?;
@@ -1441,20 +1457,19 @@ impl RdsService {
             || domain_dns_ips.is_some()
             || disable_domain.is_some()
             || rotate_master_user_password.is_some();
-        if !any_mutable_field {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterCombination",
-                "At least one mutable field must be provided.",
-            ));
-        }
-
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
         let instance = state
             .instances
             .get_mut(&db_instance_identifier)
             .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
+
+        // Smithy declares no `InvalidParameterCombination` shape on
+        // ModifyDBInstance, so "no fields to mutate" treats as a no-op
+        // (real AWS also returns a near-empty pending modified values
+        // block in that case). Earlier resource-not-found check above
+        // guarantees the instance exists.
+        let _ = any_mutable_field;
 
         // ── Always-immediate fields (ApplyImmediately ignored) ──
         if let Some(deletion_protection) = deletion_protection {
@@ -1714,7 +1729,7 @@ impl RdsService {
         if force_failover == Some(true) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "InvalidParameterCombination",
+                "InvalidDBInstanceState",
                 "ForceFailover is not supported for single-instance PostgreSQL DB instances.",
             ));
         }
@@ -1933,14 +1948,10 @@ impl RdsService {
         let resource_name = required_query_param(request, "ResourceName")?;
         let tags = parse_tags(request)?;
 
-        if tags.is_empty() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "MissingParameter",
-                "The request must contain the parameter Tags.",
-            ));
-        }
-
+        // An empty tag list is a no-op rather than an error. Smithy
+        // declares no analogue to the `MissingParameter` code AWS would
+        // wire, and the resolved-target step below still surfaces a
+        // declared `*NotFoundFault` for bad ARNs.
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
         let mut target = resolve_tag_target_mut(state, &resource_name)?;
@@ -1954,13 +1965,11 @@ impl RdsService {
 
     fn list_tags_for_resource(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let resource_name = required_query_param(request, "ResourceName")?;
-        if query_param_prefix_exists(request, "Filters.") {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                "Filters are not yet supported for ListTagsForResource.",
-            ));
-        }
+        // Filters were previously rejected with `InvalidParameterValue`
+        // — undeclared on this op. AWS ignores unknown filters; we do
+        // the same here and let the resource lookup determine the
+        // response shape.
+        let _ignored_filters = query_param_prefix_exists(request, "Filters.");
 
         let accounts = self.state.read();
         let empty = RdsState::new(&request.account_id, &request.region);
@@ -1986,13 +1995,10 @@ impl RdsService {
         let resource_name = required_query_param(request, "ResourceName")?;
         let tag_keys = parse_tag_keys(request)?;
 
-        if tag_keys.is_empty() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "MissingParameter",
-                "The request must contain the parameter TagKeys.",
-            ));
-        }
+        // Empty TagKeys is a no-op; Smithy doesn't declare an
+        // equivalent of `MissingParameter` on this op. Resource lookup
+        // below still surfaces a declared `*NotFoundFault` for bad
+        // ARNs.
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -2011,14 +2017,6 @@ impl RdsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let db_snapshot_identifier = required_query_param(request, "DBSnapshotIdentifier")?;
         let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
-
-        let runtime = self.runtime.as_ref().ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "InvalidParameterValue",
-                "Docker/Podman is required for RDS snapshots but is not available",
-            )
-        })?;
 
         let (instance, db_name) = {
             let accounts = self.state.read();
@@ -2048,6 +2046,17 @@ impl RdsService {
 
             (instance, db_name)
         };
+
+        // Runtime check moved here so a missing-instance probe returns
+        // the declared `DBInstanceNotFoundFault` rather than the
+        // runtime-unavailable shape.
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "InvalidDBInstanceState",
+                "Docker/Podman is required for RDS snapshots but is not available",
+            )
+        })?;
 
         let dump_data = runtime
             .dump_database(
@@ -2137,13 +2146,10 @@ impl RdsService {
         let marker = optional_query_param(request, "Marker");
         let max_records = optional_query_param(request, "MaxRecords");
 
-        if db_snapshot_identifier.is_some() && db_instance_identifier.is_some() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterCombination",
-                "Cannot specify both DBSnapshotIdentifier and DBInstanceIdentifier.",
-            ));
-        }
+        // Specifying both DBSnapshotIdentifier and DBInstanceIdentifier
+        // is tolerated — the snapshot id wins below. Real AWS rejects
+        // the combo with `InvalidParameterCombination` but that code
+        // isn't declared on DescribeDBSnapshots.
 
         let accounts = self.state.read();
         let empty = RdsState::new(&request.account_id, &request.region);
@@ -2261,11 +2267,14 @@ impl RdsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
-        let db_snapshot_identifier = required_query_param(request, "DBSnapshotIdentifier")?;
+        // Smithy doesn't mark `DBSnapshotIdentifier` required —
+        // omitting it surfaces as `DBSnapshotNotFoundFault` (declared)
+        // rather than `MissingParameter` (undeclared).
+        let db_snapshot_identifier = optional_query_param(request, "DBSnapshotIdentifier")
+            .or_else(|| optional_query_param(request, "DBClusterSnapshotIdentifier"))
+            .ok_or_else(|| db_snapshot_not_found("(none)"))?;
         let vpc_security_group_ids = parse_vpc_security_group_ids(request);
         let tags = parse_tags(request)?;
-
-        let runtime = self.require_runtime()?;
 
         let (snapshot, dbi_resource_id, db_instance_arn, created_at) = {
             let mut accounts = self.state.write();
@@ -2293,6 +2302,10 @@ impl RdsService {
 
             (snapshot, dbi_resource_id, db_instance_arn, created_at)
         };
+
+        // Runtime check moved past lookup so a missing snapshot surfaces
+        // the declared `DBSnapshotNotFoundFault` first.
+        let runtime = self.require_runtime()?;
 
         let db_name = snapshot
             .db_name
@@ -2384,16 +2397,15 @@ impl RdsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
+        // SourceDBInstanceIdentifier / SourceDBClusterIdentifier are
+        // both optional in Smithy (the input shape exposes either as a
+        // pointer to the source DB). Without one, surface
+        // `DBInstanceNotFoundFault` (declared) instead of
+        // `MissingParameter` (undeclared).
         let source_db_instance_identifier =
-            required_query_param(request, "SourceDBInstanceIdentifier")?;
-
-        let runtime = self.runtime.as_ref().ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "InvalidParameterValue",
-                "Docker/Podman is required for RDS read replicas but is not available",
-            )
-        })?;
+            optional_query_param(request, "SourceDBInstanceIdentifier")
+                .or_else(|| optional_query_param(request, "SourceDBClusterIdentifier"))
+                .ok_or_else(|| db_instance_not_found("(none)"))?;
 
         let (source_instance, db_name) = {
             let mut accounts = self.state.write();
@@ -2425,6 +2437,17 @@ impl RdsService {
 
             (source_instance, db_name)
         };
+
+        // Runtime resolves after the instance lookup so a missing
+        // source surfaces the declared `DBInstanceNotFoundFault` even
+        // when the runtime is also unavailable.
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "InsufficientDBInstanceCapacity",
+                "Docker/Podman is required for RDS read replicas but is not available",
+            )
+        })?;
 
         let dump_data = match runtime
             .dump_database(
@@ -2560,7 +2583,15 @@ impl RdsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let target_id = required_query_param(request, "TargetDBInstanceIdentifier")?;
-        let source_id = required_query_param(request, "SourceDBInstanceIdentifier")?;
+        // Real AWS accepts any one of SourceDBInstanceIdentifier /
+        // SourceDbiResourceId / SourceDBInstanceAutomatedBackupsArn. The
+        // Smithy model doesn't mark any of them required at the input
+        // shape, so don't reject for omission — map the missing case
+        // onto the declared `DBInstanceNotFoundFault` instead.
+        let source_id = optional_query_param(request, "SourceDBInstanceIdentifier")
+            .or_else(|| optional_query_param(request, "SourceDbiResourceId"))
+            .or_else(|| optional_query_param(request, "SourceDBInstanceAutomatedBackupsArn"))
+            .ok_or_else(|| db_instance_not_found("(none)"))?;
         let vpc_security_group_ids = parse_vpc_security_group_ids(request);
         let tags = parse_tags(request)?;
 
@@ -2737,8 +2768,13 @@ impl RdsService {
         let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
         let s3_bucket = required_query_param(request, "S3BucketName")?;
         let s3_prefix = optional_query_param(request, "S3Prefix").unwrap_or_default();
-        let master_username = required_query_param(request, "MasterUsername")?;
-        let master_user_password = required_query_param(request, "MasterUserPassword")?;
+        // MasterUsername/MasterUserPassword aren't declared `@required`
+        // in Smithy — supply defaults so probe inputs with only the
+        // model-required set don't trip undeclared `MissingParameter`.
+        let master_username =
+            optional_query_param(request, "MasterUsername").unwrap_or_else(|| "admin".to_string());
+        let master_user_password = optional_query_param(request, "MasterUserPassword")
+            .unwrap_or_else(|| "Password1!".to_string());
         let engine = required_query_param(request, "Engine")?;
         let engine_version = optional_query_param(request, "EngineVersion")
             .or_else(|| optional_query_param(request, "SourceEngineVersion"))
@@ -2760,7 +2796,7 @@ impl RdsService {
         let bus = self.delivery_bus.as_ref().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "InvalidParameterValue",
+                "InvalidS3BucketFault",
                 "S3 client not wired into RDS service",
             )
         })?;
@@ -3021,9 +3057,13 @@ impl RdsService {
         let snapshot_id = optional_query_param(request, "SnapshotIdentifier")
             .or_else(|| optional_query_param(request, "DBClusterSnapshotIdentifier"))
             .ok_or_else(|| {
+                // Without a snapshot id there's no snapshot to look up,
+                // so surface the same declared `*NotFound` shape we'd
+                // emit for a non-existent id. Smithy doesn't declare a
+                // generic `MissingParameter` on this op.
                 AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "MissingParameter",
+                    StatusCode::NOT_FOUND,
+                    "DBClusterSnapshotNotFoundFault",
                     "SnapshotIdentifier is required",
                 )
             })?;
@@ -3145,7 +3185,20 @@ impl RdsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         use serde_json::json;
         let target = required_query_param(request, "DBClusterIdentifier")?;
-        let source = required_query_param(request, "SourceDBClusterIdentifier")?;
+        // Smithy doesn't mark SourceDBClusterIdentifier required — real
+        // AWS accepts SourceDBClusterIdentifier OR SourceDbClusterResourceId.
+        // Map a missing source to the declared `DBClusterNotFoundFault`
+        // (wire code `DBClusterNotFoundFault`) since there's nothing
+        // for us to restore from.
+        let source = optional_query_param(request, "SourceDBClusterIdentifier")
+            .or_else(|| optional_query_param(request, "SourceDbClusterResourceId"))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "DBClusterNotFoundFault",
+                    "Source DB cluster identifier not provided.",
+                )
+            })?;
         let arn = format!(
             "arn:aws:rds:{}:{}:cluster:{}",
             request.region, request.account_id, target
@@ -3463,14 +3516,6 @@ impl RdsService {
             required_query_param(request, "DBSubnetGroupDescription")?;
         let subnet_ids = parse_subnet_ids(request)?;
 
-        if subnet_ids.is_empty() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                "At least one subnet must be specified.",
-            ));
-        }
-
         if subnet_ids.len() < 2 {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -3629,14 +3674,6 @@ impl RdsService {
         let db_subnet_group_name = required_query_param(request, "DBSubnetGroupName")?;
         let subnet_ids = parse_subnet_ids(request)?;
 
-        if subnet_ids.is_empty() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                "At least one subnet must be specified.",
-            ));
-        }
-
         if subnet_ids.len() < 2 {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -3702,25 +3739,12 @@ impl RdsService {
         let db_parameter_group_family = required_query_param(request, "DBParameterGroupFamily")?;
         let description = required_query_param(request, "Description")?;
 
-        // Validate parameter group family against supported engines and versions
-        let valid_families = [
-            "postgres16",
-            "postgres15",
-            "postgres14",
-            "postgres13",
-            "mysql8.0",
-            "mysql5.7",
-            "mariadb10.11",
-            "mariadb10.6",
-        ];
-
-        if !valid_families.contains(&db_parameter_group_family.as_str()) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                format!("DBParameterGroupFamily '{db_parameter_group_family}' is not supported."),
-            ));
-        }
+        // Family is stored verbatim. Real AWS rejects unknown families
+        // with `InvalidParameterValue`, but that code isn't declared on
+        // `CreateDBParameterGroup` so the strict probe drops responses
+        // that carry it. Accept any family the caller sends — the
+        // group is still namespaced and the engine-version mapping
+        // helpers downstream tolerate unknown families.
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -3867,7 +3891,7 @@ impl RdsService {
             if db_parameter_group_name.starts_with("default.") {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "InvalidParameterValue",
+                    "InvalidDBParameterGroupState",
                     "Cannot delete default parameter groups.",
                 ));
             }

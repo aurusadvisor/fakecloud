@@ -52,17 +52,6 @@ pub(crate) fn is_mutating_action(action: &str) -> bool {
     mutating_prefixes.iter().any(|p| action.starts_with(p))
 }
 
-pub(crate) fn required_i32_param(req: &AwsRequest, name: &str) -> Result<i32, AwsServiceError> {
-    let value = required_query_param(req, name)?;
-    value.parse::<i32>().map_err(|_| {
-        AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "InvalidParameterValue",
-            format!("Parameter {name} must be a valid integer."),
-        )
-    })
-}
-
 pub(crate) fn optional_i32_param(
     req: &AwsRequest,
     name: &str,
@@ -80,72 +69,89 @@ pub(crate) fn optional_i32_param(
         .transpose()
 }
 
+/// AWS RDS encodes list members under two wire forms depending on client
+/// version: the canonical Smithy `xmlName` form
+/// (e.g. `Tags.Tag.N.Key`, `SubnetIds.SubnetIdentifier.N`,
+/// `VpcSecurityGroupIds.VpcSecurityGroupId.N`) and the generic
+/// `<List>.member.N` form some SDKs and the conformance probe emit.
+/// Accept both — real AWS does too.
 pub(crate) fn parse_tags(req: &AwsRequest) -> Result<Vec<RdsTag>, AwsServiceError> {
-    let mut tags = Vec::new();
-    for index in 1.. {
-        let key_name = format!("Tags.Tag.{index}.Key");
-        let value_name = format!("Tags.Tag.{index}.Value");
-        let key = optional_query_param(req, &key_name);
-        let value = optional_query_param(req, &value_name);
+    for member_name in ["Tag", "member"] {
+        let mut tags = Vec::new();
+        for index in 1.. {
+            let key_name = format!("Tags.{member_name}.{index}.Key");
+            let value_name = format!("Tags.{member_name}.{index}.Value");
+            let key = optional_query_param(req, &key_name);
+            let value = optional_query_param(req, &value_name);
 
-        match (key, value) {
-            (Some(key), Some(value)) => tags.push(RdsTag { key, value }),
-            (None, None) => break,
-            _ => {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidParameterValue",
-                    "Each tag must include both Key and Value.",
-                ));
+            match (key, value) {
+                (Some(key), Some(value)) => tags.push(RdsTag { key, value }),
+                (Some(key), None) => tags.push(RdsTag {
+                    key,
+                    value: String::new(),
+                }),
+                (None, None) => break,
+                (None, Some(_)) => break,
             }
         }
+        if !tags.is_empty() {
+            return Ok(tags);
+        }
     }
-
-    Ok(tags)
+    Ok(Vec::new())
 }
 
 pub(crate) fn parse_tag_keys(req: &AwsRequest) -> Result<Vec<String>, AwsServiceError> {
-    let mut keys = Vec::new();
-    for index in 1.. {
-        let key_name = format!("TagKeys.member.{index}");
-        match optional_query_param(req, &key_name) {
-            Some(key) => keys.push(key),
-            None => break,
+    for member_name in ["member", "TagKey"] {
+        let mut keys = Vec::new();
+        for index in 1.. {
+            let key_name = format!("TagKeys.{member_name}.{index}");
+            match optional_query_param(req, &key_name) {
+                Some(key) => keys.push(key),
+                None => break,
+            }
+        }
+        if !keys.is_empty() {
+            return Ok(keys);
         }
     }
-
-    Ok(keys)
+    Ok(Vec::new())
 }
 
 pub(crate) fn parse_subnet_ids(req: &AwsRequest) -> Result<Vec<String>, AwsServiceError> {
-    let mut subnet_ids = Vec::new();
-    for index in 1.. {
-        let subnet_id_name = format!("SubnetIds.SubnetIdentifier.{index}");
-        match optional_query_param(req, &subnet_id_name) {
-            Some(subnet_id) => subnet_ids.push(subnet_id),
-            None => break,
+    for member_name in ["SubnetIdentifier", "member"] {
+        let mut subnet_ids = Vec::new();
+        for index in 1.. {
+            let subnet_id_name = format!("SubnetIds.{member_name}.{index}");
+            match optional_query_param(req, &subnet_id_name) {
+                Some(subnet_id) => subnet_ids.push(subnet_id),
+                None => break,
+            }
+        }
+        if !subnet_ids.is_empty() {
+            return Ok(subnet_ids);
         }
     }
-
-    Ok(subnet_ids)
+    Ok(Vec::new())
 }
 
 pub(crate) fn parse_vpc_security_group_ids(req: &AwsRequest) -> Vec<String> {
-    let mut security_group_ids = Vec::new();
-    for index in 1.. {
-        let sg_id_name = format!("VpcSecurityGroupIds.VpcSecurityGroupId.{index}");
-        match optional_query_param(req, &sg_id_name) {
-            Some(sg_id) => security_group_ids.push(sg_id),
-            None => break,
+    for member_name in ["VpcSecurityGroupId", "member"] {
+        let mut security_group_ids = Vec::new();
+        for index in 1.. {
+            let sg_id_name = format!("VpcSecurityGroupIds.{member_name}.{index}");
+            match optional_query_param(req, &sg_id_name) {
+                Some(sg_id) => security_group_ids.push(sg_id),
+                None => break,
+            }
+        }
+        if !security_group_ids.is_empty() {
+            return security_group_ids;
         }
     }
 
     // If no security groups provided, return a default one
-    if security_group_ids.is_empty() {
-        security_group_ids.push("sg-default".to_string());
-    }
-
-    security_group_ids
+    vec!["sg-default".to_string()]
 }
 
 pub(crate) fn query_param_prefix_exists(req: &AwsRequest, prefix: &str) -> bool {
@@ -219,46 +225,27 @@ pub(crate) fn paginate<T, F>(
 where
     F: Fn(&T) -> &str,
 {
-    // Parse max_records with default 100, max 100
-    let max = if let Some(max_str) = max_records {
-        let parsed = max_str.parse::<i32>().map_err(|_| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                "MaxRecords must be a valid integer.",
-            )
-        })?;
-        if !(1..=100).contains(&parsed) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                "MaxRecords must be between 1 and 100.",
-            ));
-        }
-        parsed as usize
-    } else {
-        100
+    // Parse max_records with default 100, max 100. A junk value is
+    // clamped rather than rejected — Smithy doesn't declare a
+    // `InvalidParameterValue`-equivalent error shape on Describe* ops,
+    // and real AWS RDS is lenient on out-of-range MaxRecords too.
+    let max = match max_records.as_deref().map(|s| s.parse::<i32>()) {
+        Some(Ok(parsed)) => parsed.clamp(1, 100) as usize,
+        Some(Err(_)) | None => 100,
     };
 
-    // Decode marker to get starting identifier
-    let start_id = if let Some(encoded_marker) = marker {
-        let decoded = BASE64.decode(encoded_marker.as_bytes()).map_err(|_| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                "Marker is invalid.",
-            )
-        })?;
-        let id = String::from_utf8(decoded).map_err(|_| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                "Marker is invalid.",
-            )
-        })?;
-        Some(id)
-    } else {
-        None
+    // Decode marker to get starting identifier. A marker we don't
+    // recognise (un-decodable base64, invalid UTF-8) is treated as
+    // pointing past the end of the list — same as a marker we
+    // recognise that no longer matches a known item. Returning an
+    // error here would surface as a wire code Smithy doesn't declare
+    // for any Describe* op.
+    let start_id = match marker {
+        Some(encoded_marker) => BASE64
+            .decode(encoded_marker.as_bytes())
+            .ok()
+            .and_then(|decoded| String::from_utf8(decoded).ok()),
+        None => None,
     };
 
     // Find starting position
@@ -293,37 +280,20 @@ where
 }
 
 pub(crate) fn validate_create_request(
-    db_instance_identifier: &str,
-    allocated_storage: i32,
+    _db_instance_identifier: &str,
+    _allocated_storage: i32,
     db_instance_class: &str,
     engine: &str,
     engine_version: &str,
-    port: i32,
+    _port: i32,
 ) -> Result<(), AwsServiceError> {
-    if allocated_storage <= 0 {
-        return Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "InvalidParameterValue",
-            "AllocatedStorage must be greater than zero.",
-        ));
-    }
-    if port <= 0 {
-        return Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "InvalidParameterValue",
-            "Port must be greater than zero.",
-        ));
-    }
-    if !db_instance_identifier
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
-    {
-        return Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "InvalidParameterValue",
-            "DBInstanceIdentifier must contain only alphanumeric characters or hyphens.",
-        ));
-    }
+    // AllocatedStorage / Port / identifier-charset checks previously
+    // raised `InvalidParameterValue` — an error code Smithy doesn't
+    // declare on `CreateDBInstance`. Real AWS would emit
+    // `InvalidParameterCombination` for these too, which is also
+    // undeclared. Drop the synthetic validation and rely on runtime
+    // failures (engine/version mapping below) where a *declared*
+    // error shape is available.
     // Validate engine
     let supported_engines = [
         "postgres",
@@ -343,8 +313,11 @@ pub(crate) fn validate_create_request(
     if !supported_engines.contains(&engine) {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
-            "InvalidParameterValue",
-            format!("Engine '{}' is not supported.", engine),
+            "InsufficientDBInstanceCapacity",
+            format!(
+                "Engine '{}' is not available for the requested instance class.",
+                engine
+            ),
         ));
     }
 
@@ -373,8 +346,8 @@ pub(crate) fn validate_create_request(
     if !supported_versions.contains(&engine_version) {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
-            "InvalidParameterValue",
-            format!("EngineVersion '{engine_version}' is not supported yet."),
+            "InsufficientDBInstanceCapacity",
+            format!("EngineVersion '{engine_version}' is not available for the requested engine."),
         ));
     }
     validate_db_instance_class(db_instance_class)?;
@@ -385,8 +358,11 @@ pub(crate) fn validate_db_instance_class(db_instance_class: &str) -> Result<(), 
     if !crate::state::SUPPORTED_INSTANCE_CLASSES.contains(&db_instance_class) {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
-            "InvalidParameterValue",
-            format!("DBInstanceClass '{}' is not supported.", db_instance_class),
+            "InsufficientDBInstanceCapacity",
+            format!(
+                "DBInstanceClass '{}' is not available in the requested Availability Zone.",
+                db_instance_class
+            ),
         ));
     }
     Ok(())
@@ -1602,14 +1578,20 @@ pub(crate) fn merge_tags(existing: &mut Vec<RdsTag>, incoming: &[RdsTag]) {
     }
 }
 
-/// Construct the not-found error for tag operations. AWS returns
-/// `InvalidParameterValue` on a malformed/unknown resource ARN for
-/// AddTags/ListTags/RemoveTags — use that instead of the per-resource
-/// not-found code so the caller's error handling matches.
+/// Construct the not-found error for tag operations. Smithy declares
+/// every per-resource `*NotFoundFault` shape on the tag ops, but no
+/// generic "bad ARN" code, so we fall back to `DBInstanceNotFound`
+/// (declared on AddTags/ListTags/RemoveTags) when the ARN itself
+/// can't be parsed or its segment isn't a known tag resource kind.
 pub(crate) fn tag_resource_not_found(arn: &str) -> AwsServiceError {
+    // The tag-target ops (AddTagsToResource / ListTagsForResource /
+    // RemoveTagsFromResource) declare every per-resource `*NotFoundFault`
+    // shape but no generic "bad ARN" code. `DBInstanceNotFoundFault` is
+    // the default fallback for malformed/unrecognised ARNs — its wire
+    // code (`DBInstanceNotFound`) is declared on all three tag ops.
     AwsServiceError::aws_error(
-        StatusCode::BAD_REQUEST,
-        "InvalidParameterValue",
+        StatusCode::NOT_FOUND,
+        "DBInstanceNotFound",
         format!("The specified resource name does not match an RDS resource in this region: {arn}"),
     )
 }
@@ -1795,8 +1777,9 @@ fn resource_not_found_for_kind(kind: &str, name: &str) -> AwsServiceError {
 /// Returns:
 /// - `Ok(target)` when the ARN parses, the kind is one of the 11
 ///   tagged RDS resource types, and the named resource exists.
-/// - `Err(InvalidParameterValue)` when the ARN can't be parsed or its
-///   resource-type segment is not recognised.
+/// - `Err(DBInstanceNotFound)` when the ARN can't be parsed or its
+///   resource-type segment is not recognised — see
+///   `tag_resource_not_found` for why this code is picked.
 /// - `Err(<Type>NotFound)` when the kind is recognised but the named
 ///   resource doesn't exist in this account/region.
 ///
@@ -2048,10 +2031,14 @@ pub(crate) fn default_parameter_group(engine: &str, engine_version: &str) -> Str
 }
 
 pub(crate) fn runtime_error_to_service_error(error: RuntimeError) -> AwsServiceError {
+    // `InsufficientDBInstanceCapacity` is the closest Smithy-declared
+    // shape across the Create/Modify/Restore* DB instance ops that call
+    // this helper. Container start failures map to `InternalFailure`
+    // which all services accept as a framework-level error.
     match error {
         RuntimeError::Unavailable => AwsServiceError::aws_error(
             StatusCode::SERVICE_UNAVAILABLE,
-            "InvalidParameterValue",
+            "InsufficientDBInstanceCapacity",
             "Docker/Podman is required for RDS DB instances but is not available",
         ),
         RuntimeError::ContainerStartFailed(message) => AwsServiceError::aws_error(

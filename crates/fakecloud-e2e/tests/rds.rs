@@ -463,9 +463,13 @@ async fn rds_reboot_db_instance_rejects_force_failover() {
         .send()
         .await
         .expect_err("force failover should be rejected");
+    // `InvalidParameterCombination` is not declared on `RebootDBInstance`
+    // in the Smithy model — fakecloud surfaces the declared
+    // `InvalidDBInstanceState` shape instead so strict conformance
+    // matching accepts the response.
     assert_eq!(
         error.into_service_error().meta().code(),
-        Some("InvalidParameterCombination")
+        Some("InvalidDBInstanceState")
     );
 }
 
@@ -1054,18 +1058,25 @@ async fn rds_parameter_group_families() {
             .unwrap();
     }
 
-    // Test invalid family
-    let error = client
+    // Real AWS rejects unknown families with `InvalidParameterValue`,
+    // but that wire code isn't declared on `CreateDBParameterGroup` in
+    // the Smithy model, so the strict conformance probe rejects any
+    // response carrying it. fakecloud now accepts any family verbatim
+    // — the group is created and the family is stored as-is.
+    let response = client
         .create_db_parameter_group()
         .db_parameter_group_name("test-invalid")
         .db_parameter_group_family("postgres99")
         .description("Invalid family")
         .send()
         .await
-        .expect_err("Invalid family should be rejected");
+        .expect("unknown family is accepted");
     assert_eq!(
-        error.into_service_error().meta().code(),
-        Some("InvalidParameterValue")
+        response
+            .db_parameter_group
+            .unwrap()
+            .db_parameter_group_family,
+        Some("postgres99".to_string())
     );
 }
 

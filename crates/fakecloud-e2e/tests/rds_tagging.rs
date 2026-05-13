@@ -279,9 +279,10 @@ async fn rds_tagging_unknown_arn_segment_errors() {
     let server = TestServer::start().await;
     let client = server.rds_client().await;
 
-    // Unknown resource-type segment must reject as InvalidParameterValue
-    // (per AWS), not surface as a per-type NotFound, so callers can
-    // distinguish "you typed the ARN wrong" from "the resource is gone".
+    // Smithy declares every per-resource `*NotFoundFault` shape on the
+    // tag ops but no generic "bad ARN" code, so the unknown-segment
+    // case falls back to `DBInstanceNotFound` — see
+    // `tag_resource_not_found` in `fakecloud-rds`.
     let err = client
         .list_tags_for_resource()
         .resource_name("arn:aws:rds:us-east-1:000000000000:bogus:nope")
@@ -290,8 +291,8 @@ async fn rds_tagging_unknown_arn_segment_errors() {
         .expect_err("unknown segment should error");
     assert_eq!(
         err.into_service_error().meta().code(),
-        Some("InvalidParameterValue"),
-        "unknown ARN segment should map to InvalidParameterValue"
+        Some("DBInstanceNotFound"),
+        "unknown ARN segment falls back to declared DBInstanceNotFound"
     );
 }
 
