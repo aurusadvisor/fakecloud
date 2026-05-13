@@ -1072,7 +1072,10 @@ async fn rds_parameter_group_families() {
         .await
         .expect("unknown family is accepted");
     assert_eq!(
-        response.db_parameter_group.unwrap().db_parameter_group_family,
+        response
+            .db_parameter_group
+            .unwrap()
+            .db_parameter_group_family,
         Some("postgres99".to_string())
     );
 }
