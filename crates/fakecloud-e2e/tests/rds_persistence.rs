@@ -65,23 +65,14 @@ async fn persistence_round_trip_db_instance() {
     server.restart().await;
     let client = server.rds_client().await;
 
-    let resp = client
-        .describe_db_instances()
-        .db_instance_identifier("persist-db")
-        .send()
-        .await
-        .unwrap();
-    let instances = resp.db_instances();
-    assert_eq!(instances.len(), 1, "DB instance should survive restart");
-    let inst = &instances[0];
+    // Container recovery is async (#1338): the row reloads as
+    // `starting`, then flips back to `available` once the container is
+    // healthy. Wait rather than asserting an instantaneous status.
+    let inst = helpers::wait_for_db_available(&client, "persist-db", 240).await;
     assert_eq!(inst.db_instance_identifier(), Some("persist-db"));
     assert_eq!(inst.engine(), Some("postgres"));
     assert_eq!(inst.master_username(), Some("admin"));
-    assert_eq!(
-        inst.db_instance_status(),
-        Some("available"),
-        "status should persist as `available`, not be dropped as `creating`",
-    );
+    assert_eq!(inst.db_instance_status(), Some("available"));
 }
 
 /// Backing container is recreated on restart so the persisted DB
