@@ -119,6 +119,14 @@ pub struct ShapeTraits {
     /// this member in JSON bodies. AWS restJson1 services use this to map
     /// camelCase/kebab-case JSON keys to PascalCase Smithy member names.
     pub json_name: Option<String>,
+    /// `aws.protocols#awsQueryError.code` — explicit wire code for awsQuery /
+    /// awsQueryCompat services where the Smithy shape name differs from the
+    /// `<Code>` value AWS actually returns on the wire. E.g. IAM declares the
+    /// shape `NoSuchEntityException` but wires `__type: "NoSuchEntity"`; RDS
+    /// declares `DBInstanceNotFoundFault` but wires `DBInstanceNotFound`. The
+    /// strict matcher reads this when deriving the per-shape wire code so we
+    /// don't need a suffix-stripping heuristic.
+    pub aws_query_error_code: Option<String>,
 }
 
 /// An example from `smithy.api#examples` trait on operations.
@@ -149,10 +157,14 @@ pub fn parse_model(path: &Path) -> Result<ServiceModel, String> {
         .and_then(|v| v.as_object())
         .ok_or("Missing 'shapes' in model")?;
 
-    // Find the service shape and extract operations
+    // Find the service shape and extract operations.
+    //
+    // Strict mode (post-#1342 revert): we deliberately do NOT collect the
+    // service-shape `errors:` list and union it into every op. That was a
+    // lenient acceptance hack; the strict probe matches only the op's own
+    // directly-declared error shapes.
     let mut service_name = String::new();
     let mut operation_targets: Vec<String> = Vec::new();
-    let mut service_level_errors: Vec<String> = Vec::new();
 
     for (shape_id, shape_def) in raw_shapes {
         if shape_def.get("type").and_then(|v| v.as_str()) == Some("service") {
@@ -169,18 +181,6 @@ pub fn parse_model(path: &Path) -> Result<ServiceModel, String> {
                 for res in resources {
                     if let Some(target) = res.get("target").and_then(|v| v.as_str()) {
                         collect_resource_operations(raw_shapes, target, &mut operation_targets);
-                    }
-                }
-            }
-            // Smithy lets services declare common errors once at the service
-            // shape instead of repeating them on every operation. AWS uses
-            // this for ThrottlingException, AccessDeniedException, etc., and
-            // also for service-wide "not found" forms like IAM's NoSuchEntity
-            // or S3's NoSuchBucket. They apply to every operation.
-            if let Some(errs) = shape_def.get("errors").and_then(|v| v.as_array()) {
-                for err in errs {
-                    if let Some(target) = err.get("target").and_then(|v| v.as_str()) {
-                        service_level_errors.push(target.to_string());
                     }
                 }
             }
@@ -211,7 +211,7 @@ pub fn parse_model(path: &Path) -> Result<ServiceModel, String> {
                 .and_then(|v| v.get("target"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let mut error_shapes: Vec<String> = shape_def
+            let error_shapes: Vec<String> = shape_def
                 .get("errors")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
@@ -224,12 +224,6 @@ pub fn parse_model(path: &Path) -> Result<ServiceModel, String> {
                         .collect()
                 })
                 .unwrap_or_default();
-            // Union service-level errors into every op's acceptance set.
-            for svc_err in &service_level_errors {
-                if !error_shapes.contains(svc_err) {
-                    error_shapes.push(svc_err.clone());
-                }
-            }
 
             let (http_method, http_uri, http_code) = shape_def
                 .get("traits")
@@ -529,6 +523,14 @@ fn parse_traits(raw: Option<&serde_json::Map<String, Value>>) -> ShapeTraits {
 
     if let Some(name) = raw.get("smithy.api#jsonName").and_then(|v| v.as_str()) {
         traits.json_name = Some(name.to_string());
+    }
+
+    if let Some(code) = raw
+        .get("aws.protocols#awsQueryError")
+        .and_then(|v| v.get("code"))
+        .and_then(|v| v.as_str())
+    {
+        traits.aws_query_error_code = Some(code.to_string());
     }
 
     if let Some(default) = raw.get("smithy.api#default") {

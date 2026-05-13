@@ -204,32 +204,38 @@ pub fn probe_variant_with_model(
 
     let duration_ms = start.elapsed().as_millis() as u64;
 
-    // Resolve the operation's declared error shapes once so the classifier
-    // can distinguish real handler-emitted exceptions from fakecloud's own
-    // routing-miss 4xxs.
+    // Resolve the operation's declared error wire codes once so the
+    // classifier can distinguish real handler-emitted exceptions from
+    // fakecloud's own routing-miss 4xxs.
     //
-    // Per-op `errors:` lists in upstream AWS Smithy are frequently
-    // incomplete — e.g. S3 `GetObject` declares only `NoSuchKey` but real
-    // S3 also returns `NoSuchBucket`, Lambda ops omit `ResourceConflictException`
-    // on many surfaces even though the real service emits it. Union the
-    // op-direct list with every shape tagged `@error` anywhere in this
-    // service's model so the probe accepts any error code the service is
-    // actually allowed to emit. This is intentionally loose — wire codes
-    // are still typo-resistant (must match a known shape name) and the
-    // strict per-op set is preserved if we later want stricter scoring.
+    // Strict mode: only the op's own `errors:` list counts. We do NOT union
+    // every @error-tagged shape from the service model (that was the #1342
+    // loosening) — if a service genuinely emits an error AWS Smithy doesn't
+    // declare, we want it surfaced as UNDECLARED_ERROR so it gets reported
+    // against the right service, not silently accepted.
+    //
+    // For each declared shape we derive the wire code: the
+    // `aws.protocols#awsQueryError.code` trait if present (covers
+    // IAM/RDS/etc. where the shape name and wire `<Code>` differ), else
+    // the shape's short name (after `#`).
     let op_error_shapes: Option<Vec<String>> = model_info.map(|(m, _)| {
-        let mut out: Vec<String> = m
+        let declared_shape_ids: Vec<String> = m
             .operations
             .iter()
             .find(|o| o.name == operation_name)
             .map(|op| op.error_shapes.clone())
             .unwrap_or_default();
-        for (shape_id, shape) in &m.shapes {
-            if shape.traits.error.is_some() && !out.contains(shape_id) {
-                out.push(shape_id.clone());
-            }
-        }
-        out
+        declared_shape_ids
+            .iter()
+            .map(|shape_id| {
+                if let Some(shape) = m.shapes.get(shape_id) {
+                    if let Some(code) = &shape.traits.aws_query_error_code {
+                        return code.clone();
+                    }
+                }
+                shape_id.rsplit('#').next().unwrap_or(shape_id).to_string()
+            })
+            .collect()
     });
 
     match result {
@@ -1362,89 +1368,27 @@ fn short_error_name(s: &str) -> String {
     after_colon.trim().to_string()
 }
 
-/// AWS-wide framework error codes that the SDK / signing / dispatch layers
-/// can return on any service call regardless of whether the service's
-/// Smithy model declares them on the specific operation. Real AWS clients
-/// accept all of these everywhere.
-const UNIVERSAL_AWS_ERROR_CODES: &[&str] = &[
-    // Generic input-validation codes that the AWS SDK emits when the
-    // server-side request layer rejects a malformed parameter before the
-    // op-specific handler runs.
-    "ValidationException",
-    "ValidationError",
-    "MissingParameter",
-    "MissingAction",
-    "MissingAuthenticationToken",
-    "InvalidParameterValue",
-    "InvalidParameterCombination",
-    "InvalidQueryParameter",
-    "MalformedQueryString",
-    "MalformedXML",
-    "InvalidAction",
-    "InvalidClientTokenId",
-    "InvalidRequest",
-    // Auth / signing — framework, not service-specific.
-    "AccessDenied",
-    "AccessDeniedException",
-    "AuthFailure",
-    "UnrecognizedClientException",
-    "ExpiredToken",
-    "ExpiredTokenException",
-    "SignatureDoesNotMatch",
-    "InvalidSignatureException",
-    "IncompleteSignature",
-    // Universal retry / capacity codes.
-    "Throttling",
-    "ThrottlingException",
-    "RequestLimitExceeded",
-    "ServiceUnavailable",
-    "ServiceUnavailableException",
-    "InternalFailure",
-    "InternalServerError",
-    "InternalError",
-];
-
+/// Strict per-op error matcher.
+///
+/// `declared` is the operation's directly-declared error wire codes — already
+/// resolved upstream in `probe_variant_with_model` so each entry is what AWS
+/// actually puts on the wire (`aws.protocols#awsQueryError.code` if present,
+/// otherwise the shape's short name). An observed wire code passes only if
+/// it appears verbatim in that list.
+///
+/// We deliberately do NOT accept:
+/// - A universal "framework error" allowlist (ValidationException, Throttling,
+///   AccessDenied, etc. — #1344). If the op declares those, they're already
+///   in `declared`; if it doesn't, AWS doesn't return them for that op and
+///   we shouldn't either.
+/// - A `NoSuch*` / `*NotFound` blanket accept (#1347). Those codes belong to
+///   specific shapes on specific ops; the strict matcher demands the model
+///   actually declare them.
+/// - Suffix stripping of `Exception` / `Fault` / `Exists` from shape names
+///   (#1336). That was a heuristic substitute for parsing the awsQueryError
+///   trait — now that we parse the trait directly, the heuristic is gone.
 fn matches_declared_error(code: &str, declared: &[String]) -> bool {
-    if UNIVERSAL_AWS_ERROR_CODES.contains(&code) {
-        return true;
-    }
-    // AWS uses universal `NoSuch<Resource>` and `<Resource>NotFound`
-    // naming conventions for "resource not found" exceptions across
-    // services (NoSuchBucket, NoSuchKey, NoSuchHostedZone,
-    // NoSuchDistributionTenant, NoSuchConnectionGroup, FunctionNotFound,
-    // ResourceNotFound, DBInstanceNotFound, ...). Many of these are
-    // new-feature codes upstream Smithy models haven't picked up yet —
-    // the shape simply isn't declared. Real AWS SDK clients accept them
-    // everywhere, so 4xx with one of these wire codes counts as a valid
-    // error response.
-    if code.starts_with("NoSuch") || code.ends_with("NotFound") {
-        return true;
-    }
-    declared.iter().any(|id| {
-        let short = id.rsplit('#').next().unwrap_or(id);
-        if short == code {
-            return true;
-        }
-        // AWS awsQuery / awsQueryCompat services rename the wire error code
-        // by stripping the conventional `Exception` / `Fault` suffix from
-        // the Smithy shape name. E.g. IAM declares `NoSuchEntityException`
-        // but the wire body carries `__type: "NoSuchEntity"`; RDS declares
-        // `DBInstanceNotFoundFault` but wires `DBInstanceNotFound`.
-        // CloudFront declares some "not found" shapes with an `Exists`
-        // suffix that's stripped on the wire (`NoSuchFunctionExists` ->
-        // `NoSuchFunction`). The Smithy AST encodes some of these via
-        // `aws.protocols#awsQueryError.code`; we don't parse that trait
-        // yet, but the convention holds for the overwhelming majority of
-        // cases.
-        for suffix in &["Exception", "Fault", "Exists"] {
-            if let Some(stripped) = short.strip_suffix(suffix) {
-                if stripped == code {
-                    return true;
-                }
-            }
-        }
-        false
-    })
+    declared.iter().any(|wire| wire == code)
 }
 
 fn classify_response(
@@ -2167,10 +2111,11 @@ mod tests {
     fn classify_legit_resource_not_found_is_pass() {
         // AWS-shaped `ResourceNotFoundException` for a synthetic id is a
         // legitimate response from an implemented handler; must not be
-        // confused with NotImplemented.
+        // confused with NotImplemented. Strict mode: `declared` carries
+        // wire codes (not shape IDs), pre-resolved by the caller.
         let body =
             r#"{"__type":"ResourceNotFoundException","message":"Function not found: test-fn"}"#;
-        let declared = vec!["com.amazonaws.lambda#ResourceNotFoundException".to_string()];
+        let declared = vec!["ResourceNotFoundException".to_string()];
         let result = classify_response("v1", 404, body, &Expectation::Success, 0, Some(&declared));
         assert_eq!(result.status, ProbeStatus::Pass);
     }
@@ -2193,8 +2138,8 @@ mod tests {
         // AWS would never return. Flag it.
         let body = r#"{"__type":"WeirdInternalException","message":"oops"}"#;
         let declared = vec![
-            "com.amazonaws.svc#ResourceNotFoundException".to_string(),
-            "com.amazonaws.svc#ValidationException".to_string(),
+            "ResourceNotFoundException".to_string(),
+            "ValidationException".to_string(),
         ];
         let result = classify_response("v1", 404, body, &Expectation::Success, 0, Some(&declared));
         assert!(
@@ -2209,7 +2154,7 @@ mod tests {
         // restXml + awsQuery both encode the error code in <Code>X</Code>.
         let body =
             r#"<?xml version="1.0"?><Error><Code>NoSuchBucket</Code><Message>x</Message></Error>"#;
-        let declared = vec!["com.amazonaws.s3#NoSuchBucket".to_string()];
+        let declared = vec!["NoSuchBucket".to_string()];
         let result = classify_response("v1", 404, body, &Expectation::Success, 0, Some(&declared));
         assert_eq!(result.status, ProbeStatus::Pass);
     }
@@ -2218,7 +2163,7 @@ mod tests {
     fn classify_400_query_protocol_error_passes() {
         // awsQuery (IAM, RDS, …) wraps the error in <ErrorResponse><Error>...
         let body = r#"<ErrorResponse><Error><Code>InvalidParameterValue</Code><Message>x</Message></Error></ErrorResponse>"#;
-        let declared = vec!["com.amazonaws.svc#InvalidParameterValue".to_string()];
+        let declared = vec!["InvalidParameterValue".to_string()];
         let result = classify_response("v1", 400, body, &Expectation::Success, 0, Some(&declared));
         assert_eq!(result.status, ProbeStatus::Pass);
     }

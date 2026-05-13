@@ -194,6 +194,10 @@ fn merged_traits(target: &ShapeTraits, member: &ShapeTraits) -> ShapeTraits {
             .json_name
             .clone()
             .or_else(|| target.json_name.clone()),
+        aws_query_error_code: member
+            .aws_query_error_code
+            .clone()
+            .or_else(|| target.aws_query_error_code.clone()),
     }
 }
 
