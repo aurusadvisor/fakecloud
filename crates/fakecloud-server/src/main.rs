@@ -2025,6 +2025,11 @@ async fn main() {
     if let Some(store) = elasticache_snapshot_store {
         elasticache_service = elasticache_service.with_snapshot_store(store);
     }
+    // Same restart-recovery contract as RDS: persisted clusters /
+    // replication groups / serverless caches survive a restart but
+    // their Docker containers don't, so respawn them on startup. See
+    // RDS #1338 for the original bug class.
+    elasticache_service.recover_persisted_containers().await;
     registry.register(Arc::new(elasticache_service));
 
     let ecr_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
