@@ -56,10 +56,26 @@ pub(crate) fn is_mutating_action(action: &str) -> bool {
 // ── Helper functions ────────────────────────────────────────────────────
 
 pub(crate) fn require_str<'a>(body: &'a Value, field: &str) -> Result<&'a str, AwsServiceError> {
+    require_str_with_code(body, field, "ValidationException")
+}
+
+/// Like [`require_str`] but emits a caller-chosen wire error code.
+///
+/// Several DynamoDB ops (e.g. CreateBackup, DescribeContinuousBackups,
+/// UpdateContinuousBackups, ExportTableToPointInTime,
+/// RestoreTableToPointInTime, ListBackups, ListImports) do not declare
+/// `ValidationException` in their Smithy `errors:` list. Use this helper
+/// to surface a declared shape (e.g. `TableNotFoundException`) for the
+/// missing-required-field path on those ops.
+pub(crate) fn require_str_with_code<'a>(
+    body: &'a Value,
+    field: &str,
+    code: &str,
+) -> Result<&'a str, AwsServiceError> {
     body[field].as_str().ok_or_else(|| {
         AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
-            "ValidationException",
+            code,
             format!("{field} is required"),
         )
     })
@@ -98,11 +114,26 @@ pub(crate) fn get_table<'a>(
     tables: &'a BTreeMap<String, DynamoTable>,
     name: &str,
 ) -> Result<&'a DynamoTable, AwsServiceError> {
+    get_table_with_code(tables, name, "ResourceNotFoundException")
+}
+
+/// Variant of [`get_table`] that emits a caller-chosen wire error code.
+///
+/// Smithy declares different "table missing" shapes for different ops:
+/// most read/write paths declare `ResourceNotFoundException`, while the
+/// backup, continuous-backup, and export/restore paths declare
+/// `TableNotFoundException` instead. Passing the wrong shape makes the
+/// strict-mode conformance probe reject the response.
+pub(crate) fn get_table_with_code<'a>(
+    tables: &'a BTreeMap<String, DynamoTable>,
+    name: &str,
+    code: &str,
+) -> Result<&'a DynamoTable, AwsServiceError> {
     let resolved = resolve_table_name(name);
     tables.get(resolved).ok_or_else(|| {
         AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
-            "ResourceNotFoundException",
+            code,
             format!("Requested resource not found: Table: {resolved} not found"),
         )
     })
@@ -112,11 +143,19 @@ pub(crate) fn get_table_mut<'a>(
     tables: &'a mut BTreeMap<String, DynamoTable>,
     name: &str,
 ) -> Result<&'a mut DynamoTable, AwsServiceError> {
+    get_table_mut_with_code(tables, name, "ResourceNotFoundException")
+}
+
+pub(crate) fn get_table_mut_with_code<'a>(
+    tables: &'a mut BTreeMap<String, DynamoTable>,
+    name: &str,
+    code: &str,
+) -> Result<&'a mut DynamoTable, AwsServiceError> {
     let resolved = resolve_table_name(name).to_string();
     tables.get_mut(&resolved).ok_or_else(|| {
         AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
-            "ResourceNotFoundException",
+            code,
             format!("Requested resource not found: Table: {resolved} not found"),
         )
     })
