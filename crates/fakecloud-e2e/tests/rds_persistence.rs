@@ -1,6 +1,32 @@
 mod helpers;
 
 use helpers::TestServer;
+use tokio_postgres::NoTls;
+
+async fn connect_postgres_with_retry(
+    host: &str,
+    port: i32,
+    user: &str,
+    password: &str,
+    dbname: &str,
+) -> Result<tokio_postgres::Client, tokio_postgres::Error> {
+    let connection_string =
+        format!("host={host} port={port} user={user} password={password} dbname={dbname}");
+    let mut last_error = None;
+    for _ in 0..40 {
+        match tokio_postgres::connect(&connection_string, NoTls).await {
+            Ok((client, conn)) => {
+                tokio::spawn(conn);
+                return Ok(client);
+            }
+            Err(error) => {
+                last_error = Some(error);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+    }
+    Err(last_error.expect("postgres connection error"))
+}
 
 /// DB instances survive a restart. Reproduces issue #914: a DB instance
 /// created with `aws rds create-db-instance` disappeared after restart
@@ -56,6 +82,136 @@ async fn persistence_round_trip_db_instance() {
         Some("available"),
         "status should persist as `available`, not be dropped as `creating`",
     );
+}
+
+/// Backing container is recreated on restart so the persisted DB
+/// endpoint is actually usable. Reproduces issue #1338: pre-fix,
+/// `DescribeDBInstances` returned `available` but `tokio_postgres::connect`
+/// failed because the container was gone.
+#[tokio::test]
+async fn persistence_db_endpoint_works_after_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_path = tmp.path().display().to_string();
+    let extra_args = ["--storage-mode", "persistent", "--data-path", &data_path];
+    let mut server = TestServer::start_full(&[], &extra_args).await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_instance()
+        .db_instance_identifier("restart-db")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .send()
+        .await
+        .unwrap();
+    let _ = helpers::wait_for_db_available(&client, "restart-db", 240).await;
+
+    drop(client);
+    server.restart().await;
+    let client = server.rds_client().await;
+
+    let inst = helpers::wait_for_db_available(&client, "restart-db", 240).await;
+    let endpoint = inst.endpoint().expect("endpoint");
+    let host = endpoint.address().expect("address");
+    let port = endpoint.port().expect("port");
+
+    let db = connect_postgres_with_retry(host, port, "admin", "secret123", "appdb")
+        .await
+        .expect("connect to recovered postgres container");
+    let row = db.query_one("SELECT 1", &[]).await.expect("select 1");
+    let value: i32 = row.get(0);
+    assert_eq!(value, 1);
+}
+
+/// StopDBInstance and StartDBInstance actually toggle the backing
+/// container, not just emit events. Pre-fix the ops were XML stubs and
+/// the container kept running regardless of the reported status.
+#[tokio::test]
+async fn start_stop_db_instance_toggles_backing_container() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_path = tmp.path().display().to_string();
+    let extra_args = ["--storage-mode", "persistent", "--data-path", &data_path];
+    let server = TestServer::start_full(&[], &extra_args).await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_instance()
+        .db_instance_identifier("toggle-db")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .send()
+        .await
+        .unwrap();
+    let inst = helpers::wait_for_db_available(&client, "toggle-db", 240).await;
+    let endpoint = inst.endpoint().expect("endpoint");
+    let host = endpoint.address().expect("address").to_string();
+    let port_before = endpoint.port().expect("port");
+
+    // Sanity: endpoint works before stopping.
+    let _ = connect_postgres_with_retry(&host, port_before, "admin", "secret123", "appdb")
+        .await
+        .expect("connect before stop");
+
+    client
+        .stop_db_instance()
+        .db_instance_identifier("toggle-db")
+        .send()
+        .await
+        .unwrap();
+
+    let stopped = client
+        .describe_db_instances()
+        .db_instance_identifier("toggle-db")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        stopped.db_instances()[0].db_instance_status(),
+        Some("stopped"),
+    );
+    // Endpoint must not be reachable now.
+    let connect = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio_postgres::connect(
+            &format!(
+                "host={host} port={port_before} user=admin password=secret123 dbname=appdb"
+            ),
+            NoTls,
+        ),
+    )
+    .await;
+    assert!(
+        matches!(connect, Err(_) | Ok(Err(_))),
+        "stopped DB endpoint should not accept connections",
+    );
+
+    client
+        .start_db_instance()
+        .db_instance_identifier("toggle-db")
+        .send()
+        .await
+        .unwrap();
+    let restarted = helpers::wait_for_db_available(&client, "toggle-db", 240).await;
+    let endpoint = restarted.endpoint().expect("endpoint");
+    let host_after = endpoint.address().expect("address");
+    let port_after = endpoint.port().expect("port");
+
+    let db = connect_postgres_with_retry(host_after, port_after, "admin", "secret123", "appdb")
+        .await
+        .expect("connect after start");
+    let row = db.query_one("SELECT 1", &[]).await.expect("select 1");
+    let value: i32 = row.get(0);
+    assert_eq!(value, 1);
 }
 
 /// Parameter groups survive a restart.

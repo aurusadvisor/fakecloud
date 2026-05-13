@@ -1059,33 +1059,6 @@ impl RdsService {
             // ── Database read replicas ──
             "PromoteReadReplica" => promote_read_replica_action(self, &aid, req, &rid),
             "SwitchoverReadReplica" => switchover_read_replica_action(self, &aid, req, &rid),
-            "StartDBInstance" | "StopDBInstance" => {
-                if let Some(id) = get_param(req, "DBInstanceIdentifier") {
-                    let (event_id, categories, msg) = if action == "StartDBInstance" {
-                        ("RDS-EVENT-0088", ["notification"], "DB instance started")
-                    } else {
-                        ("RDS-EVENT-0089", ["notification"], "DB instance stopped")
-                    };
-                    let arn = {
-                        let accounts = self.state_handle().read();
-                        accounts
-                            .get(&aid)
-                            .and_then(|s| s.instances.get(&id).map(|i| i.db_instance_arn.clone()))
-                            .unwrap_or_else(|| {
-                                Arn::new("rds", region, &aid, &format!("db:{id}")).to_string()
-                            })
-                    };
-                    self.emit_event(
-                        RdsSourceType::DbInstance,
-                        &id,
-                        &arn,
-                        event_id,
-                        &categories,
-                        msg,
-                    );
-                }
-                Ok(xml_response(action.as_str(), "    <DBInstance/>".to_string(), &rid))
-            }
             "StartDBInstanceAutomatedBackupsReplication" | "StopDBInstanceAutomatedBackupsReplication" => Ok(xml_response(action.as_str(), "    <DBInstanceAutomatedBackup/>".to_string(), &rid)),
             "DeleteDBInstanceAutomatedBackup" => Ok(xml_response("DeleteDBInstanceAutomatedBackup", "    <DBInstanceAutomatedBackup/>".to_string(), &rid)),
             "DescribeDBInstanceAutomatedBackups" => Ok(xml_response("DescribeDBInstanceAutomatedBackups", "    <DBInstanceAutomatedBackups/>".to_string(), &rid)),
@@ -3245,8 +3218,9 @@ mod tests {
         ok("DescribeReservedDBInstancesOfferings", &[]);
         // PromoteReadReplica + SwitchoverReadReplica need a real
         // replica instance; covered by the dedicated tests below.
-        ok("StartDBInstance", &[]);
-        ok("StopDBInstance", &[]);
+        // StartDBInstance / StopDBInstance moved to the service-level
+        // dispatch (they need the container runtime); see the
+        // dedicated E2E coverage in fakecloud-e2e/tests/rds_persistence.rs.
         ok("StartDBInstanceAutomatedBackupsReplication", &[]);
         ok("StopDBInstanceAutomatedBackupsReplication", &[]);
         ok("DeleteDBInstanceAutomatedBackup", &[]);

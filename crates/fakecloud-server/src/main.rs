@@ -1959,6 +1959,11 @@ async fn main() {
     }
     let rds_delivery_bus = Arc::new(rds_bus);
     rds_service = rds_service.with_delivery_bus(rds_delivery_bus.clone());
+    // Recreate backing containers for persisted DB instances that the
+    // snapshot claims should be running. Fire-and-forget: the method
+    // spawns one task per instance and returns immediately, so a slow
+    // postgres bring-up doesn't block server startup. (Issue #1338.)
+    rds_service.recover_persisted_containers().await;
     registry.register(Arc::new(rds_service));
     let elasticache_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
