@@ -183,9 +183,7 @@ async fn start_stop_db_instance_toggles_backing_container() {
     let connect = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         tokio_postgres::connect(
-            &format!(
-                "host={host} port={port_before} user=admin password=secret123 dbname=appdb"
-            ),
+            &format!("host={host} port={port_before} user=admin password=secret123 dbname=appdb"),
             NoTls,
         ),
     )

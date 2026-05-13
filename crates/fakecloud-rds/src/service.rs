@@ -467,10 +467,7 @@ impl RdsService {
     /// real `stopped` status by the time the response goes back; mirrors
     /// the AWS contract that `StartDBInstance`/`StopDBInstance` change
     /// the visible status immediately.
-    async fn stop_db_instance(
-        &self,
-        request: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
+    async fn stop_db_instance(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
         let runtime = self.require_runtime()?;
 
