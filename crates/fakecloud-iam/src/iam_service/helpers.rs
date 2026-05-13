@@ -776,6 +776,68 @@ pub(crate) fn attached_policy_name(state: &crate::state::IamState, arn: &str) ->
         .unwrap_or_else(|| arn.rsplit('/').next().unwrap_or(arn).to_string())
 }
 
+/// Extract a required query parameter, returning the supplied IAM-specific
+/// wire error code when missing. The shared `required_param` helper hard-codes
+/// `MissingParameter`, which isn't in any IAM operation's Smithy error list.
+/// IAM ops must surface one of their declared errors (usually
+/// `InvalidInputException` -> `InvalidInput`, or `NoSuchEntity` when the
+/// missing field identifies an entity).
+pub(crate) fn required_param_with_code(
+    params: &std::collections::HashMap<String, String>,
+    name: &str,
+    code: &str,
+) -> Result<String, AwsServiceError> {
+    params
+        .get(name)
+        .cloned()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                code,
+                format!("The request must contain the parameter {name}."),
+            )
+        })
+}
+
+/// Length-validate a string, emitting the supplied IAM-declared wire error
+/// code. Mirrors `fakecloud_core::validation::validate_string_length` but
+/// avoids its hard-coded `ValidationException` (not declared on any IAM op).
+pub(crate) fn validate_string_length_with_code(
+    field: &str,
+    value: &str,
+    min: usize,
+    max: usize,
+    code: &str,
+) -> Result<(), AwsServiceError> {
+    let len = value.len();
+    if len < min || len > max {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            code,
+            format!(
+                "Value at '{field}' failed to satisfy constraint: \
+                 Member must have length between {min} and {max}",
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Length-validate an optional string with an IAM-declared wire error code.
+pub(crate) fn validate_optional_string_length_with_code(
+    field: &str,
+    value: Option<&str>,
+    min: usize,
+    max: usize,
+    code: &str,
+) -> Result<(), AwsServiceError> {
+    if let Some(v) = value {
+        validate_string_length_with_code(field, v, min, max, code)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn empty_response(action: &str, request_id: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>

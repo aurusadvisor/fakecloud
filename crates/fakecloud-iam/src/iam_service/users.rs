@@ -10,7 +10,8 @@ use crate::xml_responses;
 
 use super::{
     empty_response, extract_access_key, generate_id, generate_long_id, parse_tag_keys, parse_tags,
-    partition_for_region, resolve_calling_user, tags_xml, url_encode, IamService,
+    partition_for_region, required_param_with_code, resolve_calling_user, tags_xml, url_encode,
+    validate_optional_string_length_with_code, validate_string_length_with_code, IamService,
 };
 use fakecloud_core::query::required_param;
 
@@ -94,10 +95,16 @@ fn resolve_create_access_key_target(
                 .then(|| user.clone())
         })
         .ok_or_else(|| {
+            // CreateAccessKey's Smithy-declared errors are NoSuchEntityException,
+            // LimitExceededException, ServiceFailureException. When no UserName
+            // is given and the caller can't be resolved from the access key,
+            // there is no user to attach the key to -> NoSuchEntity.
             AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "MissingParameter",
-                "The request must contain the parameter UserName".to_string(),
+                StatusCode::NOT_FOUND,
+                "NoSuchEntity",
+                "Cannot resolve target user: provide a UserName or call with credentials \
+                 that map to an existing user."
+                    .to_string(),
             )
         })
 }
@@ -235,8 +242,11 @@ impl IamService {
     }
 
     pub(super) fn delete_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
-        validate_string_length("userName", &user_name, 1, 64)?;
+        // Declared: ConcurrentModification, DeleteConflict, LimitExceeded,
+        // NoSuchEntity, ServiceFailure. Missing/out-of-range UserName ->
+        // NoSuchEntity (no user can match an out-of-range name).
+        let user_name = required_param_with_code(&req.query_params, "UserName", "NoSuchEntity")?;
+        validate_string_length_with_code("userName", &user_name, 1, 64, "NoSuchEntity")?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
@@ -297,8 +307,11 @@ impl IamService {
     }
 
     pub(super) fn update_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
-        validate_string_length("userName", &user_name, 1, 64)?;
+        // Declared: ConcurrentModification, EntityAlreadyExists,
+        // EntityTemporarilyUnmodifiable, LimitExceeded, NoSuchEntity,
+        // ServiceFailure -> NoSuchEntity for missing/oversize UserName.
+        let user_name = required_param_with_code(&req.query_params, "UserName", "NoSuchEntity")?;
+        validate_string_length_with_code("userName", &user_name, 1, 64, "NoSuchEntity")?;
         let new_path = req.query_params.get("NewPath").cloned();
         let new_user_name = req.query_params.get("NewUserName").cloned();
 
@@ -349,8 +362,10 @@ impl IamService {
     }
 
     pub(super) fn tag_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
-        validate_string_length("userName", &user_name, 1, 64)?;
+        // Declared: ConcurrentModification, InvalidInputException, LimitExceeded,
+        // NoSuchEntity, ServiceFailure -> InvalidInput for bad UserName values.
+        let user_name = required_param_with_code(&req.query_params, "UserName", "InvalidInput")?;
+        validate_string_length_with_code("userName", &user_name, 1, 64, "InvalidInput")?;
         let new_tags = parse_tags(&req.query_params);
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -376,8 +391,10 @@ impl IamService {
     }
 
     pub(super) fn untag_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
-        validate_string_length("userName", &user_name, 1, 64)?;
+        // Declared: ConcurrentModification, NoSuchEntity, ServiceFailure
+        // (no InvalidInputException) -> NoSuchEntity for bad UserName values.
+        let user_name = required_param_with_code(&req.query_params, "UserName", "NoSuchEntity")?;
+        validate_string_length_with_code("userName", &user_name, 1, 64, "NoSuchEntity")?;
         let tag_keys = parse_tag_keys(&req.query_params);
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -397,8 +414,9 @@ impl IamService {
     }
 
     pub(super) fn list_user_tags(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
-        validate_string_length("userName", &user_name, 1, 64)?;
+        // Declared: NoSuchEntity, ServiceFailure -> NoSuchEntity for bad UserName.
+        let user_name = required_param_with_code(&req.query_params, "UserName", "NoSuchEntity")?;
+        validate_string_length_with_code("userName", &user_name, 1, 64, "NoSuchEntity")?;
         let accounts = self.state.read();
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -438,11 +456,15 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        validate_optional_string_length(
+        // CreateAccessKey only declares NoSuchEntity/LimitExceeded/ServiceFailure
+        // -> route invalid UserName through NoSuchEntity (no such user with that
+        // out-of-range name exists).
+        validate_optional_string_length_with_code(
             "userName",
             req.query_params.get("UserName").map(|s| s.as_str()),
             1,
             128,
+            "NoSuchEntity",
         )?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -661,8 +683,12 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
-        let password = required_param(&req.query_params, "Password")?;
+        // Declared errors: EntityAlreadyExists, LimitExceeded, NoSuchEntity,
+        // PasswordPolicyViolation, ServiceFailure. Missing UserName -> NoSuchEntity,
+        // missing/empty Password -> PasswordPolicyViolation.
+        let user_name = required_param_with_code(&req.query_params, "UserName", "NoSuchEntity")?;
+        let password =
+            required_param_with_code(&req.query_params, "Password", "PasswordPolicyViolation")?;
         let password_reset_required = req
             .query_params
             .get("PasswordResetRequired")
@@ -723,7 +749,8 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
+        // Declared: NoSuchEntity, ServiceFailure -> NoSuchEntity for missing param.
+        let user_name = required_param_with_code(&req.query_params, "UserName", "NoSuchEntity")?;
         let accounts = self.state.read();
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -803,7 +830,9 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
+        // Declared: EntityTemporarilyUnmodifiable, LimitExceeded, NoSuchEntity,
+        // ServiceFailure -> NoSuchEntity for missing UserName.
+        let user_name = required_param_with_code(&req.query_params, "UserName", "NoSuchEntity")?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
@@ -835,8 +864,13 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
-        let certificate_body = required_param(&req.query_params, "CertificateBody")?;
+        // Declared: ConcurrentModification, DuplicateCertificate, EntityAlreadyExists,
+        // InvalidCertificate, LimitExceeded, MalformedCertificate, NoSuchEntity,
+        // ServiceFailure. UserName missing -> NoSuchEntity; CertificateBody
+        // missing/too-short -> MalformedCertificate.
+        let user_name = required_param_with_code(&req.query_params, "UserName", "NoSuchEntity")?;
+        let certificate_body =
+            required_param_with_code(&req.query_params, "CertificateBody", "MalformedCertificate")?;
 
         // Validate certificate body looks like a PEM certificate
         if !certificate_body.contains("-----BEGIN CERTIFICATE-----")
@@ -912,10 +946,18 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
+        // UserName is optional in the Smithy model (defaults to the caller).
+        // Marker/MaxItems are optional pagination tokens we accept verbatim
+        // since the op only declares NoSuchEntity and ServiceFailure.
         let accounts = self.state.read();
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let user_name = req
+            .query_params
+            .get("UserName")
+            .cloned()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| resolve_calling_user(state, &req.account_id));
 
         if !state.users.contains_key(&user_name) {
             return Err(AwsServiceError::aws_error(
@@ -968,9 +1010,29 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
-        let certificate_id = required_param(&req.query_params, "CertificateId")?;
-        let status = required_param(&req.query_params, "Status")?;
+        // Declared: InvalidInputException, LimitExceededException,
+        // NoSuchEntityException, ServiceFailureException. UserName is optional
+        // (defaults to caller). CertificateId/Status missing -> InvalidInput.
+        let certificate_id =
+            required_param_with_code(&req.query_params, "CertificateId", "InvalidInput")?;
+        validate_string_length_with_code(
+            "certificateId",
+            &certificate_id,
+            24,
+            128,
+            "InvalidInput",
+        )?;
+        let status = required_param_with_code(&req.query_params, "Status", "InvalidInput")?;
+        let user_name = req
+            .query_params
+            .get("UserName")
+            .cloned()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| {
+                let accts = self.state.read();
+                let st = accts.get(&req.account_id);
+                resolve_calling_user(st.unwrap_or(accts.default_ref()), &req.account_id)
+            });
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -1016,8 +1078,28 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
-        let certificate_id = required_param(&req.query_params, "CertificateId")?;
+        // Declared: ConcurrentModification, LimitExceeded, NoSuchEntity,
+        // ServiceFailure. CertificateId required, missing/oversize -> NoSuchEntity.
+        // UserName is optional in Smithy (defaults to caller).
+        let certificate_id =
+            required_param_with_code(&req.query_params, "CertificateId", "NoSuchEntity")?;
+        validate_string_length_with_code(
+            "certificateId",
+            &certificate_id,
+            24,
+            128,
+            "NoSuchEntity",
+        )?;
+        let user_name = req
+            .query_params
+            .get("UserName")
+            .cloned()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| {
+                let accts = self.state.read();
+                let st = accts.get(&req.account_id);
+                resolve_calling_user(st.unwrap_or(accts.default_ref()), &req.account_id)
+            });
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -1172,10 +1254,16 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
+        // UserName optional per Smithy; only NoSuchEntity is declared.
         let accounts = self.state.read();
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let user_name = req
+            .query_params
+            .get("UserName")
+            .cloned()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| resolve_calling_user(state, &req.account_id));
 
         let keys = state.ssh_public_keys.get(&user_name);
         let members: String = keys
@@ -1636,9 +1724,19 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let user_name = required_param(&req.query_params, "UserName")?;
-        validate_string_length("userName", &user_name, 1, 64)?;
-        let boundary = required_param(&req.query_params, "PermissionsBoundary")?;
+        // Declared: InvalidInputException, NoSuchEntityException,
+        // PolicyNotAttachableException, ServiceFailureException -> InvalidInput.
+        let user_name = required_param_with_code(&req.query_params, "UserName", "InvalidInput")?;
+        validate_string_length_with_code("userName", &user_name, 1, 64, "InvalidInput")?;
+        let boundary =
+            required_param_with_code(&req.query_params, "PermissionsBoundary", "InvalidInput")?;
+        validate_string_length_with_code(
+            "permissionsBoundary",
+            &boundary,
+            20,
+            2048,
+            "InvalidInput",
+        )?;
 
         if boundary
             .parse::<Arn>()
@@ -1648,7 +1746,7 @@ impl IamService {
         {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationError",
+                "InvalidInput",
                 format!("Value ({boundary}) for parameter PermissionsBoundary is invalid."),
             ));
         }

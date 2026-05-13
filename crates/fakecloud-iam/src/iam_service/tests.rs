@@ -4101,3 +4101,158 @@ fn resync_mfa_device_updates_enable_date() {
         "ResyncMFADevice should freshen EnableDate, got age {age}s"
     );
 }
+
+// ---- Smithy-declared wire error code tests ----
+//
+// Strict-mode conformance probes require every error returned by an op to be
+// one of the Smithy-declared shapes. These regression tests pin the wire codes
+// for input-validation failures on ops where we previously leaked the framework
+// codes `MissingParameter`, `ValidationError`, or `ValidationException`.
+
+fn assert_error_code(err: AwsServiceError, expected: &str) {
+    match err {
+        AwsServiceError::AwsError { code, .. } => {
+            assert_eq!(code, expected, "wrong wire error code");
+        }
+        other => panic!("expected AwsError, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_role_short_permissions_boundary_emits_invalid_input() {
+    let svc = make_service();
+    let err = svc
+        .create_role(&make_request(
+            "CreateRole",
+            vec![
+                ("RoleName", "r"),
+                ("AssumeRolePolicyDocument", "{}"),
+                ("PermissionsBoundary", "short"),
+            ],
+        ))
+        .err()
+        .unwrap();
+    assert_error_code(err, "InvalidInput");
+}
+
+#[test]
+fn put_role_permissions_boundary_short_emits_invalid_input() {
+    let svc = make_service();
+    let err = svc
+        .put_role_permissions_boundary(&make_request(
+            "PutRolePermissionsBoundary",
+            vec![("RoleName", "r"), ("PermissionsBoundary", "short")],
+        ))
+        .err()
+        .unwrap();
+    assert_error_code(err, "InvalidInput");
+}
+
+#[test]
+fn put_user_permissions_boundary_short_emits_invalid_input() {
+    let svc = make_service();
+    let err = svc
+        .put_user_permissions_boundary(&make_request(
+            "PutUserPermissionsBoundary",
+            vec![("UserName", "u"), ("PermissionsBoundary", "short")],
+        ))
+        .err()
+        .unwrap();
+    assert_error_code(err, "InvalidInput");
+}
+
+#[test]
+fn set_default_policy_version_short_arn_emits_invalid_input() {
+    let svc = make_service();
+    let err = svc
+        .set_default_policy_version(&make_request(
+            "SetDefaultPolicyVersion",
+            vec![("PolicyArn", "short"), ("VersionId", "v1")],
+        ))
+        .err()
+        .unwrap();
+    assert_error_code(err, "InvalidInput");
+}
+
+#[test]
+fn create_login_profile_missing_password_emits_password_policy_violation() {
+    let svc = make_service();
+    let err = svc
+        .create_login_profile(&make_request("CreateLoginProfile", vec![("UserName", "u")]))
+        .err()
+        .unwrap();
+    assert_error_code(err, "PasswordPolicyViolation");
+}
+
+#[test]
+fn create_access_key_unresolved_user_emits_no_such_entity() {
+    let svc = make_service();
+    let err = svc
+        .create_access_key(&make_request("CreateAccessKey", vec![]))
+        .err()
+        .unwrap();
+    assert_error_code(err, "NoSuchEntity");
+}
+
+#[test]
+fn delete_user_oversize_name_emits_no_such_entity() {
+    let svc = make_service();
+    let long = "a".repeat(129);
+    let err = svc
+        .delete_user(&make_request("DeleteUser", vec![("UserName", &long)]))
+        .err()
+        .unwrap();
+    assert_error_code(err, "NoSuchEntity");
+}
+
+#[test]
+fn tag_user_oversize_name_emits_invalid_input() {
+    let svc = make_service();
+    let long = "a".repeat(129);
+    let err = svc
+        .tag_user(&make_request("TagUser", vec![("UserName", &long)]))
+        .err()
+        .unwrap();
+    assert_error_code(err, "InvalidInput");
+}
+
+#[test]
+fn list_mfa_devices_no_username_does_not_emit_missing_parameter() {
+    // ListMFADevices declares NoSuchEntity + ServiceFailure only. Sending no
+    // UserName must not leak `MissingParameter` from the shared helper.
+    let svc = make_service();
+    let resp = svc.list_mfa_devices(&make_request("ListMFADevices", vec![]));
+    match resp {
+        Ok(_) => {}
+        Err(AwsServiceError::AwsError { code, .. }) => {
+            assert_ne!(
+                code, "MissingParameter",
+                "ListMFADevices leaked MissingParameter"
+            );
+        }
+        Err(other) => panic!("unexpected error variant: {other:?}"),
+    }
+}
+
+#[test]
+fn create_open_id_connect_provider_missing_url_emits_invalid_input() {
+    let svc = make_service();
+    let err = svc
+        .create_oidc_provider(&make_request("CreateOpenIDConnectProvider", vec![]))
+        .err()
+        .unwrap();
+    assert_error_code(err, "InvalidInput");
+}
+
+#[test]
+fn create_virtual_mfa_device_bad_path_emits_invalid_input() {
+    let svc = make_service();
+    let err = svc
+        .create_virtual_mfa_device(&make_request(
+            "CreateVirtualMFADevice",
+            vec![("VirtualMFADeviceName", "d"), ("Path", "x")],
+        ))
+        .err()
+        .unwrap();
+    assert_error_code(err, "InvalidInput");
+}

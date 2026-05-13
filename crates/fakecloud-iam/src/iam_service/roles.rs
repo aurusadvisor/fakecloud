@@ -469,9 +469,24 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let role_name = required_param(&req.query_params, "RoleName")?;
-        validate_string_length("roleName", &role_name, 1, 64)?;
-        let boundary = required_param(&req.query_params, "PermissionsBoundary")?;
+        // Declared: InvalidInputException, NoSuchEntityException,
+        // PolicyNotAttachableException, ServiceFailureException,
+        // UnmodifiableEntityException -> InvalidInput for bad input shape.
+        let role_name =
+            super::required_param_with_code(&req.query_params, "RoleName", "InvalidInput")?;
+        super::validate_string_length_with_code("roleName", &role_name, 1, 64, "InvalidInput")?;
+        let boundary = super::required_param_with_code(
+            &req.query_params,
+            "PermissionsBoundary",
+            "InvalidInput",
+        )?;
+        super::validate_string_length_with_code(
+            "permissionsBoundary",
+            &boundary,
+            20,
+            2048,
+            "InvalidInput",
+        )?;
 
         if boundary
             .parse::<Arn>()
@@ -481,7 +496,7 @@ impl IamService {
         {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationError",
+                "InvalidInput",
                 format!("Value ({boundary}) for parameter PermissionsBoundary is invalid."),
             ));
         }
@@ -968,9 +983,15 @@ impl CreateRoleInput {
     fn from_query(
         params: &std::collections::HashMap<String, String>,
     ) -> Result<Self, AwsServiceError> {
-        let role_name = required_param(params, "RoleName")?;
-        validate_string_length("roleName", &role_name, 1, 64)?;
-        let assume_role_policy = required_param(params, "AssumeRolePolicyDocument")?;
+        // CreateRole's Smithy-declared errors: ConcurrentModification,
+        // EntityAlreadyExists, InvalidInputException, LimitExceeded,
+        // MalformedPolicyDocument, ServiceFailure -> InvalidInput for all
+        // generic input validation; MalformedPolicyDocument is reserved for
+        // policy-document parse failures handled downstream.
+        let role_name = super::required_param_with_code(params, "RoleName", "InvalidInput")?;
+        super::validate_string_length_with_code("roleName", &role_name, 1, 64, "InvalidInput")?;
+        let assume_role_policy =
+            super::required_param_with_code(params, "AssumeRolePolicyDocument", "InvalidInput")?;
         let path = params
             .get("Path")
             .cloned()
@@ -984,10 +1005,17 @@ impl CreateRoleInput {
         validate_tags(&tags, 0)?;
         let permissions_boundary = params.get("PermissionsBoundary").cloned();
         if let Some(ref boundary) = permissions_boundary {
+            super::validate_string_length_with_code(
+                "permissionsBoundary",
+                boundary,
+                20,
+                2048,
+                "InvalidInput",
+            )?;
             if !boundary.contains(":policy/") {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ValidationError",
+                    "InvalidInput",
                     format!("Value ({boundary}) for parameter PermissionsBoundary is invalid."),
                 ));
             }
