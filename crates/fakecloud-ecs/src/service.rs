@@ -196,9 +196,8 @@ impl EcsService {
                         task.last_status = "STOPPED".to_string();
                         task.desired_status = "STOPPED".to_string();
                         task.stop_code = Some("EssentialContainerExited".to_string());
-                        task.stopped_reason = Some(
-                            "fakecloud restart - backing container lost".to_string(),
-                        );
+                        task.stopped_reason =
+                            Some("fakecloud restart - backing container lost".to_string());
                         if task.stopping_at.is_none() {
                             task.stopping_at = Some(now);
                         }

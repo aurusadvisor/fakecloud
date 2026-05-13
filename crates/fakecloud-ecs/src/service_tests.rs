@@ -229,4 +229,3 @@ fn matches_filter_respects_none() {
     assert!(matches_filter(Some("x"), "x"));
     assert!(!matches_filter(Some("x"), "y"));
 }
-
