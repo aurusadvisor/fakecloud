@@ -473,6 +473,62 @@ impl AwsService for S3Service {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
+        // Bucket-scoped sub-resource query params. If a request targets one
+        // of these without a bucket in the path, S3 returns an error rather
+        // than silently treating it as a top-level (service) operation.
+        // Real AWS rejects e.g. `GET /?tagging` with a routing/validation
+        // error; mirroring that prevents bucket-required ops from being
+        // accidentally answered by ListBuckets / WriteGetObjectResponse.
+        let bucket_subresources: &[&str] = &[
+            "tagging",
+            "acl",
+            "versioning",
+            "cors",
+            "notification",
+            "website",
+            "accelerate",
+            "publicAccessBlock",
+            "encryption",
+            "lifecycle",
+            "logging",
+            "policy",
+            "policyStatus",
+            "replication",
+            "ownershipControls",
+            "inventory",
+            "analytics",
+            "intelligent-tiering",
+            "metrics",
+            "requestPayment",
+            "abac",
+            "metadataConfiguration",
+            "metadataTable",
+            "metadataInventoryTable",
+            "metadataJournalTable",
+            "object-lock",
+            "versions",
+            "session",
+            "retention",
+            "legal-hold",
+            "attributes",
+            "torrent",
+            "renameObject",
+            "uploads",
+            "restore",
+            "select",
+        ];
+        if bucket.is_none()
+            && bucket_subresources
+                .iter()
+                .any(|q| req.query_params.contains_key(*q))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidBucketName",
+                "The specified bucket is not valid: bucket name is required for this operation",
+            ));
+        }
+
         let mut result = match (&req.method, bucket, key.as_deref()) {
             // ListBuckets: GET /
             (&Method::GET, None, None) => {
