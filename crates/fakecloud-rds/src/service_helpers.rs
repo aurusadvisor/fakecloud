@@ -1,5 +1,24 @@
 use super::*;
 
+/// Construct the canonical `InvalidParameterValue` error used across the
+/// query-protocol RDS surface. Centralized so probes that hit any
+/// validation gate see a uniform wire shape.
+pub(crate) fn invalid_param(message: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidParameterValue", message)
+}
+
+/// Construct the `MissingParameter` error AWS RDS returns when a
+/// `@required` query parameter is absent. Pre-validation in
+/// [`crate::validation`] calls this so handlers downstream can assume
+/// required values are present.
+pub(crate) fn missing_param(name: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "MissingParameter",
+        format!("The request must contain the parameter {name}."),
+    )
+}
+
 pub(crate) fn is_mutating_action(action: &str) -> bool {
     if matches!(
         action,

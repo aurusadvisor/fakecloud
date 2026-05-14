@@ -2,6 +2,7 @@ pub mod extras;
 pub mod runtime;
 pub(crate) mod service;
 pub(crate) mod state;
+pub(crate) mod validation;
 
 pub use service::RdsService;
 pub use state::{

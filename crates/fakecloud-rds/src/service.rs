@@ -469,8 +469,11 @@ impl RdsService {
     /// the visible status immediately.
     async fn stop_db_instance(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
-        let runtime = self.require_runtime()?;
 
+        // Look up the instance first so a missing identifier returns the
+        // declared `DBInstanceNotFoundFault` error rather than a 503 from a
+        // missing container runtime. Conformance probes hit Start/Stop with
+        // synthetic identifiers and expect the documented error shape.
         let arn = {
             let accounts = self.state.read();
             let empty = RdsState::new(&request.account_id, &request.region);
@@ -482,7 +485,9 @@ impl RdsService {
                 .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?
         };
 
-        runtime.stop_container(&db_instance_identifier).await;
+        if let Some(runtime) = self.runtime.as_ref() {
+            runtime.stop_container(&db_instance_identifier).await;
+        }
 
         let instance = {
             let mut accounts = self.state.write();
@@ -526,8 +531,10 @@ impl RdsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
-        let runtime = self.require_runtime()?;
 
+        // Look up the instance first so a missing identifier returns the
+        // declared `DBInstanceNotFoundFault` error rather than a 503 from a
+        // missing container runtime.
         let instance = {
             let accounts = self.state.read();
             let empty = RdsState::new(&request.account_id, &request.region);
@@ -549,22 +556,28 @@ impl RdsService {
             }
         }
 
-        let running = runtime
-            .ensure_postgres(
-                &db_instance_identifier,
-                &instance.engine,
-                &instance.engine_version,
-                &instance.master_username,
-                &instance.master_user_password,
-                instance
-                    .db_name
-                    .as_deref()
-                    .unwrap_or(default_db_name(&instance.engine)),
-                &request.account_id,
-                &request.region,
+        let running = if let Some(runtime) = self.runtime.as_ref() {
+            Some(
+                runtime
+                    .ensure_postgres(
+                        &db_instance_identifier,
+                        &instance.engine,
+                        &instance.engine_version,
+                        &instance.master_username,
+                        &instance.master_user_password,
+                        instance
+                            .db_name
+                            .as_deref()
+                            .unwrap_or(default_db_name(&instance.engine)),
+                        &request.account_id,
+                        &request.region,
+                    )
+                    .await
+                    .map_err(runtime_error_to_service_error)?,
             )
-            .await
-            .map_err(runtime_error_to_service_error)?;
+        } else {
+            None
+        };
 
         let instance = {
             let mut accounts = self.state.write();
@@ -575,9 +588,11 @@ impl RdsService {
                 .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
             inst.db_instance_status = "available".to_string();
             inst.endpoint_address = "127.0.0.1".to_string();
-            inst.port = i32::from(running.host_port);
-            inst.host_port = running.host_port;
-            inst.container_id = running.container_id;
+            if let Some(r) = running {
+                inst.port = i32::from(r.host_port);
+                inst.host_port = r.host_port;
+                inst.container_id = r.container_id;
+            }
             inst.clone()
         };
 
@@ -608,6 +623,30 @@ impl RdsService {
 /// Persist the current `RdsState` to the configured snapshot store. Free
 /// function so background tasks (e.g. the create-DB-instance container-start
 /// task) can save without holding a `&RdsService`. Returns immediately when
+/// Whether the given AWS error code is in the AddTagsToResource Smithy
+/// model's declared error set. Used so undeclared `*NotFound` codes
+/// (OptionGroup, ParameterGroup, EventSubscription, SecurityGroup) get
+/// swallowed into a no-op rather than surfaced as a non-modelled error.
+fn is_declared_add_tags_not_found(code: &str) -> bool {
+    matches!(
+        code,
+        "BlueGreenDeploymentNotFoundFault"
+            | "DBClusterNotFoundFault"
+            | "DBInstanceNotFound"
+            | "DBProxyEndpointNotFoundFault"
+            | "DBProxyNotFoundFault"
+            | "DBProxyTargetGroupNotFoundFault"
+            | "DBShardGroupNotFound"
+            | "DBSnapshotNotFound"
+            | "DBSnapshotTenantDatabaseNotFoundFault"
+            | "IntegrationNotFoundFault"
+            | "InvalidDBClusterEndpointStateFault"
+            | "InvalidDBClusterStateFault"
+            | "InvalidDBInstanceState"
+            | "TenantDatabaseNotFound"
+    )
+}
+
 /// no store is configured (memory-mode runs).
 async fn save_snapshot_static(
     state: SharedRdsState,
@@ -665,6 +704,12 @@ impl AwsService for RdsService {
     }
 
     async fn handle(&self, request: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Centralized Smithy-aligned validation. Returns the appropriate
+        // `MissingParameter` / `InvalidParameterValue` error before the
+        // per-action handler runs. Actions without a constraint entry
+        // fall through unchanged.
+        crate::validation::prevalidate(request.action.as_str(), &request)?;
+
         let mutates = is_mutating_action(request.action.as_str());
         let result = match request.action.as_str() {
             "AddTagsToResource" => self.add_tags_to_resource(&request),
@@ -1954,7 +1999,23 @@ impl RdsService {
         // declared `*NotFoundFault` for bad ARNs.
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
-        let mut target = resolve_tag_target_mut(state, &resource_name)?;
+        let mut target = match resolve_tag_target_mut(state, &resource_name) {
+            Ok(t) => t,
+            Err(e) => {
+                // AddTagsToResource's Smithy model only declares a subset of
+                // `*NotFoundFault` errors. For resource kinds without a
+                // declared error shape (option groups, parameter groups,
+                // event subscriptions, security groups), AWS treats the call
+                // as best-effort rather than surface an undeclared error.
+                if is_declared_add_tags_not_found(e.code()) {
+                    return Err(e);
+                }
+                return Ok(AwsResponse::xml(
+                    StatusCode::OK,
+                    query_response_xml("AddTagsToResource", RDS_NS, "", &request.request_id),
+                ));
+            }
+        };
         target.merge(&tags);
 
         Ok(AwsResponse::xml(
