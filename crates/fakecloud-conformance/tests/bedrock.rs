@@ -1282,7 +1282,11 @@ async fn bedrock_marketplace_endpoint_lifecycle() {
     let server = TestServer::start().await;
     let h = reqwest::Client::new();
     let a = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
-    let b = serde_json::json!({"endpointName": "conf-ep", "modelSourceIdentifier": "model-1"});
+    let b = serde_json::json!({
+        "endpointName": "conf-ep",
+        "modelSourceIdentifier": "model-1",
+        "endpointConfig": {"sageMakerEndpoint": {"initialInstanceCount": 1, "instanceType": "ml.m5.large"}}
+    });
     let r = h
         .post(format!("{}/marketplace-model/endpoints", server.endpoint()))
         .header("content-type", "application/json")
@@ -1336,13 +1340,16 @@ async fn bedrock_marketplace_endpoint_lifecycle() {
         .status(),
         200
     );
+    let reg_b = serde_json::json!({"modelSourceIdentifier": "model-1"});
     assert_eq!(
         h.post(format!(
             "{}/marketplace-model/endpoints/{}/registration",
             server.endpoint(),
             id
         ))
+        .header("content-type", "application/json")
         .header("authorization", a)
+        .body(serde_json::to_string(&reg_b).unwrap())
         .send()
         .await
         .unwrap()
@@ -1388,7 +1395,10 @@ async fn bedrock_agreements_and_misc() {
     let server = TestServer::start().await;
     let h = reqwest::Client::new();
     let a = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
-    let b = serde_json::json!({"modelId": "anthropic.claude-3-5-sonnet-20241022-v2:0"});
+    let b = serde_json::json!({
+        "modelId": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "offerToken": "fake-offer-token"
+    });
     assert_eq!(
         h.post(format!(
             "{}/create-foundation-model-agreement",
@@ -1480,7 +1490,11 @@ async fn bedrock_enforced_guardrails() {
     let server = TestServer::start().await;
     let h = reqwest::Client::new();
     let a = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
-    let b = serde_json::json!({"guardrailIdentifier": "test-guard", "guardrailVersion": "1"});
+    let b = serde_json::json!({
+        "guardrailIdentifier": "test-guard",
+        "guardrailVersion": "1",
+        "guardrailInferenceConfig": {"guardrailIdentifier": "test-guard", "guardrailVersion": "1"}
+    });
     let r = h
         .put(format!(
             "{}/enforcedGuardrailsConfiguration",
@@ -1954,7 +1968,10 @@ async fn bedrock_custom_model_crud() {
     let http_client = reqwest::Client::new();
     let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
 
-    let body = serde_json::json!({"modelName": "conf-model", "modelSourceConfig": {}});
+    let body = serde_json::json!({
+        "modelName": "conf-model",
+        "modelSourceConfig": {"s3DataSource": {"s3Uri": "s3://example/model"}}
+    });
     let resp = http_client
         .post(format!(
             "{}/custom-models/create-custom-model",

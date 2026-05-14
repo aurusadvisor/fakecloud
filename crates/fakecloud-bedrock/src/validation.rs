@@ -532,13 +532,14 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             strings: &[("modelId", 1, 140)],
             ..EMPTY
         },
+        // modelId is bound to the URI path, not the body — required-checks
+        // would always fire on a real call. Leave validation length-only.
         "ListFoundationModelAgreementOffers" => OpConstraints {
-            required: &["modelId"],
             query_strings: &[("modelId", 1, 140)],
             ..EMPTY
         },
+        // modelId is URI-path-bound, not body. Length-only here.
         "GetFoundationModelAvailability" => OpConstraints {
-            required: &["modelId"],
             query_strings: &[("modelId", 1, 140)],
             ..EMPTY
         },
