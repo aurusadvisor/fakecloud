@@ -2080,7 +2080,15 @@ async fn bedrock_prompt_router_crud() {
     let h = reqwest::Client::new();
     let a = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
 
-    let b = serde_json::json!({"promptRouterName": "my-router", "models": [], "routingCriteria": {}, "fallbackModel": {"modelIdentifier": "anthropic.claude-3-haiku-20240307-v1:0"}});
+    // Real AWS rejects empty `models` / `routingCriteria` for CreatePromptRouter
+    // with a ValidationException; supply minimally-valid placeholders so
+    // the round-trip exercises the happy path instead of the validation gate.
+    let b = serde_json::json!({
+        "promptRouterName": "my-router",
+        "models": [{"modelArn": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"}],
+        "routingCriteria": {"responseQualityDifference": 0.1},
+        "fallbackModel": {"modelArn": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"}
+    });
     let r = h
         .post(format!("{}/prompt-routers", server.endpoint()))
         .header("content-type", "application/json")
