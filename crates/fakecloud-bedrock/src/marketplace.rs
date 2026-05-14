@@ -50,10 +50,39 @@ pub(crate) fn create_marketplace_model_endpoint(
     s.marketplace_endpoints
         .insert(endpoint_arn.clone(), endpoint);
 
+    let saved = s
+        .marketplace_endpoints
+        .get(&endpoint_arn)
+        .expect("just inserted");
     Ok(AwsResponse::json_value(
         StatusCode::CREATED,
-        json!({ "marketplaceModelEndpointArn": endpoint_arn }),
+        json!({ "marketplaceModelEndpoint": endpoint_to_json(saved) }),
     ))
+}
+
+/// Build the canonical `MarketplaceModelEndpoint` shape that the Smithy model
+/// expects. Note: per the model `endpointStatus` is required while
+/// `endpointName` is not a member — we surface the user-supplied name through
+/// `endpointConfig.endpointName` only when callers later need it.
+fn endpoint_to_json(e: &MarketplaceModelEndpoint) -> Value {
+    json!({
+        "endpointArn": e.endpoint_arn,
+        "modelSourceIdentifier": e.model_source_identifier,
+        "status": e.status,
+        "endpointStatus": endpoint_status_for(&e.status),
+        "endpointConfig": e.endpoint_config,
+        "createdAt": e.created_at.to_rfc3339(),
+        "updatedAt": e.updated_at.to_rfc3339(),
+    })
+}
+
+fn endpoint_status_for(status: &str) -> &'static str {
+    match status {
+        "Registered" => "InService",
+        "Updating" => "Updating",
+        "Failed" => "Failed",
+        _ => "InService",
+    }
 }
 
 pub(crate) fn get_marketplace_model_endpoint(
@@ -81,15 +110,7 @@ pub(crate) fn get_marketplace_model_endpoint(
         })?;
 
     Ok(AwsResponse::ok_json(json!({
-        "marketplaceModelEndpoint": {
-            "endpointArn": endpoint.endpoint_arn,
-            "endpointName": endpoint.endpoint_name,
-            "modelSourceIdentifier": endpoint.model_source_identifier,
-            "status": endpoint.status,
-            "endpointConfig": endpoint.endpoint_config,
-            "createdAt": endpoint.created_at.to_rfc3339(),
-            "updatedAt": endpoint.updated_at.to_rfc3339(),
-        }
+        "marketplaceModelEndpoint": endpoint_to_json(endpoint),
     })))
 }
 
@@ -127,7 +148,6 @@ pub(crate) fn list_marketplace_model_endpoints(
         .map(|e| {
             json!({
                 "endpointArn": e.endpoint_arn,
-                "endpointName": e.endpoint_name,
                 "modelSourceIdentifier": e.model_source_identifier,
                 "status": e.status,
                 "createdAt": e.created_at.to_rfc3339(),
@@ -184,15 +204,7 @@ pub(crate) fn update_marketplace_model_endpoint(
     endpoint.updated_at = Utc::now();
 
     Ok(AwsResponse::ok_json(json!({
-        "marketplaceModelEndpoint": {
-            "endpointArn": endpoint.endpoint_arn,
-            "endpointName": endpoint.endpoint_name,
-            "modelSourceIdentifier": endpoint.model_source_identifier,
-            "status": endpoint.status,
-            "endpointConfig": endpoint.endpoint_config,
-            "createdAt": endpoint.created_at.to_rfc3339(),
-            "updatedAt": endpoint.updated_at.to_rfc3339(),
-        }
+        "marketplaceModelEndpoint": endpoint_to_json(endpoint),
     })))
 }
 
@@ -260,15 +272,7 @@ pub(crate) fn register_marketplace_model_endpoint(
     endpoint.updated_at = Utc::now();
 
     Ok(AwsResponse::ok_json(json!({
-        "marketplaceModelEndpoint": {
-            "endpointArn": endpoint.endpoint_arn,
-            "endpointName": endpoint.endpoint_name,
-            "modelSourceIdentifier": endpoint.model_source_identifier,
-            "status": endpoint.status,
-            "endpointConfig": endpoint.endpoint_config,
-            "createdAt": endpoint.created_at.to_rfc3339(),
-            "updatedAt": endpoint.updated_at.to_rfc3339(),
-        }
+        "marketplaceModelEndpoint": endpoint_to_json(endpoint),
     })))
 }
 
@@ -304,17 +308,7 @@ pub(crate) fn deregister_marketplace_model_endpoint(
     endpoint.status = "Active".to_string();
     endpoint.updated_at = Utc::now();
 
-    Ok(AwsResponse::ok_json(json!({
-        "marketplaceModelEndpoint": {
-            "endpointArn": endpoint.endpoint_arn,
-            "endpointName": endpoint.endpoint_name,
-            "modelSourceIdentifier": endpoint.model_source_identifier,
-            "status": endpoint.status,
-            "endpointConfig": endpoint.endpoint_config,
-            "createdAt": endpoint.created_at.to_rfc3339(),
-            "updatedAt": endpoint.updated_at.to_rfc3339(),
-        }
-    })))
+    Ok(AwsResponse::ok_json(json!({})))
 }
 #[cfg(test)]
 #[allow(clippy::too_many_lines)]
@@ -362,7 +356,7 @@ mod tests {
         let resp = create_marketplace_model_endpoint(state, &req(), &body).unwrap();
         let text = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
         let v: Value = serde_json::from_str(text).unwrap();
-        v["marketplaceModelEndpointArn"]
+        v["marketplaceModelEndpoint"]["endpointArn"]
             .as_str()
             .unwrap()
             .to_string()
@@ -394,7 +388,8 @@ mod tests {
         let resp = get_marketplace_model_endpoint(&s, &req(), &arn).unwrap();
         let v: Value =
             serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
-        assert_eq!(v["marketplaceModelEndpoint"]["endpointName"], "ep-1");
+        assert_eq!(v["marketplaceModelEndpoint"]["endpointArn"], arn);
+        assert_eq!(v["marketplaceModelEndpoint"]["endpointStatus"], "InService");
     }
 
     #[test]

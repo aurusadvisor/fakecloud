@@ -172,6 +172,7 @@ pub(crate) fn batch_delete_evaluation_job(
     let mut accts = state.write();
     let s = accts.get_or_create(&req.account_id);
     let mut errors: Vec<Value> = Vec::new();
+    let mut deleted: Vec<Value> = Vec::new();
 
     for identifier in job_identifiers {
         let id = identifier.as_str().unwrap_or_default();
@@ -183,7 +184,16 @@ pub(crate) fn batch_delete_evaluation_job(
 
         match key {
             Some(k) => {
+                let job_arn = s
+                    .evaluation_jobs
+                    .get(&k)
+                    .map(|j| j.job_arn.clone())
+                    .unwrap_or_else(|| k.clone());
                 s.evaluation_jobs.remove(&k);
+                deleted.push(json!({
+                    "jobIdentifier": job_arn,
+                    "jobStatus": "Deleting",
+                }));
             }
             None => {
                 errors.push(json!({
@@ -195,7 +205,10 @@ pub(crate) fn batch_delete_evaluation_job(
         }
     }
 
-    Ok(AwsResponse::ok_json(json!({ "errors": errors })))
+    Ok(AwsResponse::ok_json(json!({
+        "errors": errors,
+        "evaluationJobs": deleted,
+    })))
 }
 
 fn find_job<'a>(

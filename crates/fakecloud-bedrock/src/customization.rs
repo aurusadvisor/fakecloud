@@ -104,6 +104,10 @@ pub(crate) fn get_model_customization_job(
         req.region, req.account_id, job.custom_model_name
     );
 
+    // GetModelCustomizationJobResponse requires `baseModelArn` and
+    // `validationDataConfig`; the stored `baseModelIdentifier` is normalized
+    // into a real foundation-model ARN below, and a minimal empty
+    // `validationDataConfig` is surfaced so the wire shape stays valid.
     Ok(AwsResponse::ok_json(json!({
         "jobArn": job.job_arn,
         "jobName": job.job_name,
@@ -113,8 +117,9 @@ pub(crate) fn get_model_customization_job(
         "status": job.status,
         "creationTime": job.created_at.to_rfc3339(),
         "lastModifiedTime": job.last_modified_at.to_rfc3339(),
-        "baseModelIdentifier": job.base_model_identifier,
+        "baseModelArn": base_model_arn(&job.base_model_identifier, &req.region),
         "trainingDataConfig": job.training_data_config,
+        "validationDataConfig": json!({ "validators": [] }),
         "outputDataConfig": job.output_data_config,
         "hyperParameters": job.hyper_parameters,
     })))

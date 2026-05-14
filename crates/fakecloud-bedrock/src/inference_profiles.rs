@@ -86,12 +86,14 @@ pub(crate) fn get_inference_profile(
             )
         })?;
 
+    // GetInferenceProfileResponse intentionally does not surface the
+    // creation-time `modelSource` blob; only the resolved `models` list
+    // appears on the wire.
     Ok(AwsResponse::ok_json(json!({
         "inferenceProfileArn": profile.inference_profile_arn,
         "inferenceProfileId": profile_id_from_arn(&profile.inference_profile_arn),
         "inferenceProfileName": profile.inference_profile_name,
         "description": profile.description,
-        "modelSource": profile.model_source,
         "models": profile_models(&profile.model_source),
         "status": profile.status,
         "type": profile.inference_profile_type,

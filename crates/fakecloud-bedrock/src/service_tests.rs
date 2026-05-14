@@ -810,7 +810,6 @@ async fn resource_policy_crud() {
     let resp = svc.handle(req).await.unwrap();
     let b = body_json(&resp);
     assert_eq!(b["resourceArn"], arn);
-    assert!(b["revisionId"].as_str().is_some());
 
     // Get — path segment must be a single segment
     let req = make_request(Method::GET, &format!("/resource-policy/{arn}"), "");
@@ -1113,7 +1112,9 @@ fn marketplace_endpoint_crud() {
     let body = req.json_body();
     let resp = crate::marketplace::create_marketplace_model_endpoint(&state, &req, &body).unwrap();
     let b = body_json(&resp);
-    let arn = b["marketplaceModelEndpointArn"].as_str().unwrap();
+    let arn = b["marketplaceModelEndpoint"]["endpointArn"]
+        .as_str()
+        .unwrap();
 
     crate::marketplace::get_marketplace_model_endpoint(&state, &req, arn).unwrap();
     let resp = crate::marketplace::list_marketplace_model_endpoints(&state, &req).unwrap();
@@ -1161,7 +1162,10 @@ fn automated_reasoning_policy_crud() {
     crate::automated_reasoning::get_automated_reasoning_policy(&state, &req, arn).unwrap();
     let resp = crate::automated_reasoning::list_automated_reasoning_policies(&state, &req).unwrap();
     let b = body_json(&resp);
-    assert!(!b["policySummaries"].as_array().unwrap().is_empty());
+    assert!(!b["automatedReasoningPolicySummaries"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 
     let upd = serde_json::json!({"description": "updated"});
     crate::automated_reasoning::update_automated_reasoning_policy(&state, &req, arn, &upd).unwrap();

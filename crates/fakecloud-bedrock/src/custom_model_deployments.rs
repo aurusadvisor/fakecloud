@@ -199,18 +199,16 @@ fn deployment_to_json(d: &CustomModelDeployment) -> Value {
 }
 
 fn deployment_summary_json(d: &CustomModelDeployment) -> Value {
-    let mut obj = json!({
+    // CustomModelDeploymentSummary intentionally omits `description` per the
+    // Smithy model; deployment description only lives on the full GET shape.
+    json!({
         "customModelDeploymentArn": d.deployment_arn,
         "customModelDeploymentName": d.deployment_name,
         "modelArn": d.model_arn,
         "status": d.status,
         "createdAt": d.created_at.to_rfc3339(),
         "lastUpdatedAt": d.last_updated_at.to_rfc3339(),
-    });
-    if let Some(ref desc) = d.description {
-        obj["description"] = json!(desc);
-    }
-    obj
+    })
 }
 
 #[cfg(test)]

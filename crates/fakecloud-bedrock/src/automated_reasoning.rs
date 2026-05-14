@@ -104,11 +104,14 @@ pub(crate) fn list_automated_reasoning_policies(
         .skip(start)
         .take(max_results)
         .map(|p| {
+            // The Smithy summary requires `policyArn`, `name`, `policyId`,
+            // `version`, `createdAt`, and `updatedAt`. `policyId` is the trailing
+            // path segment of the ARN.
             json!({
                 "policyArn": p.policy_arn,
-                "policyName": p.policy_name,
+                "name": p.policy_name,
+                "policyId": policy_id_from_arn(&p.policy_arn),
                 "description": p.description,
-                "status": p.status,
                 "version": p.version,
                 "createdAt": p.created_at.to_rfc3339(),
                 "updatedAt": p.updated_at.to_rfc3339(),
@@ -116,7 +119,7 @@ pub(crate) fn list_automated_reasoning_policies(
         })
         .collect();
 
-    let mut resp = json!({ "policySummaries": page });
+    let mut resp = json!({ "automatedReasoningPolicySummaries": page });
     let end = start.saturating_add(max_results);
     if end < items.len() {
         if let Some(last) = items.get(end - 1) {
@@ -519,6 +522,13 @@ fn find_policy_key(
         .map(|(k, _)| k.clone())
 }
 
+/// Trailing segment of the automated-reasoning policy ARN. The Smithy summary
+/// requires this as a separate `policyId` field even though the ARN already
+/// contains it.
+fn policy_id_from_arn(arn: &str) -> String {
+    arn.rsplit('/').next().unwrap_or(arn).to_string()
+}
+
 fn policy_to_json(p: &AutomatedReasoningPolicy) -> Value {
     json!({
         "policyArn": p.policy_arn,
@@ -645,7 +655,13 @@ mod tests {
         let resp = list_automated_reasoning_policies(&s, &r).unwrap();
         let v: Value =
             serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
-        assert_eq!(v["policySummaries"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            v["automatedReasoningPolicySummaries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
         assert!(v["nextToken"].is_string());
     }
 
