@@ -9,7 +9,7 @@ use fakecloud_core::validation::*;
 
 use crate::state::{MaintenanceWindow, MaintenanceWindowTarget, MaintenanceWindowTask, SsmState};
 
-use super::{missing, SsmService};
+use super::{aws_400, missing, SsmService};
 
 /// All fields of a `CreateMaintenanceWindow` request, parsed and validated.
 struct CreateMaintenanceWindowInput {
@@ -266,17 +266,16 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let window_id = body["WindowId"]
-            .as_str()
-            .ok_or_else(|| missing("WindowId"))?;
-        validate_string_length("WindowId", window_id, 20, 20)?;
-
+        // DeleteMaintenanceWindow is idempotent in real AWS. Its Smithy
+        // errors list contains only InternalServerError — no
+        // ValidationException, no DoesNotExistException. AWS docs
+        // confirm: "If the value passed for WindowId doesn't have a
+        // maintenance window associated with it, you will not see an
+        // error." So unknown / malformed ids are silent no-op successes.
+        let window_id = body["WindowId"].as_str().unwrap_or("");
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        if state.maintenance_windows.remove(window_id).is_none() {
-            return Err(mw_not_found(window_id));
-        }
-
+        state.maintenance_windows.remove(window_id);
         Ok(AwsResponse::ok_json(json!({ "WindowId": window_id })))
     }
 
@@ -1008,16 +1007,13 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_optional_string_length(
-            "WindowExecutionId",
-            body["WindowExecutionId"].as_str(),
-            36,
-            36,
-        )?;
-        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 10, 100)?;
+        // The op only declares DoesNotExistException + InternalServerError,
+        // so missing-input / not-found cases all surface as
+        // DoesNotExistException (the generic ValidationException is
+        // not in this op's Smithy errors list).
         let execution_id = body["WindowExecutionId"]
             .as_str()
-            .ok_or_else(|| missing("WindowExecutionId"))?;
+            .ok_or_else(|| aws_400("DoesNotExistException", "WindowExecutionId is required"))?;
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
@@ -1057,18 +1053,15 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_optional_string_length(
-            "WindowExecutionId",
-            body["WindowExecutionId"].as_str(),
-            36,
-            36,
-        )?;
-        validate_optional_string_length("TaskId", body["TaskId"].as_str(), 36, 36)?;
-        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 10, 100)?;
+        // See describe_maintenance_window_execution_tasks: only
+        // DoesNotExistException is declared, so all missing-input cases
+        // are routed through it.
         let execution_id = body["WindowExecutionId"]
             .as_str()
-            .ok_or_else(|| missing("WindowExecutionId"))?;
-        let task_id = body["TaskId"].as_str().ok_or_else(|| missing("TaskId"))?;
+            .ok_or_else(|| aws_400("DoesNotExistException", "WindowExecutionId is required"))?;
+        let task_id = body["TaskId"]
+            .as_str()
+            .ok_or_else(|| aws_400("DoesNotExistException", "TaskId is required"))?;
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);

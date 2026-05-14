@@ -10,7 +10,19 @@ use fakecloud_core::validation::*;
 
 use crate::state::{SsmAssociation, SsmAssociationVersion, SsmState};
 
-use super::{missing, SsmService};
+use super::{missing, missing_with_code, SsmService};
+
+/// CreateAssociation's Smithy errors list includes `InvalidParameters`
+/// but not the generic `ValidationException` that the shared `validate_*`
+/// helpers emit. Wrap their results to flip the wire code while keeping
+/// the same message; everything else passes through unchanged.
+fn remap_validation_to_invalid_parameters(err: AwsServiceError) -> AwsServiceError {
+    if err.code() == "ValidationException" {
+        AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidParameters", err.message())
+    } else {
+        err
+    }
+}
 
 impl SsmService {
     pub(super) fn create_association_inner(
@@ -81,7 +93,13 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let resp = self.create_association_inner(&body, &req.account_id)?;
+        // CreateAssociation declares InvalidParameters (among others)
+        // but not the generic ValidationException emitted by the shared
+        // validate_* helpers. Remap so strict-Smithy clients see one
+        // of the op's declared errors.
+        let resp = self
+            .create_association_inner(&body, &req.account_id)
+            .map_err(remap_validation_to_invalid_parameters)?;
         Ok(AwsResponse::ok_json(
             json!({ "AssociationDescription": resp }),
         ))
@@ -107,7 +125,13 @@ impl SsmService {
                 a.name == n && (instance_id.is_none() || a.instance_id.as_deref() == instance_id)
             })
         } else {
-            return Err(missing("AssociationId"));
+            // DescribeAssociation declares AssociationDoesNotExist; route
+            // missing-input through it instead of ValidationException
+            // (which isn't declared on this op).
+            return Err(missing_with_code(
+                "AssociationId",
+                "AssociationDoesNotExist",
+            ));
         };
 
         match assoc {
@@ -150,7 +174,10 @@ impl SsmService {
                 })
                 .map(|(k, _)| k.clone())
         } else {
-            return Err(missing("AssociationId"));
+            return Err(missing_with_code(
+                "AssociationId",
+                "AssociationDoesNotExist",
+            ));
         };
 
         match key {
