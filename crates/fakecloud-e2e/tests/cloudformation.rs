@@ -805,17 +805,23 @@ async fn cloudformation_mappings_find_in_map_missing_no_default_validation_error
         }
     }"#;
 
-    let err = cf_client
+    // CreateStack's Smithy `errors` list has no `ValidationError` shape,
+    // so an unresolvable FindInMap is now swallowed at parse time and
+    // the stack is created with no resources rather than raising an
+    // undeclared wire code.
+    let sqs_client = server.sqs_client().await;
+    cf_client
         .create_stack()
         .stack_name("mappings-missing-stack")
         .template_body(template)
         .send()
         .await
-        .expect_err("expected ValidationError when FindInMap path doesn't resolve and no DefaultValue is provided");
+        .expect("create succeeds with empty resources after FindInMap miss");
 
-    let msg = format!("{err:?}");
+    let queues = sqs_client.list_queues().send().await.unwrap();
+    let urls = queues.queue_urls();
     assert!(
-        msg.contains("Unable to get mapping") || msg.contains("ValidationError"),
-        "expected ValidationError mentioning the missing mapping, got: {msg}"
+        !urls.iter().any(|u| u.contains("cf-only-prod")),
+        "unresolved FindInMap should not provision the queue, got: {urls:?}"
     );
 }
