@@ -71,41 +71,64 @@ impl SchedulerService {
     fn resolve_action(req: &AwsRequest) -> Option<(&'static str, PathArgs)> {
         let segs = &req.path_segments;
         let first = segs.first().map(|s| s.as_str());
-        match (&req.method, segs.len(), first) {
+        // `path_segments` is split on `/` with empty parts stripped, so a
+        // request like `POST /schedules/` collapses to `["schedules"]` and
+        // would route to ListSchedules. AWS's contract for these single-
+        // resource paths is that an empty Name is a ValidationException,
+        // not "operation not found." Detect the trailing slash on a
+        // resource-collection path and re-promote it to a 2-segment route
+        // with an empty Name; the handler then returns the right error.
+        // raw_path is the original URI before query stripping; a trailing
+        // `/` means the resource name was empty.
+        let raw = req.raw_path.split('?').next().unwrap_or(&req.raw_path);
+        let collection_with_trailing_slash =
+            segs.len() == 1 && raw.matches('/').count() >= 2 && raw.ends_with('/');
+        let (effective_len, effective_name) = if collection_with_trailing_slash
+            && matches!(first, Some("schedules" | "schedule-groups" | "tags"))
+        {
+            (2, String::new())
+        } else if segs.len() == 2 {
+            (2, segs[1].clone())
+        } else {
+            (segs.len(), String::new())
+        };
+        match (&req.method, effective_len, first) {
             (&Method::POST, 2, Some("schedules")) => {
-                Some(("CreateSchedule", PathArgs::Name(segs[1].clone())))
+                Some(("CreateSchedule", PathArgs::Name(effective_name)))
             }
             (&Method::GET, 2, Some("schedules")) => {
-                Some(("GetSchedule", PathArgs::Name(segs[1].clone())))
+                Some(("GetSchedule", PathArgs::Name(effective_name)))
             }
             (&Method::PUT, 2, Some("schedules")) => {
-                Some(("UpdateSchedule", PathArgs::Name(segs[1].clone())))
+                Some(("UpdateSchedule", PathArgs::Name(effective_name)))
             }
             (&Method::DELETE, 2, Some("schedules")) => {
-                Some(("DeleteSchedule", PathArgs::Name(segs[1].clone())))
+                Some(("DeleteSchedule", PathArgs::Name(effective_name)))
             }
             (&Method::GET, 1, Some("schedules")) => Some(("ListSchedules", PathArgs::None)),
             (&Method::POST, 2, Some("schedule-groups")) => {
-                Some(("CreateScheduleGroup", PathArgs::Name(segs[1].clone())))
+                Some(("CreateScheduleGroup", PathArgs::Name(effective_name)))
             }
             (&Method::GET, 2, Some("schedule-groups")) => {
-                Some(("GetScheduleGroup", PathArgs::Name(segs[1].clone())))
+                Some(("GetScheduleGroup", PathArgs::Name(effective_name)))
             }
             (&Method::DELETE, 2, Some("schedule-groups")) => {
-                Some(("DeleteScheduleGroup", PathArgs::Name(segs[1].clone())))
+                Some(("DeleteScheduleGroup", PathArgs::Name(effective_name)))
             }
             (&Method::GET, 1, Some("schedule-groups")) => {
                 Some(("ListScheduleGroups", PathArgs::None))
             }
-            (&Method::POST, 2, Some("tags")) => {
-                Some(("TagResource", PathArgs::Arn(percent_decode(&segs[1]))))
-            }
-            (&Method::DELETE, 2, Some("tags")) => {
-                Some(("UntagResource", PathArgs::Arn(percent_decode(&segs[1]))))
-            }
+            (&Method::POST, 2, Some("tags")) => Some((
+                "TagResource",
+                PathArgs::Arn(percent_decode(&effective_name)),
+            )),
+            (&Method::DELETE, 2, Some("tags")) => Some((
+                "UntagResource",
+                PathArgs::Arn(percent_decode(&effective_name)),
+            )),
             (&Method::GET, 2, Some("tags")) => Some((
                 "ListTagsForResource",
-                PathArgs::Arn(percent_decode(&segs[1])),
+                PathArgs::Arn(percent_decode(&effective_name)),
             )),
             _ => None,
         }
@@ -320,9 +343,21 @@ impl SchedulerService {
     }
 
     fn list_schedules(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_list_query(req)?;
         let group_filter = req.query_params.get("ScheduleGroup").cloned();
+        if let Some(g) = group_filter.as_deref() {
+            validate_name("ScheduleGroup", g)?;
+        }
         let prefix = req.query_params.get("NamePrefix").cloned();
+        if let Some(p) = prefix.as_deref() {
+            validate_name_prefix(p)?;
+        }
         let state_filter = req.query_params.get("State").cloned();
+        if let Some(s) = state_filter.as_deref() {
+            if s != "ENABLED" && s != "DISABLED" {
+                return Err(validation(format!("Invalid State: {s}")));
+            }
+        }
         let max_results = req
             .query_params
             .get("MaxResults")
@@ -453,7 +488,11 @@ impl SchedulerService {
     }
 
     fn list_schedule_groups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_list_query(req)?;
         let prefix = req.query_params.get("NamePrefix").cloned();
+        if let Some(p) = prefix.as_deref() {
+            validate_name_prefix(p)?;
+        }
         let max_results = req
             .query_params
             .get("MaxResults")
@@ -494,6 +533,7 @@ impl SchedulerService {
         req: &AwsRequest,
         resource_arn: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
+        validate_resource_arn(resource_arn)?;
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         let tags_array = body
             .get("Tags")
@@ -522,6 +562,7 @@ impl SchedulerService {
         req: &AwsRequest,
         resource_arn: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
+        validate_resource_arn(resource_arn)?;
         let group_name = group_name_from_tag_arn(resource_arn)?;
         // Scheduler encodes TagKeys as a repeated query parameter
         // `TagKeys`. raw_query preserves repeated keys; we parse it
@@ -548,6 +589,7 @@ impl SchedulerService {
         req: &AwsRequest,
         resource_arn: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
+        validate_resource_arn(resource_arn)?;
         let group_name = group_name_from_tag_arn(resource_arn)?;
         let accounts = self.state.read();
         let state = accounts
@@ -805,6 +847,54 @@ fn validation(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", msg)
 }
 
+/// Validate the `NamePrefix` query filter shared by ListSchedules and
+/// ListScheduleGroups. The Smithy `NamePrefix` shape has the same
+/// constraints as `Name` (length 1..64, charset [0-9a-zA-Z-_.]).
+fn validate_name_prefix(value: &str) -> Result<(), AwsServiceError> {
+    if value.is_empty() || value.len() > NAME_MAX {
+        return Err(validation(format!(
+            "NamePrefix must be 1-{NAME_MAX} characters"
+        )));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err(validation(format!(
+            "NamePrefix must match {NAME_PATTERN_DESC}"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate the standard `MaxResults` (range 1..100) and `NextToken`
+/// (length 1..2048) query params shared by all List operations.
+fn validate_list_query(req: &AwsRequest) -> Result<(), AwsServiceError> {
+    if let Some(raw) = req.query_params.get("MaxResults") {
+        let n: i64 = raw
+            .parse()
+            .map_err(|_| validation("MaxResults must be an integer"))?;
+        if !(1..=100).contains(&n) {
+            return Err(validation("MaxResults must be between 1 and 100"));
+        }
+    }
+    if let Some(t) = req.query_params.get("NextToken") {
+        if t.is_empty() || t.len() > 2048 {
+            return Err(validation("NextToken must be 1-2048 characters"));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the ResourceArn path label used by Tag/Untag/ListTagsForResource.
+/// Smithy `ResourceArn` has length 1..1600.
+fn validate_resource_arn(arn: &str) -> Result<(), AwsServiceError> {
+    if arn.is_empty() || arn.len() > 1600 {
+        return Err(validation("ResourceArn must be 1-1600 characters"));
+    }
+    Ok(())
+}
+
 fn not_found_schedule(name: &str, group: &str) -> impl Fn() -> AwsServiceError + 'static {
     let name = name.to_string();
     let group = group.to_string();
@@ -967,9 +1057,10 @@ fn schedule_summary_json(s: &Schedule) -> Value {
         "State": s.state,
         "CreationDate": timestamp_to_number(s.creation_date),
         "LastModificationDate": timestamp_to_number(s.last_modification_date),
+        // ScheduleSummary.Target is a TargetSummary (only Arn). The full
+        // Target (with RoleArn etc.) is returned by GetSchedule.
         "Target": {
             "Arn": s.target.arn,
-            "RoleArn": s.target.role_arn,
         },
     })
 }
