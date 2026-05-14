@@ -3112,6 +3112,41 @@ fn head_bucket_missing_errors() {
     assert_aws_err(svc.head_bucket("123456789012", "nope"), "NoSuchBucket");
 }
 
+#[tokio::test]
+async fn bucket_subresource_without_bucket_errors() {
+    // Regression: requests like `GET /?tagging` (bucket name omitted)
+    // used to fall through to `list_buckets` and return 200, masking the
+    // missing required bucket. Real S3 rejects these with a validation
+    // error; mirror that so conformance probes targeting required-field
+    // omission see the expected 4xx.
+    use fakecloud_core::service::AwsService;
+    let svc = make_service();
+    let cases: &[(Method, &str)] = &[
+        (Method::GET, "tagging"),
+        (Method::GET, "acl"),
+        (Method::GET, "lifecycle"),
+        (Method::GET, "encryption"),
+        (Method::PUT, "tagging"),
+        (Method::PUT, "encryption"),
+        (Method::DELETE, "tagging"),
+        (Method::DELETE, "lifecycle"),
+    ];
+    for (method, q) in cases {
+        let req = make_request(method.clone(), "/", &[(q, "")], b"");
+        let resp = svc.handle(req).await;
+        let err = match resp {
+            Ok(_) => panic!("{method} /?{q} should error, got Ok"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.code(),
+            "InvalidBucketName",
+            "method={method} q={q} got {:?}",
+            err.code()
+        );
+    }
+}
+
 #[test]
 fn head_bucket_exists_returns_ok() {
     let svc = make_service();
