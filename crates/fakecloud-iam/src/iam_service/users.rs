@@ -949,6 +949,14 @@ impl IamService {
         // UserName is optional in the Smithy model (defaults to the caller).
         // Marker/MaxItems are optional pagination tokens we accept verbatim
         // since the op only declares NoSuchEntity and ServiceFailure.
+        let _ = super::validate_list_pagination(req)?;
+        validate_optional_string_length_with_code(
+            "UserName",
+            req.query_params.get("UserName").map(|s| s.as_str()),
+            1,
+            64,
+            "NoSuchEntity",
+        )?;
         let accounts = self.state.read();
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -1255,6 +1263,14 @@ impl IamService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         // UserName optional per Smithy; only NoSuchEntity is declared.
+        let _ = super::validate_list_pagination(req)?;
+        validate_optional_string_length_with_code(
+            "UserName",
+            req.query_params.get("UserName").map(|s| s.as_str()),
+            1,
+            64,
+            "NoSuchEntity",
+        )?;
         let accounts = self.state.read();
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);

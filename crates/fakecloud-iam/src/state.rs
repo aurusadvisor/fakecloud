@@ -371,6 +371,34 @@ pub struct IamState {
     /// `v2Token`). `None` means caller hasn't configured a preference.
     #[serde(default)]
     pub global_endpoint_token_version: Option<String>,
+    /// Delegation requests keyed by id. Records every state transition
+    /// (`PENDING` -> `ACCEPTED`/`REJECTED`/`SENT`) and the parameters
+    /// supplied at create-time so `GetDelegationRequest` can roundtrip
+    /// them.
+    #[serde(default)]
+    pub delegation_requests: BTreeMap<String, DelegationRequest>,
+    /// Whether outbound web identity federation is enabled for this
+    /// account. Toggled by `EnableOutboundWebIdentityFederation` /
+    /// `DisableOutboundWebIdentityFederation`.
+    #[serde(default)]
+    pub outbound_web_identity_federation_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegationRequest {
+    pub id: String,
+    pub owner_account_id: Option<String>,
+    pub description: String,
+    pub request_message: Option<String>,
+    pub requestor_workflow_id: String,
+    pub redirect_url: Option<String>,
+    pub notification_channel: String,
+    pub session_duration: i64,
+    pub only_send_by_owner: bool,
+    pub status: String,
+    pub notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub policy_template_arn: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -435,6 +463,8 @@ impl IamState {
             service_last_accessed_jobs: BTreeMap::new(),
             organizations_access_reports: BTreeMap::new(),
             global_endpoint_token_version: None,
+            delegation_requests: BTreeMap::new(),
+            outbound_web_identity_federation_enabled: false,
         }
     }
 

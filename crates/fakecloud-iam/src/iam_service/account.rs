@@ -8,7 +8,8 @@ use crate::state::{AccountPasswordPolicy, IamState, VirtualMfaDevice};
 
 use super::{
     attached_policy_name, empty_response, parse_tags, required_param_with_code,
-    resolve_calling_user, tags_xml, url_encode, validate_string_length_with_code, IamService,
+    resolve_calling_user, tags_xml, url_encode, validate_optional_string_length_with_code,
+    validate_string_length_with_code, IamService,
 };
 use fakecloud_core::query::required_param;
 
@@ -204,16 +205,25 @@ fn validate_password_policy_inputs(req: &AwsRequest) -> Result<(), AwsServiceErr
 
     let mut errors = Vec::new();
     if let Some(v) = min_len {
+        if v < 6 {
+            errors.push(format!("Value \"{v}\" at \"minimumPasswordLength\" failed to satisfy constraint: Member must have value greater than or equal to 6"));
+        }
         if v > 128 {
             errors.push(format!("Value \"{v}\" at \"minimumPasswordLength\" failed to satisfy constraint: Member must have value less than or equal to 128"));
         }
     }
     if let Some(v) = reuse_prevention {
+        if v < 1 {
+            errors.push(format!("Value \"{v}\" at \"passwordReusePrevention\" failed to satisfy constraint: Member must have value greater than or equal to 1"));
+        }
         if v > 24 {
             errors.push(format!("Value \"{v}\" at \"passwordReusePrevention\" failed to satisfy constraint: Member must have value less than or equal to 24"));
         }
     }
     if let Some(v) = max_age {
+        if v < 1 {
+            errors.push(format!("Value \"{v}\" at \"maxPasswordAge\" failed to satisfy constraint: Member must have value greater than or equal to 1"));
+        }
         if v > 1095 {
             errors.push(format!("Value \"{v}\" at \"maxPasswordAge\" failed to satisfy constraint: Member must have value less than or equal to 1095"));
         }
@@ -231,7 +241,7 @@ fn validate_password_policy_inputs(req: &AwsRequest) -> Result<(), AwsServiceErr
     );
     Err(AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
-        "ValidationError",
+        "MalformedPolicyDocument",
         msg,
     ))
 }
@@ -398,6 +408,7 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let _ = super::validate_list_pagination(req)?;
         let accounts = self.state.read();
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -439,6 +450,7 @@ impl IamService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let alias = required_param(&req.query_params, "AccountAlias")?;
+        validate_string_length_with_code("AccountAlias", &alias, 3, 63, "InvalidInput")?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
@@ -455,6 +467,7 @@ impl IamService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let alias = required_param(&req.query_params, "AccountAlias")?;
+        validate_string_length_with_code("AccountAlias", &alias, 3, 63, "InvalidInput")?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         state.account_aliases.retain(|a| a != &alias);
@@ -467,6 +480,7 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let _ = super::validate_list_pagination(req)?;
         let accounts = self.state.read();
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -857,6 +871,15 @@ impl IamService {
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let assignment_status = req.query_params.get("AssignmentStatus").cloned();
+        if let Some(ref s) = assignment_status {
+            if !matches!(s.as_str(), "Assigned" | "Unassigned" | "Any") {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    format!("Value '{s}' at 'assignmentStatus' failed to satisfy constraint: Member must satisfy enum value set: [Assigned, Unassigned, Any]"),
+                ));
+            }
+        }
         let max_items_i64 = parse_optional_i64_param(
             "maxItems",
             req.query_params.get("MaxItems").map(|s| s.as_str()),
@@ -1019,7 +1042,8 @@ impl IamService {
         // Declared: ConcurrentModification, EntityTemporarilyUnmodifiable,
         // LimitExceeded, NoSuchEntity, ServiceFailure -> NoSuchEntity for bad
         // UserName/SerialNumber input.
-        let _user_name = required_param_with_code(&req.query_params, "UserName", "NoSuchEntity")?;
+        let user_name = required_param_with_code(&req.query_params, "UserName", "NoSuchEntity")?;
+        validate_string_length_with_code("userName", &user_name, 1, 128, "NoSuchEntity")?;
         let serial_number =
             required_param_with_code(&req.query_params, "SerialNumber", "NoSuchEntity")?;
         validate_string_length_with_code("serialNumber", &serial_number, 9, 256, "NoSuchEntity")?;
@@ -1041,6 +1065,14 @@ impl IamService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         // UserName optional per Smithy; only NoSuchEntity + ServiceFailure declared.
+        let _ = super::validate_list_pagination(req)?;
+        validate_optional_string_length_with_code(
+            "UserName",
+            req.query_params.get("UserName").map(|s| s.as_str()),
+            1,
+            128,
+            "NoSuchEntity",
+        )?;
         let accounts = self.state.read();
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);

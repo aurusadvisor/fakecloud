@@ -1,5 +1,5 @@
 {
-  "variants_passed": 74016,
+  "variants_passed": 75018,
   "total_variants": 86666,
   "per_service": {
     "lambda": {
@@ -7,7 +7,7 @@
       "total": 3176
     },
     "iam": {
-      "passed": 4998,
+      "passed": 6000,
       "total": 6000
     },
     "secretsmanager": {

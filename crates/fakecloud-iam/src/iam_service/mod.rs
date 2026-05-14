@@ -335,6 +335,26 @@ impl AwsService for IamService {
             }
             "UpdateServerCertificate" => self.update_server_certificate(&req),
 
+            // Delegation requests + outbound web identity federation
+            "CreateDelegationRequest" => self.create_delegation_request(&req),
+            "GetDelegationRequest" => self.get_delegation_request(&req),
+            "ListDelegationRequests" => self.list_delegation_requests(&req),
+            "AcceptDelegationRequest" => self.accept_delegation_request(&req),
+            "RejectDelegationRequest" => self.reject_delegation_request(&req),
+            "UpdateDelegationRequest" => self.update_delegation_request(&req),
+            "AssociateDelegationRequest" => self.associate_delegation_request(&req),
+            "SendDelegationToken" => self.send_delegation_token(&req),
+            "EnableOutboundWebIdentityFederation" => {
+                self.enable_outbound_web_identity_federation(&req)
+            }
+            "DisableOutboundWebIdentityFederation" => {
+                self.disable_outbound_web_identity_federation(&req)
+            }
+            "GetOutboundWebIdentityFederationInfo" => {
+                self.get_outbound_web_identity_federation_info(&req)
+            }
+            "GetHumanReadableSummary" => self.get_human_readable_summary(&req),
+
             _ => Err(AwsServiceError::action_not_implemented("iam", &req.action)),
         };
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
@@ -566,6 +586,18 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ResyncMFADevice",
     "SetSecurityTokenServicePreferences",
     "UpdateServerCertificate",
+    "CreateDelegationRequest",
+    "GetDelegationRequest",
+    "ListDelegationRequests",
+    "AcceptDelegationRequest",
+    "RejectDelegationRequest",
+    "UpdateDelegationRequest",
+    "AssociateDelegationRequest",
+    "SendDelegationToken",
+    "EnableOutboundWebIdentityFederation",
+    "DisableOutboundWebIdentityFederation",
+    "GetOutboundWebIdentityFederationInfo",
+    "GetHumanReadableSummary",
 ];
 
 // ========= Helper functions =========
