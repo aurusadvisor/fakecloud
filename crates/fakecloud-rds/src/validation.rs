@@ -49,10 +49,14 @@ pub(crate) fn prevalidate(action: &str, req: &AwsRequest) -> Result<(), AwsServi
         match req.query_params.get(*name) {
             Some(value) if !value.is_empty() => {}
             _ => {
-                // Also accept a member list of the form `<List>.member.1`
-                // for Query list parameters (e.g. `VpcSubnetIds.member.1`),
-                // because Smithy required-list members are sent that way.
-                let prefix = format!("{name}.member.");
+                // Accept list-shaped parameters where the SDK serialised
+                // the members under nested keys like `<List>.member.1.X`
+                // or `<List>.Parameter.1.X` (RDS uses both flat and named
+                // member styles depending on the Smithy `xmlName` of the
+                // list's inner shape). Treating any key beginning with
+                // `<name>.` as evidence of presence avoids false rejects
+                // on `Parameters`, `Auth`, `VpcSubnetIds`, etc.
+                let prefix = format!("{name}.");
                 let has_list_member = req.query_params.keys().any(|k| k.starts_with(&prefix));
                 if !has_list_member {
                     return Err(missing_param(name));
