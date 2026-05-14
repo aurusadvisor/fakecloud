@@ -7,7 +7,7 @@ async fn test_retrieve() {
 
     let resp = client
         .retrieve()
-        .knowledge_base_id("test-kb-id")
+        .knowledge_base_id("testkbid01")
         .retrieval_query(
             aws_sdk_bedrockagentruntime::types::KnowledgeBaseQuery::builder()
                 .text("test query")

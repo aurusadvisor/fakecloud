@@ -84,7 +84,7 @@ async fn bedrock_agent_runtime_introspection_records_retrieve_and_rag() {
 
     runtime_client
         .retrieve()
-        .knowledge_base_id("kb-intro-1")
+        .knowledge_base_id("kbintro01a")
         .retrieval_query(
             KnowledgeBaseQuery::builder()
                 .text("intro retrieve query")

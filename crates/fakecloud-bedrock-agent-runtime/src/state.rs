@@ -34,6 +34,18 @@ pub struct BedrockAgentRuntimeState {
     pub invocations: Vec<InvocationRecord>,
     pub sessions: BTreeMap<String, Session>,
     pub flow_executions: BTreeMap<String, FlowExecution>,
+    /// Per-session list of invocations created via `CreateInvocation`
+    /// (separate from `invocations` which is the data-plane invocation log).
+    #[serde(default)]
+    pub session_invocations: BTreeMap<String, Vec<SessionInvocation>>,
+    /// Invocation steps keyed by `(sessionId, invocationStepId)`. Stored as a
+    /// flat map so `GetInvocationStep` can look up by step id alone while
+    /// `ListInvocationSteps` can filter by session/invocation.
+    #[serde(default)]
+    pub invocation_steps: BTreeMap<String, InvocationStep>,
+    /// Tags keyed by resource ARN.
+    #[serde(default)]
+    pub tags: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl BedrockAgentRuntimeState {
@@ -43,6 +55,9 @@ impl BedrockAgentRuntimeState {
             invocations: Vec::new(),
             sessions: BTreeMap::new(),
             flow_executions: BTreeMap::new(),
+            session_invocations: BTreeMap::new(),
+            invocation_steps: BTreeMap::new(),
+            tags: BTreeMap::new(),
         }
     }
 }
@@ -76,17 +91,47 @@ pub struct InvocationRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub session_id: String,
+    pub session_arn: String,
+    pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
+    #[serde(default)]
+    pub encryption_key_arn: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInvocation {
+    pub invocation_id: String,
+    pub session_id: String,
+    pub description: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvocationStep {
+    pub session_id: String,
+    pub invocation_id: String,
+    pub invocation_step_id: String,
+    pub invocation_step_time: DateTime<Utc>,
+    pub payload: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowExecution {
     pub execution_id: String,
+    pub execution_arn: String,
     pub flow_id: String,
+    #[serde(default)]
+    pub flow_alias_id: String,
+    #[serde(default)]
+    pub flow_version: String,
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub ended_at: Option<DateTime<Utc>>,
 }
 
 #[cfg(test)]
