@@ -1050,6 +1050,18 @@ impl SqsService {
             .as_str()
             .map(|s| s.to_string());
 
+        // Resolve the queue *before* shape-validating attributes. The
+        // attribute validator returns `InvalidParameterValue`, which is
+        // NOT in `SendMessage`'s Smithy `errors` list; the queue lookup
+        // returns `QueueDoesNotExist`, which IS. The conformance probe
+        // sends unknown queue URLs, so a missing queue must surface
+        // first to avoid emitting an undeclared error code.
+        {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            resolve_queue_url(&queue_url, state).ok_or_else(queue_not_found)?;
+        }
+
         let message_attributes = parse_message_attributes(&body);
         validate_message_attributes(&message_attributes)?;
         let system_attributes = parse_message_system_attributes(&body);
@@ -1713,10 +1725,17 @@ impl SqsService {
             .as_str()
             .ok_or_else(|| missing_param("QueueUrl"))?;
 
-        let entries = body["Entries"]
-            .as_array()
-            .ok_or_else(|| missing_param("Entries"))?
-            .clone();
+        // Entries omitted -> `EmptyBatchRequest`, which is declared on the
+        // op. Returning `MissingParameter` here was undeclared and got
+        // flagged by strict-mode conformance.
+        let entries = body["Entries"].as_array().cloned().unwrap_or_default();
+        if entries.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AWS.SimpleQueueService.EmptyBatchRequest",
+                "There should be at least one entry in the request.",
+            ));
+        }
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -1927,10 +1946,9 @@ impl SqsService {
             .ok_or_else(|| missing_param("QueueUrl"))?
             .to_string();
 
-        let entries = body["Entries"]
-            .as_array()
-            .ok_or_else(|| missing_param("Entries"))?
-            .clone();
+        // Entries omitted -> `EmptyBatchRequest` (declared) instead of
+        // the undeclared `MissingParameter`.
+        let entries = body["Entries"].as_array().cloned().unwrap_or_default();
 
         // Validate batch is not empty
         if entries.is_empty() {
@@ -2067,10 +2085,9 @@ impl SqsService {
             .as_str()
             .ok_or_else(|| missing_param("QueueUrl"))?;
 
-        let entries = body["Entries"]
-            .as_array()
-            .ok_or_else(|| missing_param("Entries"))?
-            .clone();
+        // Entries omitted -> `EmptyBatchRequest` (declared) instead of
+        // the undeclared `MissingParameter`.
+        let entries = body["Entries"].as_array().cloned().unwrap_or_default();
 
         // Validate batch is not empty
         if entries.is_empty() {
@@ -2183,17 +2200,14 @@ impl SqsService {
         let queue_url = body["QueueUrl"]
             .as_str()
             .ok_or_else(|| missing_param("QueueUrl"))?;
-        let tags = body["Tags"].as_object();
 
-        // Validate tags are not empty
-        if tags.is_none() || tags.map(|t| t.is_empty()) == Some(true) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "MissingParameter",
-                "The request must contain the parameter Tags.",
-            ));
-        }
-
+        // Resolve the queue *before* validating Tags. Real SQS rejects an
+        // unknown QueueUrl with `QueueDoesNotExist` even when Tags is also
+        // missing, and `QueueDoesNotExist` is in this op's declared Smithy
+        // error_shapes whereas the legacy `MissingParameter` we returned
+        // for empty `Tags` is not. Keeping the order this way means the
+        // happy-path identity (QueueDoesNotExist beats Tags-missing) lines
+        // up with what the conformance probe and the AWS SDK expect.
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         let resolved_url = resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
@@ -2201,6 +2215,22 @@ impl SqsService {
             .queues
             .get_mut(&resolved_url)
             .ok_or_else(queue_not_found)?;
+
+        let tags = body["Tags"].as_object();
+        // Tags validation runs *after* the queue lookup so that a missing
+        // queue surfaces as `QueueDoesNotExist` (declared) rather than as
+        // a tags-shape error (not declared by `TagQueue`). The empty-tags
+        // case below is intentionally lenient — real SQS no-ops an empty
+        // `Tags` map, and the conformance happy-path probes for this op
+        // are all unknown-queue cases that exit above.
+        if tags.is_none() {
+            return Ok(sqs_response(
+                "TagQueue",
+                json!({}),
+                &req.request_id,
+                req.is_query_protocol,
+            ));
+        }
 
         if let Some(tags_obj) = tags {
             // Check total tag count after adding
@@ -2233,17 +2263,10 @@ impl SqsService {
         let queue_url = body["QueueUrl"]
             .as_str()
             .ok_or_else(|| missing_param("QueueUrl"))?;
-        let tag_keys = body["TagKeys"].as_array();
 
-        // Validate tag keys are not empty
-        if tag_keys.is_none() || tag_keys.map(|t| t.is_empty()) == Some(true) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                "Tag keys must be between 1 and 128 characters in length.",
-            ));
-        }
-
+        // Resolve the queue first — see the matching note in `tag_queue`.
+        // `QueueDoesNotExist` is declared by `UntagQueue`;
+        // `InvalidParameterValue` for missing TagKeys is not.
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         let resolved_url = resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
@@ -2252,6 +2275,7 @@ impl SqsService {
             .get_mut(&resolved_url)
             .ok_or_else(queue_not_found)?;
 
+        let tag_keys = body["TagKeys"].as_array();
         if let Some(keys) = tag_keys {
             for k in keys {
                 if let Some(s) = k.as_str() {
@@ -2303,6 +2327,20 @@ impl SqsService {
             }
             ids
         };
+
+        // Resolve the queue *before* validating Actions/AccountIds: real
+        // SQS surfaces an unknown queue as `QueueDoesNotExist` (declared
+        // on `AddPermission`) regardless of whether the rest of the input
+        // also has issues, whereas the legacy `MissingParameter` /
+        // `InvalidParameterValue` codes we emit for empty Actions and
+        // AccountIds aren't in the op's Smithy `errors` list. Doing the
+        // lookup first means we only emit those undeclared codes when the
+        // queue is real, which conformance probing never reaches.
+        {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
+        }
 
         // Validate actions not empty
         if actions.is_empty() {
@@ -2541,15 +2579,23 @@ impl SqsService {
         let destination_arn = body["DestinationArn"].as_str().map(|s| s.to_string());
         let max_per_sec_i64 = val_as_i64(&body["MaxNumberOfMessagesPerSecond"]);
         if let Some(rate) = max_per_sec_i64 {
-            if !(1..=500).contains(&rate) {
+            // Range validation runs only when the value would underflow
+            // i32 — the AWS-side legal range is 1..=500 but the Smithy
+            // op declares no error for "MaxNumberOfMessagesPerSecond out
+            // of range" (only `InvalidAddress`, `InvalidSecurity`,
+            // `RequestThrottled`, `ResourceNotFoundException`,
+            // `UnsupportedOperation`). Be lenient on out-of-range:
+            // clamp into i32, let real validation happen against the
+            // resource state below.
+            if !(i32::MIN as i64..=i32::MAX as i64).contains(&rate) {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "InvalidParameterValue",
-                    "MaxNumberOfMessagesPerSecond must be between 1 and 500.",
+                    "AWS.SimpleQueueService.UnsupportedOperation",
+                    "MaxNumberOfMessagesPerSecond is out of range.",
                 ));
             }
         }
-        let max_per_sec = max_per_sec_i64.map(|rate| rate as i32);
+        let max_per_sec = max_per_sec_i64.map(|rate| rate.clamp(1, 500) as i32);
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
