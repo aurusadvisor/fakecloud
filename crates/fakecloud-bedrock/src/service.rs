@@ -887,6 +887,12 @@ impl AwsService for BedrockService {
                 action: format!("{} {}", req.method, req.raw_path),
             })?;
 
+        // Centralized Smithy-aligned validation. Emits the declared
+        // `ValidationException` shape for missing required fields,
+        // out-of-bound string lengths, invalid enum values, and integer
+        // range violations before the per-handler logic runs.
+        crate::validation::prevalidate(action, &req)?;
+
         let mutates = !is_read_only_action(action);
         let body = req.json_body();
 
