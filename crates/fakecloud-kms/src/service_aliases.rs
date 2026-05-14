@@ -12,11 +12,17 @@ use super::*;
 impl KmsService {
     pub(super) fn create_alias(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let alias_name = require_string_field(&body, "AliasName")?;
-        let target_key_id = require_string_field(&body, "TargetKeyId")?;
+        // CreateAlias' Smithy contract does not declare `ValidationException`;
+        // input/length problems surface as `InvalidAliasNameException`.
+        let alias_name = require_string_field(&body, "AliasName")
+            .map_err(|e| recode_validation(e, "InvalidAliasNameException"))?;
+        let target_key_id = require_string_field(&body, "TargetKeyId")
+            .map_err(|e| recode_validation(e, "InvalidAliasNameException"))?;
 
-        validate_alias_name(&alias_name)?;
-        validate_alias_target(&target_key_id)?;
+        validate_alias_name(&alias_name)
+            .map_err(|e| recode_validation(e, "InvalidAliasNameException"))?;
+        validate_alias_target(&target_key_id)
+            .map_err(|e| recode_validation(e, "InvalidAliasNameException"))?;
 
         let resolved = self
             .resolve_key_id_for(&req.account_id, &req.region, &target_key_id)
@@ -63,10 +69,13 @@ impl KmsService {
 
     pub(super) fn delete_alias(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
+        // DeleteAlias only declares NotFound / KMSInternal / DependencyTimeout /
+        // KMSInvalidState in its Smithy contract. Surface missing/malformed
+        // input as NotFoundException to stay within the declared error set.
         let alias_name = body["AliasName"].as_str().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
+                "NotFoundException",
                 "AliasName is required",
             )
         })?;
@@ -74,7 +83,7 @@ impl KmsService {
         if !alias_name.starts_with("alias/") {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
+                "NotFoundException",
                 "Invalid identifier",
             ));
         }
@@ -141,17 +150,27 @@ impl KmsService {
     pub(super) fn list_aliases(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
-        validate_optional_json_range("limit", &body["Limit"], 1, 100)?;
-        validate_optional_string_length("marker", body["Marker"].as_str(), 1, 320)?;
+        // ListAliases declares InvalidArnException + InvalidMarkerException
+        // (and a few infrastructure errors), but not ValidationException.
+        // Map Marker/Limit failures onto InvalidMarkerException and KeyId
+        // failures onto InvalidArnException.
+        recoded("InvalidMarkerException", || {
+            validate_optional_json_range("limit", &body["Limit"], 1, 100)
+        })?;
+        recoded("InvalidMarkerException", || {
+            validate_optional_string_length("marker", body["Marker"].as_str(), 1, 320)
+        })?;
 
         if !body["KeyId"].is_null() && !body["KeyId"].is_string() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
+                "InvalidArnException",
                 "KeyId must be a string",
             ));
         }
-        validate_optional_string_length("keyId", body["KeyId"].as_str(), 1, 2048)?;
+        recoded("InvalidArnException", || {
+            validate_optional_string_length("keyId", body["KeyId"].as_str(), 1, 2048)
+        })?;
 
         let key_id_filter = body["KeyId"].as_str();
 

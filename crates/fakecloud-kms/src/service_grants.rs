@@ -117,17 +117,29 @@ impl KmsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
-        validate_required("RetiringPrincipal", &body["RetiringPrincipal"])?;
+        // ListRetirableGrants declares InvalidArn / InvalidMarker / NotFound /
+        // KMSInternal / DependencyTimeout. Map RetiringPrincipal shape
+        // failures onto InvalidArnException and Limit/Marker onto
+        // InvalidMarkerException.
+        recoded("InvalidArnException", || {
+            validate_required("RetiringPrincipal", &body["RetiringPrincipal"])
+        })?;
         let retiring_principal = body["RetiringPrincipal"].as_str().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
+                "InvalidArnException",
                 "RetiringPrincipal must be a string",
             )
         })?;
-        validate_string_length("retiringPrincipal", retiring_principal, 1, 256)?;
-        validate_optional_json_range("limit", &body["Limit"], 1, 1000)?;
-        validate_optional_string_length("marker", body["Marker"].as_str(), 1, 320)?;
+        recoded("InvalidArnException", || {
+            validate_string_length("retiringPrincipal", retiring_principal, 1, 256)
+        })?;
+        recoded("InvalidMarkerException", || {
+            validate_optional_json_range("limit", &body["Limit"], 1, 1000)
+        })?;
+        recoded("InvalidMarkerException", || {
+            validate_optional_string_length("marker", body["Marker"].as_str(), 1, 320)
+        })?;
 
         let limit = body["Limit"].as_i64().unwrap_or(1000) as usize;
         let marker = body["Marker"].as_str();

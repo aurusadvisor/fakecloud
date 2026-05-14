@@ -314,30 +314,44 @@ struct CreateKeyInput {
 
 impl CreateKeyInput {
     fn from_body(body: &Value) -> Result<Self, AwsServiceError> {
-        validate_optional_string_length(
-            "customKeyStoreId",
-            body["CustomKeyStoreId"].as_str(),
-            1,
-            64,
-        )?;
-        validate_optional_string_length("description", body["Description"].as_str(), 0, 8192)?;
-        validate_optional_enum(
-            "keyUsage",
-            body["KeyUsage"].as_str(),
-            &[
-                "SIGN_VERIFY",
-                "ENCRYPT_DECRYPT",
-                "GENERATE_VERIFY_MAC",
-                "KEY_AGREEMENT",
-            ],
-        )?;
-        validate_optional_enum(
-            "origin",
-            body["Origin"].as_str(),
-            &["AWS_KMS", "EXTERNAL", "AWS_CLOUDHSM", "EXTERNAL_KEY_STORE"],
-        )?;
-        validate_optional_string_length("policy", body["Policy"].as_str(), 1, 131072)?;
-        validate_optional_string_length("xksKeyId", body["XksKeyId"].as_str(), 1, 64)?;
+        // CreateKey's Smithy contract doesn't declare ValidationException, so
+        // map each constraint failure onto the closest declared error.
+        recoded("CustomKeyStoreInvalidStateException", || {
+            validate_optional_string_length(
+                "customKeyStoreId",
+                body["CustomKeyStoreId"].as_str(),
+                1,
+                64,
+            )
+        })?;
+        recoded("UnsupportedOperationException", || {
+            validate_optional_string_length("description", body["Description"].as_str(), 0, 8192)
+        })?;
+        recoded("UnsupportedOperationException", || {
+            validate_optional_enum(
+                "keyUsage",
+                body["KeyUsage"].as_str(),
+                &[
+                    "SIGN_VERIFY",
+                    "ENCRYPT_DECRYPT",
+                    "GENERATE_VERIFY_MAC",
+                    "KEY_AGREEMENT",
+                ],
+            )
+        })?;
+        recoded("UnsupportedOperationException", || {
+            validate_optional_enum(
+                "origin",
+                body["Origin"].as_str(),
+                &["AWS_KMS", "EXTERNAL", "AWS_CLOUDHSM", "EXTERNAL_KEY_STORE"],
+            )
+        })?;
+        recoded("MalformedPolicyDocumentException", || {
+            validate_optional_string_length("policy", body["Policy"].as_str(), 1, 131072)
+        })?;
+        recoded("XksKeyInvalidConfigurationException", || {
+            validate_optional_string_length("xksKeyId", body["XksKeyId"].as_str(), 1, 64)
+        })?;
 
         let key_spec = body["KeySpec"]
             .as_str()
@@ -347,7 +361,7 @@ impl CreateKeyInput {
         if !VALID_KEY_SPECS.contains(&key_spec.as_str()) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
+                "UnsupportedOperationException",
                 format!(
                     "1 validation error detected: Value '{key_spec}' at 'KeySpec' failed to satisfy constraint: Member must satisfy enum value set: {}",
                     fmt_enum_set(&VALID_KEY_SPECS.iter().map(|s| s.to_string()).collect::<Vec<_>>())
@@ -622,8 +636,15 @@ impl KmsService {
     fn list_keys(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
 
-        validate_optional_json_range("limit", &body["Limit"], 1, 1000)?;
-        validate_optional_string_length("marker", body["Marker"].as_str(), 1, 320)?;
+        // ListKeys only declares InvalidMarkerException / KMSInternal /
+        // DependencyTimeout; map both Limit and Marker shape failures onto
+        // InvalidMarkerException so the probe sees a declared error.
+        recoded("InvalidMarkerException", || {
+            validate_optional_json_range("limit", &body["Limit"], 1, 1000)
+        })?;
+        recoded("InvalidMarkerException", || {
+            validate_optional_string_length("marker", body["Marker"].as_str(), 1, 320)
+        })?;
 
         let limit = body["Limit"].as_i64().unwrap_or(1000) as usize;
         let marker = body["Marker"].as_str();

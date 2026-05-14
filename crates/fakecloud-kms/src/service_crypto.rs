@@ -12,15 +12,22 @@ use super::*;
 impl KmsService {
     pub(super) fn encrypt(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let key_id = Self::require_key_id(&body)?;
+        // Encrypt declares NotFound / Disabled / InvalidKeyUsage / KeyUnavailable /
+        // InvalidGrantToken / DryRunOperation / KMSInternal / KMSInvalidState /
+        // DependencyTimeout (no ValidationException). Map any input-shape
+        // failures onto InvalidKeyUsageException, which is the closest match
+        // for "the request to use the key is invalid".
+        let key_id =
+            Self::require_key_id(&body).map_err(|e| recode_validation(e, "NotFoundException"))?;
         let plaintext_b64 = body["Plaintext"].as_str().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
+                "InvalidKeyUsageException",
                 "Plaintext is required",
             )
         })?;
-        let plaintext_bytes = decode_plaintext(plaintext_b64)?;
+        let plaintext_bytes = decode_plaintext(plaintext_b64)
+            .map_err(|e| recode_validation(e, "InvalidKeyUsageException"))?;
 
         let resolved = self
             .resolve_key_id_for(&req.account_id, &req.region, &key_id)
@@ -61,11 +68,29 @@ impl KmsService {
 
     pub(super) fn decrypt(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
+        // Decrypt's Smithy contract doesn't declare ValidationException;
+        // bad ciphertext / missing fields surface as InvalidCiphertextException.
         let ciphertext_b64 = body["CiphertextBlob"].as_str().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
+                "InvalidCiphertextException",
                 "CiphertextBlob is required",
+            )
+        })?;
+        // KeyId / EncryptionAlgorithm length+enum validation.
+        recoded("NotFoundException", || {
+            validate_optional_string_length("keyId", body["KeyId"].as_str(), 1, 2048)
+        })?;
+        recoded("InvalidKeyUsageException", || {
+            validate_optional_enum(
+                "encryptionAlgorithm",
+                body["EncryptionAlgorithm"].as_str(),
+                &[
+                    "SYMMETRIC_DEFAULT",
+                    "RSAES_OAEP_SHA_1",
+                    "RSAES_OAEP_SHA_256",
+                    "SM2PKE",
+                ],
             )
         })?;
 
@@ -96,18 +121,53 @@ impl KmsService {
 
     pub(super) fn re_encrypt(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
+        // ReEncrypt declares NotFound / Disabled / InvalidCiphertext /
+        // InvalidKeyUsage / IncorrectKey / KeyUnavailable /
+        // InvalidGrantToken / DryRunOperation / KMSInternal /
+        // KMSInvalidState / DependencyTimeout. Map missing/bad shapes onto
+        // InvalidCiphertextException (source) and NotFoundException (dest).
         let ciphertext_b64 = body["CiphertextBlob"].as_str().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
+                "InvalidCiphertextException",
                 "CiphertextBlob is required",
             )
         })?;
         let dest_key_id = body["DestinationKeyId"].as_str().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
+                "NotFoundException",
                 "DestinationKeyId is required",
+            )
+        })?;
+        recoded("NotFoundException", || {
+            validate_string_length("destinationKeyId", dest_key_id, 1, 2048)
+        })?;
+        recoded("NotFoundException", || {
+            validate_optional_string_length("sourceKeyId", body["SourceKeyId"].as_str(), 1, 2048)
+        })?;
+        recoded("InvalidKeyUsageException", || {
+            validate_optional_enum(
+                "sourceEncryptionAlgorithm",
+                body["SourceEncryptionAlgorithm"].as_str(),
+                &[
+                    "SYMMETRIC_DEFAULT",
+                    "RSAES_OAEP_SHA_1",
+                    "RSAES_OAEP_SHA_256",
+                    "SM2PKE",
+                ],
+            )
+        })?;
+        recoded("InvalidKeyUsageException", || {
+            validate_optional_enum(
+                "destinationEncryptionAlgorithm",
+                body["DestinationEncryptionAlgorithm"].as_str(),
+                &[
+                    "SYMMETRIC_DEFAULT",
+                    "RSAES_OAEP_SHA_1",
+                    "RSAES_OAEP_SHA_256",
+                    "SM2PKE",
+                ],
             )
         })?;
 
@@ -320,7 +380,7 @@ impl KmsService {
         if message_bytes.is_empty() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
+                "InvalidKeyUsageException",
                 "1 validation error detected: Value at 'Message' failed to satisfy constraint: Member must have length greater than or equal to 1",
             ));
         }
@@ -351,7 +411,7 @@ impl KmsService {
         if key.key_usage != "SIGN_VERIFY" {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
+                "InvalidKeyUsageException",
                 format!(
                     "1 validation error detected: Value '{}' at 'KeyId' failed to satisfy constraint: Member must point to a key with usage: 'SIGN_VERIFY'",
                     resolved
@@ -372,7 +432,7 @@ impl KmsService {
             };
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
+                "InvalidKeyUsageException",
                 format!(
                     "1 validation error detected: Value '{}' at 'SigningAlgorithm' failed to satisfy constraint: Member must satisfy enum value set: {}",
                     signing_algorithm, fmt_enum_set(&set)
@@ -403,7 +463,7 @@ impl KmsService {
             .map_err(|e| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ValidationException",
+                    "InvalidKeyUsageException",
                     format!("Sign failed: {e}"),
                 )
             })?
@@ -417,7 +477,7 @@ impl KmsService {
             .map_err(|e| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ValidationException",
+                    "InvalidKeyUsageException",
                     format!("Sign failed: {e}"),
                 )
             })?

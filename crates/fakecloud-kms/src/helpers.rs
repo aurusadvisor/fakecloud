@@ -269,6 +269,49 @@ pub(crate) fn signing_algorithms_for_key_spec(key_spec: &str) -> Option<Vec<Stri
     }
 }
 
+/// Map a generic `ValidationException` (which KMS's Smithy contract never
+/// declares) onto the operation-appropriate KMS error code. All other errors
+/// pass through unchanged so callers don't accidentally lose more specific
+/// failures.
+pub(crate) fn recode_validation(err: AwsServiceError, target_code: &str) -> AwsServiceError {
+    if let AwsServiceError::AwsError {
+        status,
+        code,
+        message,
+        extra_fields,
+        headers,
+    } = err
+    {
+        if code == "ValidationException" {
+            return AwsServiceError::AwsError {
+                status,
+                code: target_code.to_string(),
+                message,
+                extra_fields,
+                headers,
+            };
+        }
+        return AwsServiceError::AwsError {
+            status,
+            code,
+            message,
+            extra_fields,
+            headers,
+        };
+    }
+    err
+}
+
+/// Run a validator chain and re-code any resulting `ValidationException` to
+/// the supplied KMS-native code. Use when an operation's Smithy contract
+/// lacks `ValidationException` (which is most of KMS).
+pub(crate) fn recoded<F: FnOnce() -> Result<(), AwsServiceError>>(
+    code: &str,
+    f: F,
+) -> Result<(), AwsServiceError> {
+    f().map_err(|e| recode_validation(e, code))
+}
+
 pub(crate) fn require_string_field(body: &Value, field: &str) -> Result<String, AwsServiceError> {
     body[field].as_str().map(|s| s.to_string()).ok_or_else(|| {
         AwsServiceError::aws_error(
@@ -391,6 +434,10 @@ pub(crate) fn build_encrypt_ciphertext(
 }
 
 /// Reject empty/undecodable base64 for `Verify`'s Message and Signature.
+/// Verify's Smithy contract declares KMSInvalidSignatureException for
+/// signature problems and InvalidKeyUsageException for usage / message
+/// problems, but not ValidationException — so we lean on the latter
+/// because both Message and Signature are key-usage-shape concerns.
 pub(crate) fn require_non_empty_b64(field: &str, b64: &str) -> Result<(), AwsServiceError> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(b64)
@@ -398,7 +445,7 @@ pub(crate) fn require_non_empty_b64(field: &str, b64: &str) -> Result<(), AwsSer
     if bytes.is_empty() {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
-            "ValidationException",
+            "InvalidKeyUsageException",
             format!(
                 "1 validation error detected: Value at '{field}' failed to satisfy constraint: Member must have length greater than or equal to 1"
             ),
@@ -441,9 +488,11 @@ pub(crate) fn validate_key_usage_signing(
     resolved: &str,
 ) -> Result<(), AwsServiceError> {
     if key.key_usage != "SIGN_VERIFY" {
+        // Both Sign and Verify declare InvalidKeyUsageException; use it
+        // rather than the unmodelled ValidationException.
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
-            "ValidationException",
+            "InvalidKeyUsageException",
             format!(
                 "1 validation error detected: Value '{resolved}' at 'KeyId' failed to satisfy constraint: Member must point to a key with usage: 'SIGN_VERIFY'"
             ),
@@ -468,7 +517,7 @@ pub(crate) fn validate_signing_algorithm(
         };
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
-            "ValidationException",
+            "InvalidKeyUsageException",
             format!(
                 "1 validation error detected: Value '{signing_algorithm}' at 'SigningAlgorithm' failed to satisfy constraint: Member must satisfy enum value set: {}",
                 fmt_enum_set(&set)
