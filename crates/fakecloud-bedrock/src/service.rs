@@ -684,12 +684,41 @@ impl BedrockService {
             (Method::POST, 3) if segs[0] == "model" && segs[2] == "count-tokens" => {
                 Some(("CountTokens", Some(decode(&segs[1])), None))
             }
+            // `POST /model//<op>` (empty modelId, length validator surfaces it).
+            (Method::POST, 2) if segs[0] == "model" => {
+                let op = match segs[1].as_str() {
+                    "invoke" => Some("InvokeModel"),
+                    "invoke-with-response-stream" => Some("InvokeModelWithResponseStream"),
+                    "invoke-with-bidirectional-stream" => {
+                        Some("InvokeModelWithBidirectionalStream")
+                    }
+                    "converse" => Some("Converse"),
+                    "converse-stream" => Some("ConverseStream"),
+                    "count-tokens" => Some("CountTokens"),
+                    _ => None,
+                };
+                op.map(|action| (action, Some(String::new()), None))
+            }
 
             // Runtime: async invoke
             (Method::POST, 1) if segs[0] == "async-invoke" => {
                 Some(("StartAsyncInvoke", None, None))
             }
-            (Method::GET, 1) if segs[0] == "async-invoke" => Some(("ListAsyncInvokes", None, None)),
+            (Method::GET, 1)
+                if segs[0] == "async-invoke"
+                    && !req.raw_path.trim_end_matches('?').ends_with('/') =>
+            {
+                Some(("ListAsyncInvokes", None, None))
+            }
+            // `GET /async-invoke/` (trailing slash, empty invocationArn) routes
+            // to GetAsyncInvoke so the length validator surfaces the missing
+            // identifier instead of silently listing.
+            (Method::GET, 1)
+                if segs[0] == "async-invoke"
+                    && req.raw_path.trim_end_matches('?').ends_with('/') =>
+            {
+                Some(("GetAsyncInvoke", Some(String::new()), None))
+            }
             (Method::GET, 2) if segs[0] == "async-invoke" => {
                 Some(("GetAsyncInvoke", Some(decode(&segs[1])), None))
             }
@@ -1432,26 +1461,41 @@ impl AwsService for BedrockService {
                 crate::logging::delete_model_invocation_logging_configuration(&self.state, &req)
             }
             // Runtime operations
-            "InvokeModel" => crate::invoke::invoke_model(
-                &self.state,
-                &req,
-                &resource_id.unwrap_or_default(),
-                &req.body,
-            ),
-            "CountTokens" => crate::invoke::count_tokens(
-                &self.state,
-                &req,
-                &resource_id.unwrap_or_default(),
-                &req.body,
-            ),
-            "Converse" => crate::converse::converse(
-                &self.state,
-                &req,
-                &resource_id.unwrap_or_default(),
-                &req.body,
-            ),
+            "InvokeModel" => {
+                let model_id = resource_id.unwrap_or_default();
+                crate::runtime_validation::validate_invoke_model_id(&model_id)?;
+                crate::runtime_validation::validate_runtime_headers(&req)?;
+                crate::runtime_validation::validate_invoke_body_size(&req.body)?;
+                crate::invoke::invoke_model(&self.state, &req, &model_id, &req.body)
+            }
+            "CountTokens" => {
+                let model_id = resource_id.unwrap_or_default();
+                crate::runtime_validation::validate_short_model_id(&model_id)?;
+                crate::invoke::count_tokens(&self.state, &req, &model_id, &req.body)
+            }
+            "Converse" => {
+                let model_id = resource_id.unwrap_or_default();
+                crate::runtime_validation::validate_invoke_model_id(&model_id)?;
+                crate::converse::converse(&self.state, &req, &model_id, &req.body)
+            }
             "InvokeModelWithResponseStream" | "InvokeModelWithBidirectionalStream" => {
                 let model_id = resource_id.unwrap_or_default();
+                crate::runtime_validation::validate_invoke_model_id(&model_id)?;
+                if action == "InvokeModelWithResponseStream" {
+                    crate::runtime_validation::validate_runtime_headers(&req)?;
+                    crate::runtime_validation::validate_invoke_body_size(&req.body)?;
+                }
+                if action == "InvokeModelWithBidirectionalStream" {
+                    // body is @required and @httpPayload (an event-stream input).
+                    // Reject both an empty wire payload and a JSON `{}` that
+                    // represents the structural-default of "no input given".
+                    let trimmed = std::str::from_utf8(&req.body).unwrap_or("").trim();
+                    if req.body.is_empty() || trimmed == "{}" {
+                        return Err(crate::runtime_validation::validation(
+                            "body is required for InvokeModelWithBidirectionalStream",
+                        ));
+                    }
+                }
                 if let Some(fault) = crate::faults::take_matching_fault(
                     &self.state,
                     &req,
@@ -1494,6 +1538,7 @@ impl AwsService for BedrockService {
             }
             "ConverseStream" => {
                 let model_id = resource_id.unwrap_or_default();
+                crate::runtime_validation::validate_invoke_model_id(&model_id)?;
                 if let Some(fault) = crate::faults::take_matching_fault(
                     &self.state,
                     &req,

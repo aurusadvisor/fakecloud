@@ -196,6 +196,15 @@ pub(crate) fn count_tokens(
 
     let input: Value = serde_json::from_slice(body).unwrap_or_default();
 
+    // CountTokensRequest declares `input` as @required; missing/null fails fast.
+    if input.get("input").is_none() || input["input"].is_null() {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "input is required",
+        ));
+    }
+
     // Extract text from either invokeModel or converse format
     let text = if let Some(invoke_input) = input.get("input") {
         if let Some(invoke_model) = invoke_input.get("invokeModel") {
@@ -716,8 +725,10 @@ mod tests {
 
     #[test]
     fn count_tokens_unknown_input_falls_back_to_raw_json_count() {
+        // CountTokens requires the @required `input` field; anything else
+        // inside it is fair game and we fall back to a raw JSON token count.
         let s = shared();
-        let body = br#"{"other":"field"}"#;
+        let body = br#"{"input":{"other":"field"}}"#;
         let resp = count_tokens(&s, &req(), "m", body).unwrap();
         let v: Value =
             serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
@@ -725,13 +736,11 @@ mod tests {
     }
 
     #[test]
-    fn count_tokens_empty_body_parses_cleanly() {
+    fn count_tokens_missing_input_field_errors() {
+        // Omitting `input` is a validation failure (mirrors AWS).
         let s = shared();
-        let body = b"";
-        let resp = count_tokens(&s, &req(), "m", body).unwrap();
-        let v: Value =
-            serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
-        // Empty body produces Null JSON serialized to "null" (4 chars, 1 token)
-        assert!(v["inputTokens"].is_u64());
+        let body = b"{}";
+        let err = count_tokens(&s, &req(), "m", body).err().unwrap();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
     }
 }
