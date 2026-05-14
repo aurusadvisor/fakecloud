@@ -618,10 +618,14 @@ async fn cloudformation_closure_routes_exist() {
         .await
         .status()
         .is_success());
-    assert!(cfn_post(&server, "DeactivateType", &[("TypeName", "AWS::Demo::Type")])
-        .await
-        .status()
-        .is_success());
+    assert!(cfn_post(
+        &server,
+        "DeactivateType",
+        &[("TypeName", "AWS::Demo::Type")]
+    )
+    .await
+    .status()
+    .is_success());
     assert!(cfn_post(&server, "DescribeType", &[("Type", "RESOURCE")])
         .await
         .status()
@@ -646,10 +650,14 @@ async fn cloudformation_closure_routes_exist() {
     .await
     .status()
     .is_success());
-    assert!(cfn_post(&server, "DeregisterType", &[("TypeName", "AWS::Demo::Type")])
-        .await
-        .status()
-        .is_success());
+    assert!(cfn_post(
+        &server,
+        "DeregisterType",
+        &[("TypeName", "AWS::Demo::Type")]
+    )
+    .await
+    .status()
+    .is_success());
     assert!(cfn_post(&server, "ListTypes", &[])
         .await
         .status()
@@ -658,10 +666,14 @@ async fn cloudformation_closure_routes_exist() {
         .await
         .status()
         .is_success());
-    assert!(cfn_post(&server, "ListTypeVersions", &[("TypeName", "AWS::Demo::Type")])
-        .await
-        .status()
-        .is_success());
+    assert!(cfn_post(
+        &server,
+        "ListTypeVersions",
+        &[("TypeName", "AWS::Demo::Type")]
+    )
+    .await
+    .status()
+    .is_success());
     assert!(cfn_post(
         &server,
         "BatchDescribeTypeConfigurations",
@@ -676,20 +688,26 @@ async fn cloudformation_closure_routes_exist() {
             .status()
             .is_success()
     );
+    assert!(cfn_post(
+        &server,
+        "SetTypeDefaultVersion",
+        &[("TypeName", "AWS::Demo::Type")]
+    )
+    .await
+    .status()
+    .is_success());
     assert!(
-        cfn_post(&server, "SetTypeDefaultVersion", &[("TypeName", "AWS::Demo::Type")])
+        cfn_post(&server, "TestType", &[("TypeName", "AWS::Demo::Type")])
             .await
             .status()
             .is_success()
     );
-    assert!(cfn_post(&server, "TestType", &[("TypeName", "AWS::Demo::Type")])
-        .await
-        .status()
-        .is_success());
-    assert!(cfn_post(&server, "PublishType", &[("TypeName", "AWS::Demo::Type")])
-        .await
-        .status()
-        .is_success());
+    assert!(
+        cfn_post(&server, "PublishType", &[("TypeName", "AWS::Demo::Type")])
+            .await
+            .status()
+            .is_success()
+    );
     assert!(cfn_post(&server, "RegisterPublisher", &[])
         .await
         .status()

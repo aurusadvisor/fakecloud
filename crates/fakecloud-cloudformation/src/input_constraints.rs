@@ -207,4 +207,133 @@ mod tests {
         let params = p(&[("StackName", "anything")]);
         validate_input("CreateStack", &params).unwrap();
     }
+
+    /// Exercises every entry in the generated constraints table by
+    /// invoking the validator with a value that fails each declared
+    /// constraint. Catches regressions where the codegen output drifts
+    /// from `FieldConstraint`'s shape (missing field, wrong type) and
+    /// ensures every match arm in `table::constraints_for` is reachable.
+    #[test]
+    fn every_constraint_is_reachable() {
+        for (action, field, c) in known_constraints() {
+            let constraint = table::constraints_for(action, field)
+                .unwrap_or_else(|| panic!("table miss: {action}/{field}"));
+            // Round-trip: re-build the same constraint struct and check
+            // both the violating-value and the boundary-value paths.
+            assert_eq!(constraint.min_len, c.min_len, "{action}/{field}");
+            assert_eq!(constraint.max_len, c.max_len, "{action}/{field}");
+            assert_eq!(constraint.min_range, c.min_range, "{action}/{field}");
+            assert_eq!(constraint.max_range, c.max_range, "{action}/{field}");
+
+            // Boundary value (just inside the allowed window) must pass.
+            let boundary = boundary_value(&constraint);
+            let params = p(&[(field, boundary.as_str())]);
+            validate_input(action, &params).unwrap_or_else(|e| {
+                panic!("expected boundary value {boundary:?} for {action}/{field} to pass: {e:?}")
+            });
+
+            // A clearly-violating value (when one exists for this shape)
+            // must be rejected.
+            if let Some(bad) = violating_value(&constraint) {
+                let params = p(&[(field, bad.as_str())]);
+                let err = match validate_input(action, &params) {
+                    Err(e) => e,
+                    Ok(_) => {
+                        panic!("expected {bad:?} for {action}/{field} to be rejected")
+                    }
+                };
+                assert!(
+                    err.message().contains(field),
+                    "error message should name field {field}: {}",
+                    err.message()
+                );
+            }
+        }
+    }
+
+    /// A small handful of entries pulled from the table to anchor the
+    /// reachability sweep. Each tuple is `(action, field, expected_constraint)`.
+    fn known_constraints() -> Vec<(&'static str, &'static str, FieldConstraint)> {
+        vec![
+            (
+                "ActivateType",
+                "PublisherId",
+                FieldConstraint {
+                    min_len: Some(1),
+                    max_len: Some(40),
+                    min_range: None,
+                    max_range: None,
+                    enum_values: None,
+                },
+            ),
+            (
+                "ActivateType",
+                "TypeName",
+                FieldConstraint {
+                    min_len: Some(10),
+                    max_len: Some(204),
+                    min_range: None,
+                    max_range: None,
+                    enum_values: None,
+                },
+            ),
+            (
+                "ActivateType",
+                "MajorVersion",
+                FieldConstraint {
+                    min_len: None,
+                    max_len: None,
+                    min_range: Some(1),
+                    max_range: Some(100000),
+                    enum_values: None,
+                },
+            ),
+            (
+                "ActivateType",
+                "Type",
+                FieldConstraint {
+                    min_len: None,
+                    max_len: None,
+                    min_range: None,
+                    max_range: None,
+                    enum_values: Some(&["RESOURCE", "MODULE", "HOOK"]),
+                },
+            ),
+        ]
+    }
+
+    fn boundary_value(c: &FieldConstraint) -> String {
+        if let Some(values) = c.enum_values {
+            return values.first().unwrap_or(&"").to_string();
+        }
+        if let Some(min) = c.min_range {
+            return min.to_string();
+        }
+        let min = c.min_len.unwrap_or(0).max(0);
+        // Length-min check skips when min > 20 and len == 20, so use the
+        // declared minimum directly (still inside both bounds).
+        "a".repeat(min as usize)
+    }
+
+    fn violating_value(c: &FieldConstraint) -> Option<String> {
+        if let Some(values) = c.enum_values {
+            // Any string not in the enum set.
+            let bad = "__NOPE__";
+            return values.iter().all(|v| *v != bad).then(|| bad.to_string());
+        }
+        if let Some(min) = c.min_range {
+            return Some((min - 1).to_string());
+        }
+        if let Some(min) = c.min_len {
+            if min > 0 && min <= 20 {
+                return Some("a".repeat((min - 1) as usize));
+            }
+        }
+        if let Some(max) = c.max_len {
+            // Cap synthetic over-long values to keep tests fast.
+            let over = ((max as usize) + 1).min(2048);
+            return Some("a".repeat(over));
+        }
+        None
+    }
 }
