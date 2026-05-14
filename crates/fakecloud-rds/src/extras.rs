@@ -1002,7 +1002,7 @@ impl RdsService {
                     .ok_or_else(|| {
                         AwsServiceError::aws_error(
                             StatusCode::NOT_FOUND,
-                            "TenantDatabaseNotFoundFault",
+                            "TenantDatabaseNotFound",
                             format!("TenantDatabase {name} not found."),
                         )
                     })?;
