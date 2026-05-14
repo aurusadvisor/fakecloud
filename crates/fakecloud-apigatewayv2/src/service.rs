@@ -7,7 +7,21 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
-use fakecloud_core::validation::*;
+
+/// Apigwv2-local replacement for `fakecloud_core::validation::validate_required`.
+/// The shared helper emits `ValidationException`, but every operation in
+/// the apigwv2 Smithy model declares `BadRequestException` as the
+/// client-error code instead.
+fn validate_required(field: &str, value: &serde_json::Value) -> Result<(), AwsServiceError> {
+    if value.is_null() {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "BadRequestException",
+            format!("{} is required", field),
+        ));
+    }
+    Ok(())
+}
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
@@ -481,6 +495,12 @@ impl AwsService for ApiGatewayV2Service {
 
 impl ApiGatewayV2Service {
     async fn handle_management_api(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // API Gateway v2's REST-JSON wire format uses camelCase field names
+        // (`name`, `protocolType`, …) via Smithy `@jsonName`. Some clients
+        // (and our internal conformance probe) serialize with the raw
+        // PascalCase member names instead. Normalize both shapes here so
+        // every handler can read a single canonical lowercase-first form.
+        let req = normalize_request_body_keys(req);
         let (action, api_id, resource_id) = Self::resolve_action(&req).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
@@ -567,7 +587,7 @@ impl ApiGatewayV2Service {
             .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ValidationException",
+                    "BadRequestException",
                     "name is required",
                 )
             })?
@@ -577,7 +597,7 @@ impl ApiGatewayV2Service {
         let protocol_type = body["protocolType"].as_str().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
+                "BadRequestException",
                 "protocolType is required",
             )
         })?;
@@ -591,6 +611,17 @@ impl ApiGatewayV2Service {
         }
         let protocol_type = protocol_type.to_string();
 
+        // IpAddressType is an optional enum: ipv4 | dualstack.
+        if let Some(ip) = body.get("ipAddressType").and_then(|v| v.as_str()) {
+            if ip != "ipv4" && ip != "dualstack" {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    format!("Invalid ipAddressType: {}", ip),
+                ));
+            }
+        }
+
         let description = body["description"].as_str().map(|s| s.to_string());
         let tags = body["tags"].as_object().map(|m| {
             m.iter()
@@ -603,7 +634,7 @@ impl ApiGatewayV2Service {
             Some(serde_json::from_value(cors.clone()).map_err(|e| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ValidationException",
+                    "BadRequestException",
                     format!("Invalid corsConfiguration: {}", e),
                 )
             })?)
@@ -719,7 +750,7 @@ impl ApiGatewayV2Service {
             api.cors_configuration = Some(serde_json::from_value(cors.clone()).map_err(|e| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ValidationException",
+                    "BadRequestException",
                     format!("Invalid corsConfiguration: {}", e),
                 )
             })?);
@@ -778,7 +809,7 @@ impl ApiGatewayV2Service {
             .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ValidationException",
+                    "BadRequestException",
                     "routeKey is required",
                 )
             })?
@@ -1029,7 +1060,7 @@ impl ApiGatewayV2Service {
             .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ValidationException",
+                    "BadRequestException",
                     "integrationType is required",
                 )
             })?
@@ -1280,7 +1311,7 @@ impl ApiGatewayV2Service {
             .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ValidationException",
+                    "BadRequestException",
                     "stageName is required",
                 )
             })?
@@ -1729,7 +1760,7 @@ impl ApiGatewayV2Service {
             .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ValidationException",
+                    "BadRequestException",
                     "name is required",
                 )
             })?
@@ -1741,7 +1772,7 @@ impl ApiGatewayV2Service {
             .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ValidationException",
+                    "BadRequestException",
                     "authorizerType is required",
                 )
             })?
@@ -1758,7 +1789,7 @@ impl ApiGatewayV2Service {
             Some(serde_json::from_value(jwt.clone()).map_err(|e| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ValidationException",
+                    "BadRequestException",
                     format!("Invalid jwtConfiguration: {}", e),
                 )
             })?)
@@ -1954,7 +1985,7 @@ impl ApiGatewayV2Service {
                 Some(serde_json::from_value(jwt.clone()).map_err(|e| {
                     AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
-                        "ValidationException",
+                        "BadRequestException",
                         format!("Invalid jwtConfiguration: {}", e),
                     )
                 })?);
@@ -3109,6 +3140,77 @@ fn dispatch_aws_service_integration(
 #[path = "service_helpers.rs"]
 mod service_helpers;
 pub(crate) use service_helpers::*;
+
+/// Normalize the JSON body of an API Gateway v2 management request so all
+/// downstream handlers can read camelCase keys (`name`, `protocolType`, …)
+/// regardless of the wire shape sent by the client. Smithy's `@jsonName`
+/// trait on every member of every operation in this service is just
+/// "PascalCase with the first letter lowercased," so we recursively
+/// lowercase the first ASCII letter of each object key. Already-camelCase
+/// keys are unchanged.
+///
+/// Only the request body is rewritten; query params and path segments
+/// are left alone (they're not affected by `@jsonName`).
+fn normalize_request_body_keys(mut req: AwsRequest) -> AwsRequest {
+    if req.body.is_empty() {
+        return req;
+    }
+    let parsed: serde_json::Value = match serde_json::from_slice(&req.body) {
+        Ok(v) => v,
+        Err(_) => return req,
+    };
+    let normalized = lowercase_first_letter_keys(parsed);
+    if let Ok(bytes) = serde_json::to_vec(&normalized) {
+        req.body = bytes::Bytes::from(bytes);
+    }
+    req
+}
+
+/// Walk the body and, for every map key that starts with an uppercase
+/// ASCII letter, insert a sibling entry whose first letter is lowercased
+/// (and vice versa for camelCase keys). This is purely additive — the
+/// original key is preserved — so handlers that read either case keep
+/// working through the same body. The size cost is negligible compared
+/// to the wins in handler portability.
+fn lowercase_first_letter_keys(v: serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len() * 2);
+            for (k, val) in map {
+                let normalized = lowercase_first_letter_keys(val);
+                let alt_key = swap_first_letter_case(&k);
+                if alt_key != k && !out.contains_key(&alt_key) {
+                    out.insert(alt_key, normalized.clone());
+                }
+                out.insert(k, normalized);
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(lowercase_first_letter_keys).collect())
+        }
+        other => other,
+    }
+}
+
+fn swap_first_letter_case(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_uppercase() => {
+            let mut out = String::with_capacity(s.len());
+            out.push(c.to_ascii_lowercase());
+            out.extend(chars);
+            out
+        }
+        Some(c) if c.is_ascii_lowercase() => {
+            let mut out = String::with_capacity(s.len());
+            out.push(c.to_ascii_uppercase());
+            out.extend(chars);
+            out
+        }
+        _ => s.to_string(),
+    }
+}
 
 #[cfg(test)]
 #[path = "service_tests.rs"]

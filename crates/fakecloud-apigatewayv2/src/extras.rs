@@ -1365,9 +1365,12 @@ impl ApiGatewayV2Service {
             "portal_products" => &mut state.portal_products,
             _ => return Err(missing("Store")),
         };
-        if map.remove(id).is_none() {
-            return Err(not_found(store, id));
-        }
+        // Portal / PortalProduct deletes are idempotent in the public API:
+        // the Smithy operation declares only BadRequestException /
+        // AccessDeniedException / TooManyRequestsException — no
+        // NotFoundException. Real AWS returns success when the resource
+        // is already absent, so we mirror that here.
+        map.remove(id);
         no_content()
     }
 
