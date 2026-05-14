@@ -834,8 +834,22 @@ impl IamService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let aws_service_name = required_param(&req.query_params, "AWSServiceName")?;
+        super::validate_string_length_with_code(
+            "AWSServiceName",
+            &aws_service_name,
+            1,
+            128,
+            "InvalidInput",
+        )?;
         let description = req.query_params.get("Description").cloned();
         let custom_suffix = req.query_params.get("CustomSuffix").cloned();
+        super::validate_optional_string_length_with_code(
+            "CustomSuffix",
+            custom_suffix.as_deref(),
+            1,
+            64,
+            "InvalidInput",
+        )?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);

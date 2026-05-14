@@ -950,7 +950,12 @@ async fn iam_saml_provider_lifecycle() {
     let server = TestServer::start().await;
     let client = server.iam_client().await;
 
-    let saml_metadata = "<EntityDescriptor>fake-saml</EntityDescriptor>";
+    // SAML metadata documents must be at least 1000 bytes per the IAM
+    // Smithy contract; pad the inner payload to satisfy the bound.
+    let saml_metadata = format!(
+        "<EntityDescriptor>{}</EntityDescriptor>",
+        "fake-saml-payload-".repeat(60)
+    );
 
     let resp = client
         .create_saml_provider()

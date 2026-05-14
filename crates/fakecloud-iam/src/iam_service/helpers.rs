@@ -123,6 +123,14 @@ pub(crate) fn is_mutating_action(action: &str) -> bool {
             | "DisableOrganizationsRootSessions"
             | "GenerateOrganizationsAccessReport"
             | "GenerateServiceLastAccessedDetails"
+            | "CreateDelegationRequest"
+            | "AcceptDelegationRequest"
+            | "RejectDelegationRequest"
+            | "UpdateDelegationRequest"
+            | "AssociateDelegationRequest"
+            | "SendDelegationToken"
+            | "EnableOutboundWebIdentityFederation"
+            | "DisableOutboundWebIdentityFederation"
     )
 }
 
@@ -836,6 +844,49 @@ pub(crate) fn validate_optional_string_length_with_code(
         validate_string_length_with_code(field, v, min, max, code)?;
     }
     Ok(())
+}
+
+/// Validate the standard IAM pagination triad (`Marker`, `MaxItems`,
+/// `PathPrefix`) shared by virtually every IAM `List*` op. Smithy bounds
+/// per the IAM model: `markerType` 1..=320, `maxItemsType` 1..=1000,
+/// `pathPrefixType` 1..=512. Returns the validated `MaxItems` (defaulting
+/// to 100, AWS' implicit cap) so callers don't re-parse it.
+pub(crate) fn validate_list_pagination(req: &AwsRequest) -> Result<i64, AwsServiceError> {
+    validate_optional_string_length_with_code(
+        "Marker",
+        req.query_params.get("Marker").map(|s| s.as_str()),
+        1,
+        320,
+        "InvalidInput",
+    )?;
+    validate_optional_string_length_with_code(
+        "PathPrefix",
+        req.query_params.get("PathPrefix").map(|s| s.as_str()),
+        1,
+        512,
+        "InvalidInput",
+    )?;
+    let raw = req.query_params.get("MaxItems").map(|s| s.as_str());
+    let max_items_i64: Option<i64> = match raw {
+        Some(s) => Some(s.parse().map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInput",
+                format!("Value '{s}' at 'MaxItems' is not a valid integer"),
+            )
+        })?),
+        None => None,
+    };
+    if let Some(v) = max_items_i64 {
+        if !(1..=1000).contains(&v) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInput",
+                format!("Value '{v}' at 'MaxItems' must be between 1 and 1000"),
+            ));
+        }
+    }
+    Ok(max_items_i64.unwrap_or(100))
 }
 
 pub(crate) fn empty_response(action: &str, request_id: &str) -> String {

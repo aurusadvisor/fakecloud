@@ -6,7 +6,7 @@ use fakecloud_core::validation::*;
 
 use crate::state::IamGroup;
 
-use super::{empty_response, generate_id, url_encode, IamService};
+use super::{empty_response, generate_id, url_encode, validate_list_pagination, IamService};
 use fakecloud_core::query::required_param;
 
 use fakecloud_aws::xml::xml_escape;
@@ -156,6 +156,7 @@ impl IamService {
     }
 
     pub(super) fn list_groups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let _ = validate_list_pagination(req)?;
         let accounts = self.state.read();
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);

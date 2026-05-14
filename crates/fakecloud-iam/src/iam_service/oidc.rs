@@ -12,6 +12,24 @@ use super::{
 };
 use fakecloud_core::query::required_param;
 
+fn validate_string_length(
+    field: &str,
+    value: &str,
+    min: usize,
+    max: usize,
+) -> Result<(), AwsServiceError> {
+    super::validate_string_length_with_code(field, value, min, max, "InvalidInput")
+}
+
+fn validate_optional_string_length(
+    field: &str,
+    value: Option<&str>,
+    min: usize,
+    max: usize,
+) -> Result<(), AwsServiceError> {
+    super::validate_optional_string_length_with_code(field, value, min, max, "InvalidInput")
+}
+
 use fakecloud_aws::xml::xml_escape;
 
 /// Validate the URL, thumbprint list, and client ID list for
@@ -93,7 +111,29 @@ impl IamService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = required_param(&req.query_params, "Name")?;
+        validate_string_length("Name", &name, 1, 128)?;
         let saml_metadata_document = required_param(&req.query_params, "SAMLMetadataDocument")?;
+        validate_string_length(
+            "SAMLMetadataDocument",
+            &saml_metadata_document,
+            1000,
+            10_000_000,
+        )?;
+        validate_optional_string_length(
+            "AddPrivateKey",
+            req.query_params.get("AddPrivateKey").map(|s| s.as_str()),
+            1,
+            16384,
+        )?;
+        if let Some(mode) = req.query_params.get("AssertionEncryptionMode") {
+            if !matches!(mode.as_str(), "Required" | "Allowed") {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidInput",
+                    format!("Value '{mode}' at 'assertionEncryptionMode' failed to satisfy constraint: Member must satisfy enum value set: [Required, Allowed]"),
+                ));
+            }
+        }
         let tags = parse_tags(&req.query_params);
 
         let mut accounts = self.state.write();
@@ -420,6 +460,7 @@ impl IamService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let arn = required_param(&req.query_params, "OpenIDConnectProviderArn")?;
+        validate_string_length("OpenIDConnectProviderArn", &arn, 20, 2048)?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
@@ -627,6 +668,7 @@ impl IamService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = required_param(&req.query_params, "ServerCertificateName")?;
+        validate_string_length("ServerCertificateName", &name, 1, 128)?;
         let certificate_body = required_param(&req.query_params, "CertificateBody")?;
         let _private_key = required_param(&req.query_params, "PrivateKey")?;
         let path = req
@@ -780,6 +822,7 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let _ = super::validate_list_pagination(req)?;
         let accounts = self.state.read();
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);

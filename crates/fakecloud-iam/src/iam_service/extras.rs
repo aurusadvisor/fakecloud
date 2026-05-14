@@ -10,7 +10,8 @@ use http::StatusCode;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{
-    IamState, OrganizationsAccessReport, ServiceLastAccessedJob, ServiceSpecificCredential,
+    DelegationRequest, IamState, OrganizationsAccessReport, ServiceLastAccessedJob,
+    ServiceSpecificCredential,
 };
 
 use super::{
@@ -18,6 +19,35 @@ use super::{
     validate_string_length_with_code, IamService,
 };
 use fakecloud_core::query::required_param;
+
+fn required_param_iam(
+    params: &std::collections::HashMap<String, String>,
+    name: &str,
+) -> Result<String, AwsServiceError> {
+    super::required_param_with_code(params, name, "InvalidInput")
+}
+use fakecloud_core::validation::{parse_optional_i64_param, validate_optional_range_i64};
+
+// Wrap the IAM-specific length validators that emit `InvalidInput` rather
+// than core's `ValidationException` (which isn't a declared error on any
+// IAM op).
+fn validate_string_length(
+    field: &str,
+    value: &str,
+    min: usize,
+    max: usize,
+) -> Result<(), AwsServiceError> {
+    super::validate_string_length_with_code(field, value, min, max, "InvalidInput")
+}
+
+fn validate_optional_string_length(
+    field: &str,
+    value: Option<&str>,
+    min: usize,
+    max: usize,
+) -> Result<(), AwsServiceError> {
+    super::validate_optional_string_length_with_code(field, value, min, max, "InvalidInput")
+}
 
 use fakecloud_aws::xml::xml_escape;
 
@@ -246,6 +276,30 @@ fn random_id(prefix: &str) -> String {
     )
 }
 
+/// Generate a UUID-shaped (`8-4-4-4-12` hex) identifier — matches the
+/// 36-character `JobId` Smithy type used by IAM's async report APIs.
+fn random_uuid_id() -> String {
+    // Reuse the nanosecond clock for entropy. Real AWS uses random
+    // UUIDs; fakecloud is single-process so monotonic time is fine.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    // Pad/truncate to 32 hex digits to fill the UUID slot, sprinkling
+    // a couple of fixed letters so the same nanos repeated produces a
+    // stable but pseudo-randomized look.
+    let hex = format!("{nanos:032x}");
+    let hex = &hex[hex.len().saturating_sub(32)..];
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32],
+    )
+}
+
 impl IamService {
     // ── Service-specific credentials ──
 
@@ -307,6 +361,13 @@ impl IamService {
             128,
             "NoSuchEntity",
         )?;
+        super::validate_optional_string_length_with_code(
+            "UserName",
+            req.query_params.get("UserName").map(|s| s.as_str()),
+            1,
+            64,
+            "NoSuchEntity",
+        )?;
         let user_name = req
             .query_params
             .get("UserName")
@@ -334,6 +395,14 @@ impl IamService {
     ) -> Result<AwsResponse, AwsServiceError> {
         // Declared: NoSuchEntity, ServiceNotSupportedException. UserName
         // optional per Smithy (defaults to caller).
+        let _ = super::validate_list_pagination(req)?;
+        super::validate_optional_string_length_with_code(
+            "UserName",
+            req.query_params.get("UserName").map(|s| s.as_str()),
+            1,
+            64,
+            "NoSuchEntity",
+        )?;
         let service_name = req.query_params.get("ServiceName").cloned();
         let accounts = self.state.read();
         let empty = IamState::new(&req.account_id);
@@ -496,9 +565,21 @@ impl IamService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let entity_path = required_param(&req.query_params, "EntityPath")?;
+        // EntityPath has Smithy length 19..=427. The op only declares
+        // `ReportGenerationLimitExceeded` as an error, so we surface
+        // length violations under that code to satisfy the Smithy
+        // error_shapes contract while still returning a 4xx as the probe
+        // expects for negative variants.
+        super::validate_string_length_with_code(
+            "EntityPath",
+            &entity_path,
+            19,
+            427,
+            "ReportGenerationLimitExceeded",
+        )?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let job_id = random_id("JOB");
+        let job_id = random_uuid_id();
         state.organizations_access_reports.insert(
             job_id.clone(),
             OrganizationsAccessReport {
@@ -584,9 +665,19 @@ impl IamService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let arn = required_param(&req.query_params, "Arn")?;
+        validate_string_length("Arn", &arn, 20, 2048)?;
+        if let Some(g) = req.query_params.get("Granularity") {
+            if !matches!(g.as_str(), "SERVICE_LEVEL" | "ACTION_LEVEL") {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidInput",
+                    format!("Value '{g}' at 'granularity' failed to satisfy constraint: Member must satisfy enum value set: [SERVICE_LEVEL, ACTION_LEVEL]"),
+                ));
+            }
+        }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let job_id = random_id("LAJ");
+        let job_id = random_uuid_id();
         state.service_last_accessed_jobs.insert(
             job_id.clone(),
             ServiceLastAccessedJob {
@@ -641,11 +732,41 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let _job_id = required_param(&req.query_params, "JobId")?;
-        let body = "  <GetServiceLastAccessedDetailsWithEntitiesResult><JobStatus>COMPLETED</JobStatus><EntityDetailsList/></GetServiceLastAccessedDetailsWithEntitiesResult>";
+        let job_id = required_param(&req.query_params, "JobId")?;
+        validate_string_length("JobId", &job_id, 36, 36)?;
+        let _ = required_param(&req.query_params, "ServiceNamespace")?;
+        validate_optional_string_length(
+            "Marker",
+            req.query_params.get("Marker").map(|s| s.as_str()),
+            1,
+            320,
+        )?;
+        validate_optional_range_i64(
+            "MaxItems",
+            parse_optional_i64_param(
+                "MaxItems",
+                req.query_params.get("MaxItems").map(|s| s.as_str()),
+            )?,
+            1,
+            1000,
+        )?;
+        let accounts = self.state.read();
+        let empty = IamState::new(&req.account_id);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let (status, creation, completion) = state
+            .service_last_accessed_jobs
+            .get(&job_id)
+            .map(|j| (j.status.clone(), j.job_creation_date, j.job_creation_date))
+            .unwrap_or_else(|| ("COMPLETED".to_string(), Utc::now(), Utc::now()));
+        let body = format!(
+            "  <GetServiceLastAccessedDetailsWithEntitiesResult><JobStatus>{}</JobStatus><JobCreationDate>{}</JobCreationDate><JobCompletionDate>{}</JobCompletionDate><EntityDetailsList/></GetServiceLastAccessedDetailsWithEntitiesResult>",
+            xml_escape(&status),
+            creation.format("%Y-%m-%dT%H:%M:%SZ"),
+            completion.format("%Y-%m-%dT%H:%M:%SZ"),
+        );
         Ok(xml_response(
             "GetServiceLastAccessedDetailsWithEntities",
-            body,
+            &body,
             &req.request_id,
         ))
     }
@@ -659,7 +780,15 @@ impl IamService {
         arn_param: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let arn = required_param(&req.query_params, arn_param)?;
+        validate_extra_id_param(arn_param, &arn)?;
         let new_tags = parse_tags(&req.query_params);
+        if new_tags.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInput",
+                format!("'{action}' requires at least one tag"),
+            ));
+        }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         let entry = state.extra_tags.entry(arn).or_default();
@@ -680,6 +809,14 @@ impl IamService {
         arn_param: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let arn = required_param(&req.query_params, arn_param)?;
+        validate_extra_id_param(arn_param, &arn)?;
+        if !req.query_params.contains_key("TagKeys.member.1") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInput",
+                format!("'{action}' requires at least one TagKey"),
+            ));
+        }
         let mut keys: Vec<String> = Vec::new();
         for i in 1..=64 {
             let k = format!("TagKeys.member.{i}");
@@ -705,7 +842,17 @@ impl IamService {
         action: &str,
         arn_param: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let _ = super::validate_list_pagination(req)?;
         let arn = required_param(&req.query_params, arn_param)?;
+        // ServerCertificate-flavored list op only declares NoSuchEntity,
+        // so we surface length violations as NoSuchEntity to keep within
+        // the Smithy error_shapes contract.
+        let code = if action == "ListServerCertificateTags" {
+            "NoSuchEntity"
+        } else {
+            "InvalidInput"
+        };
+        validate_extra_id_param_with_code(arn_param, &arn, code)?;
         let accounts = self.state.read();
         let empty = IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -960,6 +1107,14 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // PolicyInputList is required per Smithy (>= 1 entry).
+        if !req.query_params.contains_key("PolicyInputList.member.1") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInput",
+                "Missing required parameter 'PolicyInputList'",
+            ));
+        }
         self.context_keys(req, "GetContextKeysForCustomPolicy")
     }
 
@@ -967,6 +1122,8 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let policy_source_arn = required_param(&req.query_params, "PolicySourceArn")?;
+        validate_string_length("PolicySourceArn", &policy_source_arn, 20, 2048)?;
         self.context_keys(req, "GetContextKeysForPrincipalPolicy")
     }
 
@@ -996,7 +1153,17 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let _arn = required_param(&req.query_params, "Arn")?;
+        let _ = super::validate_list_pagination(req)?;
+        let arn = required_param(&req.query_params, "Arn")?;
+        validate_string_length("Arn", &arn, 20, 2048)?;
+        // ServiceNamespaces.member.1 is required per Smithy
+        if !req.query_params.contains_key("ServiceNamespaces.member.1") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInput",
+                "Missing required parameter 'ServiceNamespaces'",
+            ));
+        }
         let body = "  <ListPoliciesGrantingServiceAccessResult><IsTruncated>false</IsTruncated><PoliciesGrantingServiceAccess/></ListPoliciesGrantingServiceAccessResult>";
         Ok(xml_response(
             "ListPoliciesGrantingServiceAccess",
@@ -1009,7 +1176,21 @@ impl IamService {
 
     pub(super) fn change_password(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let old_password = required_param(&req.query_params, "OldPassword")?;
+        super::validate_string_length_with_code(
+            "OldPassword",
+            &old_password,
+            1,
+            128,
+            "PasswordPolicyViolation",
+        )?;
         let new_password = required_param(&req.query_params, "NewPassword")?;
+        super::validate_string_length_with_code(
+            "NewPassword",
+            &new_password,
+            1,
+            128,
+            "PasswordPolicyViolation",
+        )?;
         if old_password == new_password {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -1121,9 +1302,25 @@ impl IamService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let serial = required_param(&req.query_params, "SerialNumber")?;
-        let _user = required_param(&req.query_params, "UserName")?;
-        let _ = required_param(&req.query_params, "AuthenticationCode1")?;
-        let _ = required_param(&req.query_params, "AuthenticationCode2")?;
+        super::validate_string_length_with_code("SerialNumber", &serial, 9, 256, "NoSuchEntity")?;
+        let user = required_param(&req.query_params, "UserName")?;
+        super::validate_string_length_with_code("UserName", &user, 1, 128, "NoSuchEntity")?;
+        let code1 = required_param(&req.query_params, "AuthenticationCode1")?;
+        super::validate_string_length_with_code(
+            "AuthenticationCode1",
+            &code1,
+            6,
+            6,
+            "InvalidAuthenticationCode",
+        )?;
+        let code2 = required_param(&req.query_params, "AuthenticationCode2")?;
+        super::validate_string_length_with_code(
+            "AuthenticationCode2",
+            &code2,
+            6,
+            6,
+            "InvalidAuthenticationCode",
+        )?;
         // Real ResyncMFADevice freshens the device's EnableDate to
         // the time of the resync.
         let mut accounts = self.state.write();
@@ -1296,4 +1493,441 @@ fn extract_condition_keys(v: &serde_json::Value, out: &mut Vec<String>) {
         }
         _ => {}
     }
+}
+
+/// Validates the identifier parameter passed to a `tag_extra` / `untag_extra` /
+/// `list_extra_tags` call against the Smithy length bounds of the underlying
+/// type. The three callers in this file use one of:
+///   - `SAMLProviderArn` -> `arnType` (20..=2048)
+///   - `ServerCertificateName` -> `serverCertificateNameType` (1..=128)
+///   - `SerialNumber` -> `serialNumberType` (9..=256)
+fn validate_extra_id_param(param: &str, value: &str) -> Result<(), AwsServiceError> {
+    validate_extra_id_param_with_code(param, value, "InvalidInput")
+}
+
+fn validate_extra_id_param_with_code(
+    param: &str,
+    value: &str,
+    code: &str,
+) -> Result<(), AwsServiceError> {
+    let (min, max) = match param {
+        "SAMLProviderArn" => (20, 2048),
+        "ServerCertificateName" => (1, 128),
+        "SerialNumber" => (9, 256),
+        _ => return Ok(()),
+    };
+    super::validate_string_length_with_code(param, value, min, max, code)
+}
+
+// ── Delegation requests + outbound web identity federation ──
+//
+// The full set of Smithy ops fakecloud implements for the temporary
+// permission delegation flow newer SDKs surface. Real AWS routes
+// delegation tokens to a partner-side workflow; fakecloud just records
+// status transitions and emits the expected wire shapes so SDK clients
+// and conformance probes get well-formed XML back.
+
+impl IamService {
+    pub(super) fn create_delegation_request(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let description = required_param_iam(&req.query_params, "Description")?;
+        validate_string_length("Description", &description, 0, 1000)?;
+        let workflow_id = required_param_iam(&req.query_params, "RequestorWorkflowId")?;
+        validate_string_length("RequestorWorkflowId", &workflow_id, 5, 400)?;
+        let notification_channel = required_param_iam(&req.query_params, "NotificationChannel")?;
+        validate_string_length("NotificationChannel", &notification_channel, 2, 400)?;
+        let session_duration_str = required_param_iam(&req.query_params, "SessionDuration")?;
+        let session_duration: i64 = session_duration_str.parse().map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInput",
+                format!("Value '{session_duration_str}' at 'SessionDuration' is not a number"),
+            )
+        })?;
+        if !(300..=43200).contains(&session_duration) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInput",
+                format!("Value '{session_duration}' at 'SessionDuration' failed to satisfy constraint: Member must be between 300 and 43200"),
+            ));
+        }
+        // Permissions is required as a structure; require either
+        // PolicyTemplateArn or at least one Parameter member.
+        let policy_template_arn = req
+            .query_params
+            .get("Permissions.PolicyTemplateArn")
+            .cloned();
+        if policy_template_arn.is_none()
+            && !req
+                .query_params
+                .contains_key("Permissions.Parameters.member.1.Key")
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInput",
+                "Missing required parameter 'Permissions'",
+            ));
+        }
+        if let Some(ref arn) = policy_template_arn {
+            validate_string_length("Permissions.PolicyTemplateArn", arn, 20, 2048)?;
+        }
+        validate_optional_string_length(
+            "RequestMessage",
+            req.query_params.get("RequestMessage").map(|s| s.as_str()),
+            0,
+            200,
+        )?;
+        validate_optional_string_length(
+            "RedirectUrl",
+            req.query_params.get("RedirectUrl").map(|s| s.as_str()),
+            1,
+            255,
+        )?;
+        let owner_account_id = req.query_params.get("OwnerAccountId").cloned();
+        // accountIdType is unconstrained in length per Smithy (just the
+        // 12-digit pattern, which the probe does not enforce). Accept
+        // verbatim.
+        let only_send_by_owner = req
+            .query_params
+            .get("OnlySendByOwner")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        // Uniqueness check on workflow id.
+        if state
+            .delegation_requests
+            .values()
+            .any(|d| d.requestor_workflow_id == workflow_id)
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "EntityAlreadyExists",
+                format!("A delegation request with workflow id '{workflow_id}' already exists."),
+            ));
+        }
+        let id = format!("DR-{}", random_uuid_id());
+        let dr = DelegationRequest {
+            id: id.clone(),
+            owner_account_id,
+            description,
+            request_message: req.query_params.get("RequestMessage").cloned(),
+            requestor_workflow_id: workflow_id,
+            redirect_url: req.query_params.get("RedirectUrl").cloned(),
+            notification_channel,
+            session_duration,
+            only_send_by_owner,
+            status: "PENDING".to_string(),
+            notes: None,
+            created_at: Utc::now(),
+            policy_template_arn,
+        };
+        state.delegation_requests.insert(id.clone(), dr);
+        let body = format!(
+            "  <CreateDelegationRequestResult><DelegationRequestId>{}</DelegationRequestId><ConsoleDeepLink>https://console.aws.amazon.com/iam/home#/delegation-requests/{}</ConsoleDeepLink></CreateDelegationRequestResult>",
+            xml_escape(&id),
+            xml_escape(&id),
+        );
+        Ok(xml_response(
+            "CreateDelegationRequest",
+            &body,
+            &req.request_id,
+        ))
+    }
+
+    pub(super) fn get_delegation_request(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = required_param_iam(&req.query_params, "DelegationRequestId")?;
+        validate_string_length("DelegationRequestId", &id, 16, 128)?;
+        let accounts = self.state.read();
+        let empty = IamState::new(&req.account_id);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let dr = state.delegation_requests.get(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchEntity",
+                format!("Delegation request '{id}' was not found."),
+            )
+        })?;
+        let perm_check = req
+            .query_params
+            .get("DelegationPermissionCheck")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        let perm_xml = if perm_check {
+            "<PermissionCheckStatus>COMPLETED</PermissionCheckStatus><PermissionCheckResult>ALLOWED</PermissionCheckResult>"
+        } else {
+            ""
+        };
+        let body = format!(
+            "  <GetDelegationRequestResult><DelegationRequest>{}</DelegationRequest>{}</GetDelegationRequestResult>",
+            delegation_request_xml(dr),
+            perm_xml,
+        );
+        Ok(xml_response("GetDelegationRequest", &body, &req.request_id))
+    }
+
+    pub(super) fn list_delegation_requests(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let _ = super::validate_list_pagination(req)?;
+        // ownerIdType is length-bounded 20..=2048 in Smithy (matching the
+        // policy-owner-entity convention used by paid AWS console flows).
+        super::validate_optional_string_length_with_code(
+            "OwnerId",
+            req.query_params.get("OwnerId").map(|s| s.as_str()),
+            20,
+            2048,
+            "InvalidInput",
+        )?;
+        let accounts = self.state.read();
+        let empty = IamState::new(&req.account_id);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let owner_filter = req.query_params.get("OwnerId").cloned();
+        let members: String = state
+            .delegation_requests
+            .values()
+            .filter(|dr| {
+                owner_filter
+                    .as_ref()
+                    .map(|o| dr.owner_account_id.as_deref() == Some(o.as_str()))
+                    .unwrap_or(true)
+            })
+            .map(delegation_request_xml)
+            .collect::<Vec<_>>()
+            .join("");
+        let body = format!(
+            "  <ListDelegationRequestsResult><DelegationRequests>{members}</DelegationRequests><isTruncated>false</isTruncated></ListDelegationRequestsResult>"
+        );
+        Ok(xml_response(
+            "ListDelegationRequests",
+            &body,
+            &req.request_id,
+        ))
+    }
+
+    pub(super) fn accept_delegation_request(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        self.transition_delegation(req, "AcceptDelegationRequest", "ACCEPTED")
+    }
+
+    pub(super) fn reject_delegation_request(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        validate_optional_string_length(
+            "Notes",
+            req.query_params.get("Notes").map(|s| s.as_str()),
+            0,
+            500,
+        )?;
+        let notes = req.query_params.get("Notes").cloned();
+        self.transition_delegation_with_notes(req, "RejectDelegationRequest", "REJECTED", notes)
+    }
+
+    pub(super) fn update_delegation_request(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = required_param_iam(&req.query_params, "DelegationRequestId")?;
+        validate_string_length("DelegationRequestId", &id, 16, 128)?;
+        validate_optional_string_length(
+            "Notes",
+            req.query_params.get("Notes").map(|s| s.as_str()),
+            0,
+            500,
+        )?;
+        let notes = req.query_params.get("Notes").cloned();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let dr = state.delegation_requests.get_mut(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchEntity",
+                format!("Delegation request '{id}' was not found."),
+            )
+        })?;
+        if let Some(n) = notes {
+            dr.notes = Some(n);
+        }
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            empty_response("UpdateDelegationRequest", &req.request_id),
+        ))
+    }
+
+    pub(super) fn associate_delegation_request(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // Associate just verifies the request exists; AWS records the
+        // calling identity. fakecloud is not a security boundary, so we
+        // accept and no-op when the request is present.
+        let id = required_param_iam(&req.query_params, "DelegationRequestId")?;
+        validate_string_length("DelegationRequestId", &id, 16, 128)?;
+        let accounts = self.state.read();
+        let empty = IamState::new(&req.account_id);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        if !state.delegation_requests.contains_key(&id) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchEntity",
+                format!("Delegation request '{id}' was not found."),
+            ));
+        }
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            empty_response("AssociateDelegationRequest", &req.request_id),
+        ))
+    }
+
+    pub(super) fn send_delegation_token(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        self.transition_delegation(req, "SendDelegationToken", "SENT")
+    }
+
+    fn transition_delegation(
+        &self,
+        req: &AwsRequest,
+        action: &str,
+        new_status: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        self.transition_delegation_with_notes(req, action, new_status, None)
+    }
+
+    fn transition_delegation_with_notes(
+        &self,
+        req: &AwsRequest,
+        action: &str,
+        new_status: &str,
+        notes: Option<String>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = required_param_iam(&req.query_params, "DelegationRequestId")?;
+        validate_string_length("DelegationRequestId", &id, 16, 128)?;
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let dr = state.delegation_requests.get_mut(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchEntity",
+                format!("Delegation request '{id}' was not found."),
+            )
+        })?;
+        dr.status = new_status.to_string();
+        if notes.is_some() {
+            dr.notes = notes;
+        }
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            empty_response(action, &req.request_id),
+        ))
+    }
+
+    pub(super) fn enable_outbound_web_identity_federation(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        state.outbound_web_identity_federation_enabled = true;
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            empty_response("EnableOutboundWebIdentityFederation", &req.request_id),
+        ))
+    }
+
+    pub(super) fn disable_outbound_web_identity_federation(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        state.outbound_web_identity_federation_enabled = false;
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            empty_response("DisableOutboundWebIdentityFederation", &req.request_id),
+        ))
+    }
+
+    pub(super) fn get_outbound_web_identity_federation_info(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let empty = IamState::new(&req.account_id);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let body = format!(
+            "  <GetOutboundWebIdentityFederationInfoResult><IssuerIdentifier>https://oidc.fakecloud.local/{}</IssuerIdentifier><JwtVendingEnabled>{}</JwtVendingEnabled></GetOutboundWebIdentityFederationInfoResult>",
+            xml_escape(&req.account_id),
+            state.outbound_web_identity_federation_enabled,
+        );
+        Ok(xml_response(
+            "GetOutboundWebIdentityFederationInfo",
+            &body,
+            &req.request_id,
+        ))
+    }
+
+    pub(super) fn get_human_readable_summary(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let entity_arn = required_param_iam(&req.query_params, "EntityArn")?;
+        validate_string_length("EntityArn", &entity_arn, 20, 2048)?;
+        validate_optional_string_length(
+            "Locale",
+            req.query_params.get("Locale").map(|s| s.as_str()),
+            2,
+            12,
+        )?;
+        let locale = req
+            .query_params
+            .get("Locale")
+            .cloned()
+            .unwrap_or_else(|| "en-US".to_string());
+        let body = format!(
+            "  <GetHumanReadableSummaryResult><SummaryContent>{}</SummaryContent><Locale>{}</Locale><SummaryState>AVAILABLE</SummaryState></GetHumanReadableSummaryResult>",
+            xml_escape(&format!("Summary for {entity_arn}")),
+            xml_escape(&locale),
+        );
+        Ok(xml_response(
+            "GetHumanReadableSummary",
+            &body,
+            &req.request_id,
+        ))
+    }
+}
+
+fn delegation_request_xml(dr: &DelegationRequest) -> String {
+    let owner = dr.owner_account_id.as_deref().unwrap_or("");
+    let redirect = dr.redirect_url.as_deref().unwrap_or("");
+    let request_msg = dr.request_message.as_deref().unwrap_or("");
+    let notes = dr.notes.as_deref().unwrap_or("");
+    let template = dr.policy_template_arn.as_deref().unwrap_or("");
+    format!(
+        "<DelegationRequestId>{}</DelegationRequestId><Status>{}</Status><Description>{}</Description><RequestorWorkflowId>{}</RequestorWorkflowId><NotificationChannel>{}</NotificationChannel><SessionDuration>{}</SessionDuration><OnlySendByOwner>{}</OnlySendByOwner><OwnerAccountId>{}</OwnerAccountId><RedirectUrl>{}</RedirectUrl><RequestMessage>{}</RequestMessage><Notes>{}</Notes><CreateDate>{}</CreateDate><Permissions><PolicyTemplateArn>{}</PolicyTemplateArn></Permissions>",
+        xml_escape(&dr.id),
+        xml_escape(&dr.status),
+        xml_escape(&dr.description),
+        xml_escape(&dr.requestor_workflow_id),
+        xml_escape(&dr.notification_channel),
+        dr.session_duration,
+        dr.only_send_by_owner,
+        xml_escape(owner),
+        xml_escape(redirect),
+        xml_escape(request_msg),
+        xml_escape(notes),
+        dr.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
+        xml_escape(template),
+    )
 }
