@@ -313,10 +313,58 @@ impl EcsService {
             (daemon_arn, deployment_arn, json, ids)
         };
 
+<<<<<<< Updated upstream
         if let Some(rt) = runtime {
             for id in &spawn_ids {
                 rt.clone()
                     .run_task(self.state.clone(), id.clone(), account.clone());
+=======
+        let daemon = Daemon {
+            daemon_name: daemon_name.clone(),
+            daemon_arn: daemon_arn.clone(),
+            cluster_arn,
+            cluster_name: cluster_name.clone(),
+            daemon_task_definition_arn: task_definition_arn.clone(),
+            status: "ACTIVE".to_string(),
+            deployment_arn: deployment_arn.clone(),
+            created_at: now,
+            updated_at: now,
+            capacity_provider_arns,
+            deployment_configuration,
+            propagate_tags,
+            enable_ecs_managed_tags,
+            enable_execute_command,
+            client_token,
+            tags,
+            deployment_history: vec![deployment_arn.clone()],
+            task_arns: Vec::new(),
+        };
+
+        let runtime = self.runtime.clone();
+        let account = account_id;
+        let principal_arn = request
+            .principal
+            .as_ref()
+            .map(|p| p.arn.clone())
+            .unwrap_or_default();
+
+        let (daemon_json, spawn_ids) = {
+            let s = accounts.get_or_create(&account);
+            s.daemons.insert(key.clone(), daemon.clone());
+            s.daemon_deployments
+                .insert(deployment_arn.clone(), deployment);
+            let ids = spawn_daemon_tasks(s, &daemon, &principal_arn, "EC2");
+            if let Some(d) = s.daemons.get_mut(&key) {
+                d.task_arns = ids.clone();
+            }
+            let json = daemon_json(s.daemons.get(&key).unwrap());
+            (json, ids)
+        };
+
+        if let Some(rt) = runtime {
+            for id in &spawn_ids {
+                rt.clone().run_task(self.state.clone(), id.clone(), account.clone());
+>>>>>>> Stashed changes
             }
         } else {
             let mut accounts = self.state.write();

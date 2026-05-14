@@ -52,7 +52,7 @@ async fn create_listener_alb_rejects_tcp_protocol() {
         .await
         .expect_err("ALB should reject TCP listener");
     let msg = format!("{err:?}");
-    assert!(msg.contains("ValidationError"), "{msg}");
+    assert!(msg.contains("InvalidConfigurationRequest"), "{msg}");
     assert!(msg.contains("application"), "{msg}");
 }
 
@@ -113,7 +113,7 @@ async fn create_listener_nlb_rejects_http_protocol() {
         .await
         .expect_err("NLB should reject HTTP listener");
     let msg = format!("{err:?}");
-    assert!(msg.contains("ValidationError"), "{msg}");
+    assert!(msg.contains("InvalidConfigurationRequest"), "{msg}");
     assert!(msg.contains("network"), "{msg}");
 }
 
@@ -179,7 +179,7 @@ async fn create_listener_gwlb_requires_geneve_on_6081() {
         .send()
         .await
         .expect_err("GWLB should reject TCP");
-    assert!(format!("{err:?}").contains("ValidationError"));
+    assert!(format!("{err:?}").contains("InvalidConfigurationRequest"));
     // GENEVE on the wrong port.
     let err = elbv2
         .create_listener()
@@ -234,7 +234,7 @@ async fn modify_load_balancer_attributes_round_trips_ipv6_source_nat() {
         .send()
         .await
         .expect_err("non-bool ipv6 SNAT value should be rejected");
-    assert!(format!("{err:?}").contains("ValidationError"));
+    assert!(format!("{err:?}").contains("InvalidConfigurationRequest"));
 
     // Accept all four valid values and verify round-trip via Describe.
     for v in ["true", "false", "on", "off"] {

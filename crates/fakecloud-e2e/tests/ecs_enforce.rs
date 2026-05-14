@@ -331,6 +331,7 @@ async fn update_service_scale_in_skips_protected_tasks() {
 
 // ── Daemon task spawn (O10) ──────────────────────────────────────────────
 
+<<<<<<< Updated upstream
 async fn daemon_tasks_for_cluster(server: &TestServer, cluster: &str) -> Vec<serde_json::Value> {
     let url = format!(
         "{}/_fakecloud/ecs/tasks?cluster={}",
@@ -344,6 +345,29 @@ async fn daemon_tasks_for_cluster(server: &TestServer, cluster: &str) -> Vec<ser
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default()
+=======
+#[derive(serde::Deserialize, Debug)]
+struct EcsIntrospectionTask {
+    task_arn: String,
+    group: Option<String>,
+    last_status: String,
+    desired_status: String,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct EcsIntrospectionResponse {
+    tasks: Vec<EcsIntrospectionTask>,
+}
+
+async fn daemon_tasks_for_cluster(
+    server: &TestServer,
+    cluster: &str,
+) -> Vec<EcsIntrospectionTask> {
+    let url = format!("{}/_fakecloud/ecs/tasks?cluster={}", server.endpoint(), cluster);
+    let resp = reqwest::get(&url).await.unwrap();
+    let body: EcsIntrospectionResponse = resp.json().await.unwrap();
+    body.tasks
+>>>>>>> Stashed changes
 }
 
 #[tokio::test]
@@ -351,12 +375,16 @@ async fn daemon_spawns_one_task_per_capacity_provider() {
     let server = TestServer::start().await;
     let client = server.ecs_client().await;
 
+<<<<<<< Updated upstream
     client
         .create_cluster()
         .cluster_name("default")
         .send()
         .await
         .unwrap();
+=======
+    client.create_cluster().cluster_name("d-cluster").send().await.unwrap();
+>>>>>>> Stashed changes
 
     let td_arn = client
         .register_daemon_task_definition()
@@ -387,6 +415,7 @@ async fn daemon_spawns_one_task_per_capacity_provider() {
         .unwrap()
         .to_string();
 
+<<<<<<< Updated upstream
     let url = format!("{}/_fakecloud/ecs/tasks?cluster=default", server.endpoint());
     let resp = reqwest::get(&url).await.unwrap();
     let text = resp.text().await.unwrap();
@@ -396,6 +425,12 @@ async fn daemon_spawns_one_task_per_capacity_provider() {
     let daemon_tasks: Vec<_> = tasks
         .iter()
         .filter(|t| t.get("group").and_then(|v| v.as_str()) == Some("daemon:d1"))
+=======
+    let tasks = daemon_tasks_for_cluster(&server, "d-cluster").await;
+    let daemon_tasks: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.group.as_deref() == Some("daemon:d1"))
+>>>>>>> Stashed changes
         .collect();
     assert_eq!(
         daemon_tasks.len(),
@@ -431,6 +466,7 @@ async fn daemon_spawns_one_task_per_capacity_provider() {
         .await
         .unwrap();
 
+<<<<<<< Updated upstream
     let tasks_after = daemon_tasks_for_cluster(&server, "default").await;
     let new_daemon_tasks: Vec<_> = tasks_after
         .iter()
@@ -441,6 +477,12 @@ async fn daemon_spawns_one_task_per_capacity_provider() {
                     .map(|arn| arn.contains("d-td2"))
                     .unwrap_or(false)
         })
+=======
+    let tasks_after = daemon_tasks_for_cluster(&server, "d-cluster").await;
+    let new_daemon_tasks: Vec<_> = tasks_after
+        .iter()
+        .filter(|t| t.group.as_deref() == Some("daemon:d1"))
+>>>>>>> Stashed changes
         .collect();
     assert_eq!(
         new_daemon_tasks.len(),
@@ -456,6 +498,7 @@ async fn daemon_spawns_one_task_per_capacity_provider() {
         .await
         .unwrap();
 
+<<<<<<< Updated upstream
     let tasks_after_del = daemon_tasks_for_cluster(&server, "default").await;
     let del_daemon_tasks: Vec<_> = tasks_after_del
         .iter()
@@ -673,3 +716,15 @@ async fn codedeploy_update_service_flips_primary_task_set() {
         }
     }
 }
+=======
+    let tasks_after_del = daemon_tasks_for_cluster(&server, "d-cluster").await;
+    let del_daemon_tasks: Vec<_> = tasks_after_del
+        .iter()
+        .filter(|t| t.group.as_deref() == Some("daemon:d1"))
+        .collect();
+    assert!(
+        del_daemon_tasks.iter().all(|t| t.desired_status == "STOPPED"),
+        "all daemon tasks should be STOPPED after delete_daemon; got {del_daemon_tasks:?}"
+    );
+}
+>>>>>>> Stashed changes
