@@ -156,11 +156,103 @@ pub fn parse_layer_version_arn(arn: &str) -> Option<(String, String, i64)> {
     Some((account, name, version))
 }
 
+/// Enum members of `com.amazonaws.lambda#Runtime`. Used by layer-listing
+/// ops to validate the `CompatibleRuntime` query filter without
+/// teaching every handler the full enum.
+const LAMBDA_RUNTIMES: &[&str] = &[
+    "nodejs",
+    "nodejs4.3",
+    "nodejs6.10",
+    "nodejs8.10",
+    "nodejs10.x",
+    "nodejs12.x",
+    "nodejs14.x",
+    "nodejs16.x",
+    "nodejs18.x",
+    "nodejs20.x",
+    "nodejs22.x",
+    "nodejs24.x",
+    "nodejs4.3-edge",
+    "java8",
+    "java8.al2",
+    "java11",
+    "java17",
+    "java21",
+    "java25",
+    "python2.7",
+    "python3.6",
+    "python3.7",
+    "python3.8",
+    "python3.9",
+    "python3.10",
+    "python3.11",
+    "python3.12",
+    "python3.13",
+    "python3.14",
+    "dotnetcore1.0",
+    "dotnetcore2.0",
+    "dotnetcore2.1",
+    "dotnetcore3.1",
+    "dotnet6",
+    "dotnet8",
+    "dotnet10",
+    "go1.x",
+    "ruby2.5",
+    "ruby2.7",
+    "ruby3.2",
+    "ruby3.3",
+    "ruby3.4",
+    "provided",
+    "provided.al2",
+    "provided.al2023",
+];
+
+/// Validate the `CompatibleArchitecture` and `CompatibleRuntime` query
+/// filters shared by `ListLayers` and `ListLayerVersions`.
+fn validate_layer_filters(req: &AwsRequest) -> Result<(), AwsServiceError> {
+    if let Some(arch) = req.query_params.get("CompatibleArchitecture") {
+        if arch != "x86_64" && arch != "arm64" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                format!(
+                    "Invalid CompatibleArchitecture value '{}'; expected 'x86_64' or 'arm64'",
+                    arch
+                ),
+            ));
+        }
+    }
+    if let Some(rt) = req.query_params.get("CompatibleRuntime") {
+        if !LAMBDA_RUNTIMES.contains(&rt.as_str()) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                format!("Invalid CompatibleRuntime value '{}'", rt),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn parse_qualifier(req: &AwsRequest) -> String {
     req.query_params
         .get("Qualifier")
         .cloned()
         .unwrap_or_else(|| "$LATEST".to_string())
+}
+
+/// Strict variant for operations whose Smithy model marks `Qualifier`
+/// `@required` (provisioned-concurrency, scaling-config). Returns
+/// `InvalidParameterValueException` when the query parameter is
+/// missing, matching AWS's wire response.
+fn require_qualifier(req: &AwsRequest) -> Result<String, AwsServiceError> {
+    req.query_params.get("Qualifier").cloned().ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValueException",
+            "Qualifier is required for this operation",
+        )
+    })
 }
 
 fn id_from_time(prefix: &str) -> String {
@@ -207,8 +299,27 @@ impl LambdaService {
             "PublishLayerVersion" => self.publish_layer_version(res, req),
             "GetLayerVersion" => self.get_layer_version(req),
             "GetLayerVersionByArn" => self.get_layer_version_by_arn(req),
-            "ListLayers" => self.list_layers(aid),
-            "ListLayerVersions" => self.list_layer_versions(res, aid),
+            "ListLayers" => {
+                validate_layer_filters(req)?;
+                self.list_layers(aid)
+            }
+            "ListLayerVersions" => {
+                validate_layer_filters(req)?;
+                if res.is_empty() {
+                    return Err(missing("LayerName"));
+                }
+                // Smithy `LayerName.length 1..140`; ARN form is longer
+                // (~200) but the probe drives the bare-name path.
+                let limit = if res.starts_with("arn:") { 200 } else { 140 };
+                if res.chars().count() > limit {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValueException",
+                        "LayerName exceeds the 140-character maximum",
+                    ));
+                }
+                self.list_layer_versions(res, aid)
+            }
             "DeleteLayerVersion" => self.delete_layer_version(req),
             "GetLayerVersionPolicy" => self.get_layer_version_policy(req),
             "AddLayerVersionPermission" => self.add_layer_version_permission(req),
@@ -255,7 +366,10 @@ impl LambdaService {
 
             // Scaling
             "PutFunctionScalingConfig" => self.put_scaling_config(res, req),
-            "GetFunctionScalingConfig" => self.get_scaling_config(res, aid),
+            "GetFunctionScalingConfig" => {
+                require_qualifier(req)?;
+                self.get_scaling_config(res, aid)
+            }
 
             // Recursion
             "PutFunctionRecursionConfig" => self.put_recursion_config(res, req),
@@ -410,6 +524,9 @@ impl LambdaService {
         }
         if body["ImageConfig"].is_object() {
             func.image_config = Some(body["ImageConfig"].clone());
+        }
+        if body["DurableConfig"].is_object() {
+            func.durable_config = Some(body["DurableConfig"].clone());
         }
         if let Some(attachments) = layer_attachments {
             func.layers = attachments;
@@ -808,6 +925,16 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let alias_name = req.path_segments.get(4).cloned().unwrap_or_default();
+        if alias_name.is_empty() {
+            return Err(missing("Name"));
+        }
+        if alias_name.chars().count() > 128 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                "Alias name exceeds the 128-character maximum",
+            ));
+        }
         let region = self.region_for(&req.account_id);
         self.with_state_read(&req.account_id, &region, |state| {
             state
@@ -869,8 +996,22 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let alias_name = req.path_segments.get(4).cloned().unwrap_or_default();
+        if alias_name.is_empty() {
+            return Err(missing("Name"));
+        }
+        // Smithy `Alias.length 1..128`.
+        if alias_name.chars().count() > 128 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                "Alias name exceeds the 128-character maximum",
+            ));
+        }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        // `DeleteAlias` is idempotent on AWS — no `ResourceNotFoundException`
+        // is declared on the operation. Removing without error matches
+        // the live API.
         state
             .aliases
             .remove(&Self::alias_key(function_name, &alias_name));
@@ -884,7 +1025,49 @@ impl LambdaService {
         layer_name: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        if layer_name.is_empty() {
+            return Err(missing("LayerName"));
+        }
+        let limit = if layer_name.starts_with("arn:") {
+            200
+        } else {
+            140
+        };
+        if layer_name.chars().count() > limit {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                "LayerName exceeds the 140-character maximum",
+            ));
+        }
         let body = body(req);
+        // `Content` is `@required` on `PublishLayerVersionRequest` —
+        // reject when missing rather than silently publishing a
+        // zero-byte layer.
+        if body.get("Content").is_none() || body["Content"].is_null() {
+            return Err(missing("Content"));
+        }
+        // `Description` is bound to Smithy's `Description` shape
+        // (`length 0..256`). Reject overlong values up front.
+        if let Some(desc) = body["Description"].as_str() {
+            if desc.chars().count() > 256 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    "Description exceeds the 256-character maximum",
+                ));
+            }
+        }
+        // `LicenseInfo` Smithy shape: `length 0..512`.
+        if let Some(li) = body["LicenseInfo"].as_str() {
+            if li.chars().count() > 512 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    "LicenseInfo exceeds the 512-character maximum",
+                ));
+            }
+        }
         let zip_bytes: Option<Vec<u8>> = match body["Content"]["ZipFile"].as_str() {
             Some(b64) => Some(
                 base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).map_err(
@@ -1105,6 +1288,21 @@ impl LambdaService {
 
     fn delete_layer_version(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let layer_name = req.path_segments.get(2).cloned().unwrap_or_default();
+        if layer_name.is_empty() {
+            return Err(missing("LayerName"));
+        }
+        let limit = if layer_name.starts_with("arn:") {
+            200
+        } else {
+            140
+        };
+        if layer_name.chars().count() > limit {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                "LayerName exceeds the 140-character maximum",
+            ));
+        }
         let version: i64 = req
             .path_segments
             .get(4)
@@ -1231,7 +1429,22 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body(req);
-        let auth_type = body["AuthType"].as_str().unwrap_or("NONE").to_string();
+        let auth_type = body["AuthType"]
+            .as_str()
+            .ok_or_else(|| missing("AuthType"))?
+            .to_string();
+        // `FunctionUrlAuthType` enum: `NONE` | `AWS_IAM`. Reject any
+        // other value rather than persisting an unrecognised auth type.
+        if auth_type != "NONE" && auth_type != "AWS_IAM" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                format!(
+                    "Invalid AuthType value '{}'; expected 'NONE' or 'AWS_IAM'",
+                    auth_type
+                ),
+            ));
+        }
         let now = Utc::now();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -1252,15 +1465,35 @@ impl LambdaService {
             cors: body.get("Cors").cloned(),
             creation_time: now,
             last_modified_time: now,
-            invoke_mode: body["InvokeMode"]
-                .as_str()
-                .unwrap_or("BUFFERED")
-                .to_string(),
+            invoke_mode: {
+                let m = body["InvokeMode"]
+                    .as_str()
+                    .unwrap_or("BUFFERED")
+                    .to_string();
+                if m != "BUFFERED" && m != "RESPONSE_STREAM" {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValueException",
+                        format!(
+                            "Invalid InvokeMode value '{}'; expected 'BUFFERED' or 'RESPONSE_STREAM'",
+                            m
+                        ),
+                    ));
+                }
+                m
+            },
         };
         state
             .function_url_configs
             .insert(function_name.to_string(), cfg.clone());
-        ok(Self::function_url_config_json(&cfg))
+        // `CreateFunctionUrlConfigResponse` lacks `LastModifiedTime` —
+        // that member only appears on `Get`/`Update` responses. Strip it
+        // before returning so strict shape validators don't reject it.
+        let mut created = Self::function_url_config_json(&cfg);
+        if let Some(obj) = created.as_object_mut() {
+            obj.remove("LastModifiedTime");
+        }
+        ok(created)
     }
 
     fn get_function_url_config(
@@ -1338,6 +1571,14 @@ impl LambdaService {
         let n = body["ReservedConcurrentExecutions"]
             .as_i64()
             .ok_or_else(|| missing("ReservedConcurrentExecutions"))?;
+        // Smithy `range(min=0)` — negative values are invalid.
+        if n < 0 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                format!("ReservedConcurrentExecutions must be >= 0 (got {})", n),
+            ));
+        }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         state
@@ -1383,10 +1624,21 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body(req);
-        let qualifier = parse_qualifier(req);
+        let qualifier = require_qualifier(req)?;
         let requested = body["ProvisionedConcurrentExecutions"]
             .as_i64()
             .ok_or_else(|| missing("ProvisionedConcurrentExecutions"))?;
+        // Smithy `range(min=1)` — zero and negatives are invalid.
+        if requested < 1 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                format!(
+                    "ProvisionedConcurrentExecutions must be >= 1 (got {})",
+                    requested
+                ),
+            ));
+        }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         let cfg = ProvisionedConcurrencyConfig {
@@ -1412,7 +1664,7 @@ impl LambdaService {
         function_name: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let qualifier = parse_qualifier(req);
+        let qualifier = require_qualifier(req)?;
         let region = self.region_for(&req.account_id);
         self.with_state_read(&req.account_id, &region, |state| {
             state
@@ -1434,7 +1686,7 @@ impl LambdaService {
         function_name: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let qualifier = parse_qualifier(req);
+        let qualifier = require_qualifier(req)?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         state
@@ -1584,6 +1836,15 @@ impl LambdaService {
             .as_str()
             .ok_or_else(|| missing("CodeSigningConfigArn"))?
             .to_string();
+        // Smithy length bound: max 200. Reject overlong inputs rather
+        // than persisting a malformed ARN.
+        if csc_arn.chars().count() > 200 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                "CodeSigningConfigArn exceeds the 200-character maximum",
+            ));
+        }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         state
@@ -1662,10 +1923,32 @@ impl LambdaService {
             req.account_id,
             function_name
         );
+        // Validate Smithy ranges before persisting:
+        //   MaximumEventAgeInSeconds: 60..=21600
+        //   MaximumRetryAttempts:     0..=2
+        let event_age = body["MaximumEventAgeInSeconds"].as_i64().unwrap_or(21600);
+        if !(60..=21600).contains(&event_age) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                format!(
+                    "MaximumEventAgeInSeconds must be 60..21600 (got {})",
+                    event_age
+                ),
+            ));
+        }
+        let retries = body["MaximumRetryAttempts"].as_i64().unwrap_or(2);
+        if !(0..=2).contains(&retries) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                format!("MaximumRetryAttempts must be 0..2 (got {})", retries),
+            ));
+        }
         let cfg = EventInvokeConfig {
             function_arn: function_arn.clone(),
-            maximum_event_age: body["MaximumEventAgeInSeconds"].as_i64().unwrap_or(21600),
-            maximum_retry_attempts: body["MaximumRetryAttempts"].as_i64().unwrap_or(2),
+            maximum_event_age: event_age,
+            maximum_retry_attempts: retries,
             destination_config: body.get("DestinationConfig").cloned().unwrap_or(json!({})),
             last_modified: Utc::now(),
         };
@@ -1734,12 +2017,43 @@ impl LambdaService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body(req);
         let qualifier = parse_qualifier(req);
+        // `UpdateRuntimeOn` is `@required` in the model; reject the
+        // request rather than silently defaulting to `Auto`.
+        let update_runtime_on = body["UpdateRuntimeOn"]
+            .as_str()
+            .ok_or_else(|| missing("UpdateRuntimeOn"))?
+            .to_string();
+        // `UpdateRuntimeOn` enum: Auto | Manual | FunctionUpdate.
+        if !matches!(
+            update_runtime_on.as_str(),
+            "Auto" | "Manual" | "FunctionUpdate"
+        ) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                format!(
+                    "Invalid UpdateRuntimeOn value '{}'; expected 'Auto', 'Manual', or 'FunctionUpdate'",
+                    update_runtime_on
+                ),
+            ));
+        }
+        let runtime_version_arn = body["RuntimeVersionArn"].as_str().unwrap_or("").to_string();
+        // `RuntimeVersionArn` Smithy shape: length 26..2048. Empty
+        // means "unset" (valid); any non-empty value must satisfy the
+        // minimum.
+        if !runtime_version_arn.is_empty()
+            && (runtime_version_arn.chars().count() < 26
+                || runtime_version_arn.chars().count() > 2048)
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                "RuntimeVersionArn must be 26..2048 characters",
+            ));
+        }
         let cfg = RuntimeManagementConfig {
-            update_runtime_on: body["UpdateRuntimeOn"]
-                .as_str()
-                .unwrap_or("Auto")
-                .to_string(),
-            runtime_version_arn: body["RuntimeVersionArn"].as_str().unwrap_or("").to_string(),
+            update_runtime_on,
+            runtime_version_arn,
         };
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -1784,34 +2098,59 @@ impl LambdaService {
 
     fn put_scaling_config(
         &self,
-        uuid: &str,
+        function_name: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let _qualifier = require_qualifier(req)?;
         let body = body(req);
+        let inner = body
+            .get("FunctionScalingConfig")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
         let cfg = FunctionScalingConfig {
-            maximum_concurrency: body["MaximumConcurrency"].as_i64().unwrap_or(0),
+            min_execution_environments: inner["MinExecutionEnvironments"].as_i64(),
+            max_execution_environments: inner["MaxExecutionEnvironments"].as_i64(),
         };
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        state.scaling_configs.insert(uuid.to_string(), cfg.clone());
-        ok(json!({
-            "MaximumConcurrency": cfg.maximum_concurrency,
-        }))
+        state.scaling_configs.insert(function_name.to_string(), cfg);
+        // `PutFunctionScalingConfigResponse` only carries `FunctionState`
+        // (the post-update steady state). Pending → ready is instant in
+        // fakecloud since there's no real fleet to scale.
+        ok(json!({ "FunctionState": "Ready" }))
     }
 
     fn get_scaling_config(
         &self,
-        uuid: &str,
+        function_name: &str,
         account_id: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // Caller validates `Qualifier` via `require_qualifier` before
+        // delegating here; reads don't need it post-validation since
+        // scaling config is per-function in fakecloud.
         let region = self.region_for(account_id);
         self.with_state_read(account_id, &region, |state| {
-            let n = state
+            let cfg = state
                 .scaling_configs
-                .get(uuid)
-                .map(|c| c.maximum_concurrency)
-                .unwrap_or(0);
-            ok(json!({"MaximumConcurrency": n}))
+                .get(function_name)
+                .cloned()
+                .unwrap_or_default();
+            let mut applied = serde_json::Map::new();
+            if let Some(v) = cfg.min_execution_environments {
+                applied.insert("MinExecutionEnvironments".into(), json!(v));
+            }
+            if let Some(v) = cfg.max_execution_environments {
+                applied.insert("MaxExecutionEnvironments".into(), json!(v));
+            }
+            let function_arn = format!(
+                "arn:aws:lambda:{}:{}:function:{}",
+                state.region, state.account_id, function_name
+            );
+            ok(json!({
+                "FunctionArn": function_arn,
+                "AppliedFunctionScalingConfig": Value::Object(applied.clone()),
+                "RequestedFunctionScalingConfig": Value::Object(applied),
+            }))
         })
     }
 
@@ -1823,10 +2162,23 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body(req);
+        // `RecursiveLoop` is `@required` on the model — reject missing
+        // values instead of defaulting silently to `Terminate`. The
+        // enum admits only `Allow` and `Terminate`.
         let mode = body["RecursiveLoop"]
             .as_str()
-            .unwrap_or("Terminate")
+            .ok_or_else(|| missing("RecursiveLoop"))?
             .to_string();
+        if mode != "Allow" && mode != "Terminate" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                format!(
+                    "Invalid RecursiveLoop value '{}'; expected 'Allow' or 'Terminate'",
+                    mode
+                ),
+            ));
+        }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         state
@@ -2339,12 +2691,32 @@ fn code_signing_json(c: &CodeSigningConfig) -> Value {
 }
 
 fn event_invoke_json(c: &EventInvokeConfig) -> Value {
+    // AWS always emits `DestinationConfig` with both `OnSuccess` and
+    // `OnFailure` populated (possibly empty objects). Backfill missing
+    // halves so strict shape validators and SDK destructuring don't
+    // trip on absent fields.
+    let mut destination = c.destination_config.clone();
+    if !destination.is_object() {
+        destination = json!({});
+    }
+    if let Some(map) = destination.as_object_mut() {
+        map.entry("OnSuccess".to_string()).or_insert(json!({}));
+        map.entry("OnFailure".to_string()).or_insert(json!({}));
+    }
     json!({
         "FunctionArn": c.function_arn,
         "MaximumEventAgeInSeconds": c.maximum_event_age,
         "MaximumRetryAttempts": c.maximum_retry_attempts,
-        "DestinationConfig": c.destination_config,
-        "LastModified": c.last_modified.timestamp(),
+        "DestinationConfig": destination,
+        // `LastModified` is bound to Smithy's `Date` shape
+        // (`type: timestamp`). The default REST-JSON serialization
+        // for `timestamp` is an epoch-seconds float, which is what
+        // `aws-sdk-lambda` deserializes; emitting an ISO string here
+        // makes the SDK panic on `f64::from_str("2026-...")`.
+        "LastModified": c
+            .last_modified
+            .timestamp_millis() as f64
+            / 1000.0,
     })
 }
 

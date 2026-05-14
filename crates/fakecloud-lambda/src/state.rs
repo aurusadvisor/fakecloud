@@ -106,6 +106,11 @@ pub struct LambdaFunction {
     /// (`Idle`, `Creating`, `Restoring`, `EniLimitExceeded`, …).
     #[serde(default)]
     pub state_reason_code: Option<String>,
+    /// `DurableConfig` for AWS's durable-function feature
+    /// (`RetentionPeriodInDays`, `ExecutionTimeout`). Round-tripped
+    /// only — there's no execution-history backend in fakecloud.
+    #[serde(default)]
+    pub durable_config: Option<serde_json::Value>,
     /// Free-form `LastUpdateStatusReason` set on the most recent failed
     /// or in-progress configuration update.
     #[serde(default)]
@@ -348,9 +353,16 @@ pub struct RuntimeManagementConfig {
     pub runtime_version_arn: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FunctionScalingConfig {
-    pub maximum_concurrency: i64,
+    /// `MinExecutionEnvironments` — the minimum number of execution
+    /// environments to maintain for the function. AWS's
+    /// `FunctionScalingConfig` shape uses these two members (not the
+    /// pre-2025 `MaximumConcurrency`).
+    pub min_execution_environments: Option<i64>,
+    /// `MaxExecutionEnvironments` — the upper bound on provisioned
+    /// execution environments.
+    pub max_execution_environments: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

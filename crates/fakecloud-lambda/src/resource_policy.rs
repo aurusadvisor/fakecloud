@@ -138,6 +138,7 @@ mod tests {
             file_system_configs: Vec::new(),
             logging_config: None,
             image_config: None,
+            durable_config: None,
             signing_profile_version_arn: None,
             signing_job_arn: None,
             runtime_version_config: None,

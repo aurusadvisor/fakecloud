@@ -549,30 +549,28 @@ fn rest_request_config(
                 ),
                 None,
             ),
-            // Layers
+            // Layers — AWS uses the `2018-10-31` prefix, not `LAMBDA_PREFIX`
+            // (`2015-03-31`). The Lambda service router requires the
+            // 2018-10-31 date for layer paths.
             "PublishLayerVersion" => (
                 reqwest::Method::POST,
-                format!("{}/layers/test-layer/versions", LAMBDA_PREFIX),
+                "/2018-10-31/layers/test-layer/versions".to_string(),
                 None,
             ),
-            "ListLayers" => (
-                reqwest::Method::GET,
-                format!("{}/layers", LAMBDA_PREFIX),
-                None,
-            ),
+            "ListLayers" => (reqwest::Method::GET, "/2018-10-31/layers".to_string(), None),
             "ListLayerVersions" => (
                 reqwest::Method::GET,
-                format!("{}/layers/test-layer/versions", LAMBDA_PREFIX),
+                "/2018-10-31/layers/test-layer/versions".to_string(),
                 None,
             ),
             "GetLayerVersion" => (
                 reqwest::Method::GET,
-                format!("{}/layers/test-layer/versions/1", LAMBDA_PREFIX),
+                "/2018-10-31/layers/test-layer/versions/1".to_string(),
                 None,
             ),
             "DeleteLayerVersion" => (
                 reqwest::Method::DELETE,
-                format!("{}/layers/test-layer/versions/1", LAMBDA_PREFIX),
+                "/2018-10-31/layers/test-layer/versions/1".to_string(),
                 None,
             ),
             // Concurrency
@@ -690,6 +688,91 @@ fn rest_request_config(
             "GetRuntimeManagementConfig" => (
                 reqwest::Method::GET,
                 format!("/2021-07-20/functions/{}/runtime-management-config", FUNC),
+                None,
+            ),
+            // Async invocation (2014-11-13 in AWS, but Lambda's router
+            // accepts any well-formed date prefix).
+            "InvokeAsync" => (
+                reqwest::Method::POST,
+                format!("/2014-11-13/functions/{}/invoke-async", FUNC),
+                None,
+            ),
+            // Response-streaming invocation (2021-11-15).
+            "InvokeWithResponseStream" => (
+                reqwest::Method::POST,
+                format!(
+                    "/2021-11-15/functions/{}/response-streaming-invocations",
+                    FUNC
+                ),
+                None,
+            ),
+            // Event invoke configuration (2019-09-25).
+            "PutFunctionEventInvokeConfig" => (
+                reqwest::Method::PUT,
+                format!("/2019-09-25/functions/{}/event-invoke-config", FUNC),
+                None,
+            ),
+            "UpdateFunctionEventInvokeConfig" => (
+                reqwest::Method::POST,
+                format!("/2019-09-25/functions/{}/event-invoke-config", FUNC),
+                None,
+            ),
+            "GetFunctionEventInvokeConfig" => (
+                reqwest::Method::GET,
+                format!("/2019-09-25/functions/{}/event-invoke-config", FUNC),
+                None,
+            ),
+            "DeleteFunctionEventInvokeConfig" => (
+                reqwest::Method::DELETE,
+                format!("/2019-09-25/functions/{}/event-invoke-config", FUNC),
+                None,
+            ),
+            "ListFunctionEventInvokeConfigs" => (
+                reqwest::Method::GET,
+                format!("/2019-09-25/functions/{}/event-invoke-config/list", FUNC),
+                None,
+            ),
+            // Provisioned concurrency (2019-09-30).
+            "PutProvisionedConcurrencyConfig" => (
+                reqwest::Method::PUT,
+                format!("/2019-09-30/functions/{}/provisioned-concurrency", FUNC),
+                None,
+            ),
+            "GetProvisionedConcurrencyConfig" => (
+                reqwest::Method::GET,
+                format!("/2019-09-30/functions/{}/provisioned-concurrency", FUNC),
+                None,
+            ),
+            "DeleteProvisionedConcurrencyConfig" => (
+                reqwest::Method::DELETE,
+                format!("/2019-09-30/functions/{}/provisioned-concurrency", FUNC),
+                None,
+            ),
+            "ListProvisionedConcurrencyConfigs" => (
+                reqwest::Method::GET,
+                format!("/2019-09-30/functions/{}/provisioned-concurrency", FUNC),
+                Some("List=ALL".to_string()),
+            ),
+            // Recursion config (2024-08-31).
+            "PutFunctionRecursionConfig" => (
+                reqwest::Method::PUT,
+                format!("/2024-08-31/functions/{}/recursion-config", FUNC),
+                None,
+            ),
+            "GetFunctionRecursionConfig" => (
+                reqwest::Method::GET,
+                format!("/2024-08-31/functions/{}/recursion-config", FUNC),
+                None,
+            ),
+            // Scaling config (2025-11-30).
+            "PutFunctionScalingConfig" => (
+                reqwest::Method::PUT,
+                format!("/2025-11-30/functions/{}/function-scaling-config", FUNC),
+                None,
+            ),
+            "GetFunctionScalingConfig" => (
+                reqwest::Method::GET,
+                format!("/2025-11-30/functions/{}/function-scaling-config", FUNC),
                 None,
             ),
             // Default: POST to functions path
@@ -934,6 +1017,21 @@ fn probe_rest(
         _ => legacy_rest_request(endpoint, service_name, operation_name, variant),
     };
 
+    // For services with a hand-curated route table (Lambda / S3) we
+    // still want to honour the Smithy model's `@httpQuery` traits so
+    // negative/boundary variants targeting query members reach the
+    // server. The legacy builder only knows the path; bolt the query
+    // string on here when the model is available.
+    let url = if let Some(model) = model {
+        if SERVICES_WITH_HARDCODED_REST.contains(&service_name) {
+            append_http_query_from_model(&url, model, operation_name, &variant.input)
+        } else {
+            url
+        }
+    } else {
+        url
+    };
+
     let mut req = client
         .request(method.clone(), &url)
         .header("Authorization", sigv4_auth_header(service_name));
@@ -972,6 +1070,59 @@ type RestRequestParts = (
     Vec<(String, String)>,
     Option<String>,
 );
+
+/// Append the `@httpQuery`-bound members of an operation's input shape
+/// to a legacy-routed URL. Used for Lambda / S3 where the path is
+/// hand-curated but query parameters still need to be honored so
+/// negative/boundary variants can target them.
+fn append_http_query_from_model(
+    base_url: &str,
+    model: &ServiceModel,
+    operation_name: &str,
+    input: &serde_json::Value,
+) -> String {
+    use crate::smithy::ShapeType;
+
+    let obj = match input.as_object() {
+        Some(o) => o,
+        None => return base_url.to_string(),
+    };
+    let op = match model.operations.iter().find(|o| o.name == operation_name) {
+        Some(op) => op,
+        None => return base_url.to_string(),
+    };
+    let members: Vec<crate::smithy::Member> = op
+        .input_shape
+        .as_ref()
+        .and_then(|id| model.shapes.get(id))
+        .and_then(|shape| match &shape.shape_type {
+            ShapeType::Structure { members } => Some(members.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    let mut additions: Vec<String> = Vec::new();
+    for member in &members {
+        let target_traits = model.shapes.get(&member.target).map(|s| &s.traits);
+        let query_name = member
+            .traits
+            .http_query
+            .clone()
+            .or_else(|| target_traits.and_then(|t| t.http_query.clone()));
+        if let Some(qk) = query_name {
+            if let Some(val) = obj.get(&member.name) {
+                let mut parts: Vec<String> = Vec::new();
+                append_query(&mut parts, &qk, val);
+                additions.extend(parts);
+            }
+        }
+    }
+    if additions.is_empty() {
+        return base_url.to_string();
+    }
+    let joiner = if base_url.contains('?') { '&' } else { '?' };
+    format!("{}{}{}", base_url, joiner, additions.join("&"))
+}
 
 /// Preserve the pre-existing hardcoded-table behavior for Lambda / S3.
 fn legacy_rest_request(
@@ -1018,16 +1169,39 @@ fn legacy_substitute_identifiers(
     };
     let mut out = path.to_string();
     let subs: &[(&str, &str)] = match service_name {
-        "lambda" => &[("test-conformance-function", "FunctionName")],
+        "lambda" => &[
+            ("test-conformance-function", "FunctionName"),
+            // Layer ops route on `LayerName` (and an optional
+            // numeric `VersionNumber`). Substitute from the variant
+            // so negative/boundary variants reach those routes too.
+            ("test-layer", "LayerName"),
+            // Alias ops use `LATEST` as the path placeholder. Drive
+            // negative variants through the same slot.
+            ("LATEST", "Name"),
+        ],
         "s3" => &[("test-conformance-bucket", "Bucket"), ("test-key", "Key")],
         _ => &[],
     };
     for (placeholder, member) in subs {
-        if let Some(serde_json::Value::String(value)) = obj.get(*member) {
-            // The legacy path is unencoded; the variant value may be raw
-            // ARN or already URL-encoded. Trust the variant — the
-            // id_forms strategy decides whether to URL-encode.
-            out = out.replace(placeholder, value);
+        match obj.get(*member) {
+            Some(serde_json::Value::String(value)) => {
+                // The legacy path is unencoded; the variant value may be raw
+                // ARN or already URL-encoded. Trust the variant — the
+                // id_forms strategy decides whether to URL-encode.
+                out = out.replace(placeholder, value);
+            }
+            None => {
+                // The variant omitted this httpLabel member entirely
+                // (e.g. `negative_omit_FunctionName`). Real AWS would
+                // never see such a request — the SDK refuses to build
+                // one — but synthetic probes can. Collapse the
+                // placeholder to an empty string so the path
+                // doesn't accidentally hit the default seed
+                // (`test-conformance-function`) and pass an obviously
+                // invalid request.
+                out = out.replace(placeholder, "");
+            }
+            _ => {}
         }
     }
     out
