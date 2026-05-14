@@ -11,7 +11,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 
 use crate::state::{
     Agent, AgentAlias, AgentCollaborator, AgentKnowledgeBase, AgentVersion, BedrockAgentAccounts,
-    DataSource, Flow, FlowAlias, FlowVersion, IngestionJob, KnowledgeBase, Prompt,
+    DataSource, Flow, FlowAlias, FlowVersion, IngestionJob, KnowledgeBase, Prompt, PromptVersion,
     SharedBedrockAgentState,
 };
 
@@ -25,6 +25,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateFlowVersion",
     "CreateKnowledgeBase",
     "CreatePrompt",
+    "CreatePromptVersion",
     "DeleteAgent",
     "DeleteAgentActionGroup",
     "DeleteAgentAlias",
@@ -566,6 +567,7 @@ impl AwsService for BedrockAgentService {
             "CreateFlowVersion" => self.create_flow_version(&req),
             "CreateKnowledgeBase" => self.create_knowledge_base(&req),
             "CreatePrompt" => self.create_prompt(&req),
+            "CreatePromptVersion" => self.create_prompt_version(&req),
             "DeleteAgent" => self.delete_agent(&req),
             "DeleteAgentActionGroup" => self.delete_agent_action_group(&req),
             "DeleteAgentAlias" => self.delete_agent_alias(&req),
@@ -812,6 +814,86 @@ fn data_source_json(d: &DataSource) -> Value {
     o
 }
 
+/// Build the `AgentSummary` shape used by `ListAgents`. The full `agent_json`
+/// emits extra fields (agentArn, roleArn, etc.) that aren't on the Smithy
+/// summary struct; surfacing them tripped strict-mode shape checks.
+fn agent_summary_json(a: &Agent) -> Value {
+    let mut o = json!({
+        "agentId": a.agent_id,
+        "agentName": a.agent_name,
+        "agentStatus": a.agent_status,
+        "updatedAt": a.updated_at.to_rfc3339(),
+        "latestAgentVersion": a.agent_version,
+    });
+    if let Some(ref d) = a.description {
+        o["description"] = json!(d);
+    }
+    if let Some(ref g) = a.guardrail_configuration {
+        o["guardrailConfiguration"] = g.clone();
+    }
+    o
+}
+
+/// `FlowSummary` shape: requires `arn`, `id`, `name`, `status`, `createdAt`,
+/// `updatedAt`, and `version`. The full `flow_json` exposes `flowId`,
+/// `executionRoleArn`, and `definition`, none of which appear on the summary.
+fn flow_summary_json(f: &Flow, region: &str, account_id: &str) -> Value {
+    let mut o = json!({
+        "arn": flow_arn(&f.flow_id, region, account_id),
+        "id": f.flow_id,
+        "name": f.name,
+        "status": f.status,
+        "createdAt": f.created_at.to_rfc3339(),
+        "updatedAt": f.updated_at.to_rfc3339(),
+        "version": f.version,
+    });
+    if let Some(ref d) = f.description {
+        o["description"] = json!(d);
+    }
+    o
+}
+
+/// `KnowledgeBaseSummary`: only `knowledgeBaseId`, `name`, `status`,
+/// `updatedAt` (plus optional `description`). The full record shape has
+/// ARN, role, configuration, etc. that we strip here.
+fn knowledge_base_summary_json(k: &KnowledgeBase) -> Value {
+    let mut o = json!({
+        "knowledgeBaseId": k.knowledge_base_id,
+        "name": k.name,
+        "status": k.status,
+        "updatedAt": k.updated_at.to_rfc3339(),
+    });
+    if let Some(ref d) = k.description {
+        o["description"] = json!(d);
+    }
+    o
+}
+
+/// `PromptSummary`: `arn`, `id`, `name`, `version`, `createdAt`, `updatedAt`.
+/// The full prompt JSON keys `promptId` (not `id`) and surfaces `variants`.
+fn prompt_summary_json(p: &Prompt, region: &str, account_id: &str) -> Value {
+    let mut o = json!({
+        "arn": prompt_arn(&p.prompt_id, region, account_id),
+        "id": p.prompt_id,
+        "name": p.name,
+        "version": p.version,
+        "createdAt": p.created_at.to_rfc3339(),
+        "updatedAt": p.updated_at.to_rfc3339(),
+    });
+    if let Some(ref d) = p.description {
+        o["description"] = json!(d);
+    }
+    o
+}
+
+fn flow_arn(flow_id: &str, region: &str, account_id: &str) -> String {
+    format!("arn:aws:bedrock:{region}:{account_id}:flow/{flow_id}")
+}
+
+fn prompt_arn(prompt_id: &str, region: &str, account_id: &str) -> String {
+    format!("arn:aws:bedrock:{region}:{account_id}:prompt/{prompt_id}")
+}
+
 fn flow_json(f: &Flow) -> Value {
     let mut o = json!({
         "flowId": f.flow_id,
@@ -990,7 +1072,7 @@ impl BedrockAgentService {
         let accts = self.state.read();
         let list: Vec<Value> = accts
             .get(&req.account_id)
-            .map(|s| s.agents.values().map(agent_json).collect())
+            .map(|s| s.agents.values().map(agent_summary_json).collect())
             .unwrap_or_default();
         Ok(AwsResponse::ok_json(json!({ "agentSummaries": list })))
     }
@@ -1274,11 +1356,16 @@ impl BedrockAgentService {
         Ok(AwsResponse::ok_json(json!({ "knowledgeBase": kb_json(k) })))
     }
 
-    fn list_knowledge_bases(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn list_knowledge_bases(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let accts = self.state.read();
         let list: Vec<Value> = accts
-            .get(&_req.account_id)
-            .map(|s| s.knowledge_bases.values().map(kb_json).collect())
+            .get(&req.account_id)
+            .map(|s| {
+                s.knowledge_bases
+                    .values()
+                    .map(knowledge_base_summary_json)
+                    .collect()
+            })
             .unwrap_or_default();
         Ok(AwsResponse::ok_json(
             json!({ "knowledgeBaseSummaries": list }),
@@ -1607,27 +1694,51 @@ impl BedrockAgentService {
         let name = req_str(&body, "name")?;
         let id = short_id();
         let now_dt = now();
+        // executionRoleArn is required by the Smithy model; synthesize a
+        // plausible value when the caller omits one so the response still
+        // satisfies the required shape.
+        let role_arn = opt_str(&body, "executionRoleArn").unwrap_or_else(|| {
+            format!(
+                "arn:aws:iam::{}:role/service-role/AmazonBedrockExecutionRoleForFlows_{id}",
+                req.account_id
+            )
+        });
+        let arn = flow_arn(&id, &req.region, &req.account_id);
+        let definition = opt_json(&body, "definition");
         let flow = Flow {
             flow_id: id.clone(),
-            name,
+            name: name.clone(),
             description: opt_str(&body, "description"),
-            execution_role_arn: opt_str(&body, "executionRoleArn"),
-            status: "NOT_PREPARED".to_string(),
+            execution_role_arn: Some(role_arn.clone()),
+            status: "NotPrepared".to_string(),
             created_at: now_dt,
             updated_at: now_dt,
-            version: "1".to_string(),
-            definition: opt_json(&body, "definition"),
+            version: "DRAFT".to_string(),
+            definition: definition.clone(),
         };
         let mut accts = self.state.write();
         let state = accts.get_or_create(&req.account_id, &req.region);
         state.flows.insert(id.clone(), flow);
-        Ok(AwsResponse::ok_json(json!({
-            "flow": {
-                "flowId": id,
-                "status": "NOT_PREPARED",
-                "createdAt": now_dt.to_rfc3339(),
-            }
-        })))
+        let mut out = json!({
+            "name": name,
+            "executionRoleArn": role_arn,
+            "id": id,
+            "arn": arn,
+            "status": "NotPrepared",
+            "createdAt": now_dt.to_rfc3339(),
+            "updatedAt": now_dt.to_rfc3339(),
+            "version": "DRAFT",
+        });
+        if let Some(d) = opt_str(&body, "description") {
+            out["description"] = json!(d);
+        }
+        if let Some(k) = opt_str(&body, "customerEncryptionKeyArn") {
+            out["customerEncryptionKeyArn"] = json!(k);
+        }
+        if let Some(def) = definition {
+            out["definition"] = def;
+        }
+        Ok(AwsResponse::ok_json(out))
     }
 
     fn get_flow(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1644,11 +1755,16 @@ impl BedrockAgentService {
         Ok(AwsResponse::ok_json(json!({ "flow": flow_json(f) })))
     }
 
-    fn list_flows(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn list_flows(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let accts = self.state.read();
         let list: Vec<Value> = accts
-            .get(&_req.account_id)
-            .map(|s| s.flows.values().map(flow_json).collect())
+            .get(&req.account_id)
+            .map(|s| {
+                s.flows
+                    .values()
+                    .map(|f| flow_summary_json(f, &req.region, &req.account_id))
+                    .collect()
+            })
             .unwrap_or_default();
         Ok(AwsResponse::ok_json(json!({ "flowSummaries": list })))
     }
@@ -1912,25 +2028,39 @@ impl BedrockAgentService {
         let name = req_str(&body, "name")?;
         let id = short_id();
         let now_dt = now();
+        let variants = opt_array(&body, "variants");
+        let arn = prompt_arn(&id, &req.region, &req.account_id);
         let prompt = Prompt {
             prompt_id: id.clone(),
-            name,
+            name: name.clone(),
             description: opt_str(&body, "description"),
-            variants: opt_array(&body, "variants"),
-            version: "1".to_string(),
+            variants: variants.clone(),
+            version: "DRAFT".to_string(),
             created_at: now_dt,
             updated_at: now_dt,
         };
         let mut accts = self.state.write();
         let state = accts.get_or_create(&req.account_id, &req.region);
         state.prompts.insert(id.clone(), prompt);
-        Ok(AwsResponse::ok_json(json!({
-            "prompt": {
-                "promptId": id,
-                "version": "1",
-                "createdAt": now_dt.to_rfc3339(),
-            }
-        })))
+        let mut out = json!({
+            "name": name,
+            "id": id,
+            "arn": arn,
+            "version": "DRAFT",
+            "createdAt": now_dt.to_rfc3339(),
+            "updatedAt": now_dt.to_rfc3339(),
+            "variants": variants,
+        });
+        if let Some(d) = opt_str(&body, "description") {
+            out["description"] = json!(d);
+        }
+        if let Some(k) = opt_str(&body, "customerEncryptionKeyArn") {
+            out["customerEncryptionKeyArn"] = json!(k);
+        }
+        if let Some(dv) = opt_str(&body, "defaultVariant") {
+            out["defaultVariant"] = json!(dv);
+        }
+        Ok(AwsResponse::ok_json(out))
     }
 
     fn get_prompt(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1947,11 +2077,60 @@ impl BedrockAgentService {
         Ok(AwsResponse::ok_json(json!({ "prompt": prompt_json(p) })))
     }
 
-    fn list_prompts(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn create_prompt_version(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // The routing layer surfaces the prompt identifier (path segment) into
+        // the body under `promptIdentifier`, so we read it back here. The
+        // resulting version is numbered incrementally per the Smithy contract.
+        let body = req.json_body();
+        let id = req_str(&body, "promptIdentifier")?;
+        let now_dt = now();
+        let mut accts = self.state.write();
+        let state = accts.get_or_create(&req.account_id, &req.region);
+        let prompt = state
+            .prompts
+            .get(&id)
+            .ok_or_else(|| not_found(format!("Prompt {id} not found")))?
+            .clone();
+        let versions = state.prompt_versions.entry(id.clone()).or_default();
+        let version_num = (versions.len() as u64 + 1).to_string();
+        let pv = PromptVersion {
+            prompt_version: version_num.clone(),
+            prompt_id: id.clone(),
+            description: opt_str(&body, "description"),
+            created_at: now_dt,
+            updated_at: now_dt,
+            variants: prompt.variants.clone(),
+        };
+        versions.push(pv);
+        let arn = format!(
+            "{}:{version_num}",
+            prompt_arn(&id, &req.region, &req.account_id)
+        );
+        let mut out = json!({
+            "name": prompt.name,
+            "id": id,
+            "arn": arn,
+            "version": version_num,
+            "createdAt": now_dt.to_rfc3339(),
+            "updatedAt": now_dt.to_rfc3339(),
+            "variants": prompt.variants,
+        });
+        if let Some(d) = opt_str(&body, "description").or(prompt.description) {
+            out["description"] = json!(d);
+        }
+        Ok(AwsResponse::json_value(StatusCode::CREATED, out))
+    }
+
+    fn list_prompts(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let accts = self.state.read();
         let list: Vec<Value> = accts
-            .get(&_req.account_id)
-            .map(|s| s.prompts.values().map(prompt_json).collect())
+            .get(&req.account_id)
+            .map(|s| {
+                s.prompts
+                    .values()
+                    .map(|p| prompt_summary_json(p, &req.region, &req.account_id))
+                    .collect()
+            })
             .unwrap_or_default();
         Ok(AwsResponse::ok_json(json!({ "promptSummaries": list })))
     }
