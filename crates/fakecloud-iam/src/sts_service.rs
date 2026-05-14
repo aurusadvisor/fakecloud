@@ -121,6 +121,8 @@ impl AwsService for StsService {
             "GetAccessKeyInfo" => self.get_access_key_info(&req),
             "DecodeAuthorizationMessage" => self.decode_authorization_message(&req),
             "AssumeRoot" => self.assume_root(&req),
+            "GetWebIdentityToken" => self.get_web_identity_token(&req),
+            "GetDelegatedAccessToken" => self.get_delegated_access_token(&req),
             _ => Err(AwsServiceError::action_not_implemented("sts", &req.action)),
         };
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
@@ -145,6 +147,8 @@ impl AwsService for StsService {
             "GetAccessKeyInfo",
             "DecodeAuthorizationMessage",
             "AssumeRoot",
+            "GetWebIdentityToken",
+            "GetDelegatedAccessToken",
         ]
     }
 
@@ -171,6 +175,8 @@ impl AwsService for StsService {
             "GetAccessKeyInfo" => "GetAccessKeyInfo",
             "DecodeAuthorizationMessage" => "DecodeAuthorizationMessage",
             "AssumeRoot" => "AssumeRoot",
+            "GetWebIdentityToken" => "GetWebIdentityToken",
+            "GetDelegatedAccessToken" => "GetDelegatedAccessToken",
             _ => return None,
         };
         let resource = match action {
@@ -1300,69 +1306,82 @@ impl StsService {
     /// account; we mint and persist credentials so subsequent calls under
     /// them resolve to the target account's root identity.
     fn assume_root(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let target_principal = req.query_params.get("TargetPrincipal").ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "MissingParameter",
-                "The request must contain the parameter TargetPrincipal",
-            )
-        })?;
-        let task_policy_arn = req
+        // `AssumeRoot` declares only `ExpiredTokenException` and
+        // `RegionDisabledException` in its Smithy `errors` list — no
+        // input-validation shape. We previously rejected missing /
+        // malformed `TargetPrincipal` / `TaskPolicyArn` /
+        // `DurationSeconds` with `MissingParameter` / `ValidationError`,
+        // both undeclared. Be lenient instead: synthesise reasonable
+        // defaults for missing parts, and treat any non-empty
+        // `TargetPrincipal` we can't parse as a literal principal ARN
+        // attributable to the caller's account. Real callers still get
+        // expected behavior because they always provide a valid ARN or
+        // account id.
+        let default_account = {
+            let accounts = self.state.read();
+            accounts.default_account_id().to_string()
+        };
+        let target_principal = req
+            .query_params
+            .get("TargetPrincipal")
+            .cloned()
+            .unwrap_or_else(|| default_account.clone());
+
+        // `TaskPolicyArn` is a structure with a single optional `arn`
+        // member; the awsQuery serializer drops empty structs. Tolerate
+        // missing entirely and fall back to one of the Smithy-listed
+        // managed policies.
+        let _task_policy_arn = req
             .query_params
             .get("TaskPolicyArn.arn")
             .or_else(|| req.query_params.get("TaskPolicyArn"))
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "MissingParameter",
-                    "The request must contain the parameter TaskPolicyArn",
-                )
-            })?;
-        validate_string_length("taskPolicyArn", task_policy_arn, 20, 2048)?;
+            .cloned()
+            .unwrap_or_else(|| "arn:aws:iam::aws:policy/IAMAuditRootUserCredentials".to_string());
 
-        if let Some(ds) = req.query_params.get("DurationSeconds") {
-            let v = ds.parse::<i64>().map_err(|_| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ValidationError",
-                    format!(
-                        "Value '{}' at 'durationSeconds' failed to satisfy constraint: \
-                         Member must be a valid integer",
-                        ds
-                    ),
-                )
-            })?;
-            validate_range_i64("durationSeconds", v, 0, 900)?;
-        }
+        // Out-of-range / unparseable `DurationSeconds` clamps into the
+        // legal 0..=900 window. The op declares no value-out-of-range
+        // error shape, so emitting `ValidationError` here was a
+        // strict-mode regression.
+        let duration_seconds = req
+            .query_params
+            .get("DurationSeconds")
+            .and_then(|ds| ds.parse::<i64>().ok())
+            .map(|v| v.clamp(0, 900))
+            .unwrap_or(900);
 
-        // Target principal can be an ARN (arn:aws:iam::123:root) or a 12-digit
-        // account id; normalize to (account_id, principal_arn).
+        // Target principal accepted shapes:
+        //   - ARN: extract the account id from positions 4 (`arn:p:s:r:acct:`)
+        //   - 12-digit account id: assume root ARN
+        //   - Anything else: treat the string as the principal id and
+        //     attribute it to the caller's account.
         let partition = partition_for_region(&req.region);
         let (target_account, target_arn) = if target_principal.starts_with("arn:") {
-            let acct = extract_account_from_arn(target_principal).ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ValidationError",
-                    "TargetPrincipal ARN is malformed",
-                )
-            })?;
-            (acct, target_principal.to_string())
+            let acct = extract_account_from_arn(&target_principal)
+                .unwrap_or_else(|| default_account.clone());
+            (acct, target_principal.clone())
         } else if target_principal.len() == 12
             && target_principal.chars().all(|c| c.is_ascii_digit())
         {
             (
-                target_principal.to_string(),
+                target_principal.clone(),
                 format!("arn:{}:iam::{}:root", partition, target_principal),
             )
         } else {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ValidationError",
-                "TargetPrincipal must be a member account ID or root ARN",
-            ));
+            (
+                default_account.clone(),
+                format!("arn:{}:iam::{}:root", partition, default_account),
+            )
         };
 
-        let expiration_at = compute_expiration_at(req, 900)?;
+        // Don't call `compute_expiration_at` — that helper re-parses
+        // `DurationSeconds` and returns the undeclared `ValidationError`
+        // on bad input. We already clamped above.
+        let effective_duration = if duration_seconds == 0 {
+            900
+        } else {
+            duration_seconds
+        };
+        let expiration_at = Utc::now() + chrono::Duration::seconds(effective_duration);
         let expiration = format_expiration(expiration_at);
         let creds = StsCredentials::generate();
 
@@ -1402,6 +1421,176 @@ impl StsService {
         );
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
+
+    /// `GetWebIdentityToken`: mint a signed (well, structurally-valid)
+    /// JWT representing the caller. The Smithy op declares only
+    /// `JWTPayloadSizeExceededException`, `OutboundWebIdentityFederationDisabledException`,
+    /// and `SessionDurationEscalationException` — no input-validation
+    /// error shape. So we accept whatever audience / algorithm /
+    /// duration the caller asked for and emit a token.
+    ///
+    /// The returned JWT is a base64url(header).base64url(payload).
+    /// base64url("fakecloud-stub") triple — real callers exchanging it
+    /// against `AssumeRoleWithWebIdentity` against the same fakecloud
+    /// instance will get back credentials because that op already
+    /// tolerates unsigned tokens.
+    fn get_web_identity_token(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD as b64;
+        use base64::Engine as _;
+
+        let audiences = collect_audiences(req);
+        let duration_seconds = req
+            .query_params
+            .get("DurationSeconds")
+            .and_then(|s| s.parse::<i64>().ok())
+            .map(|v| v.clamp(60, 3600))
+            .unwrap_or(300);
+        let signing_alg = req
+            .query_params
+            .get("SigningAlgorithm")
+            .cloned()
+            .unwrap_or_else(|| "RS256".to_string());
+
+        let issued_at = Utc::now();
+        let expiration_at = issued_at + chrono::Duration::seconds(duration_seconds);
+
+        let principal_arn = req
+            .principal
+            .as_ref()
+            .map(|p| p.arn.clone())
+            .unwrap_or_else(|| {
+                let accounts = self.state.read();
+                let account_id = accounts.default_account_id();
+                let partition = partition_for_region(&req.region);
+                format!("arn:{partition}:iam::{account_id}:root")
+            });
+
+        let header = serde_json::json!({
+            "alg": signing_alg,
+            "typ": "JWT",
+            "kid": "fakecloud-sts-stub",
+        });
+        let mut payload = serde_json::json!({
+            "iss": format!("https://sts.{}.amazonaws.com", req.region),
+            "sub": principal_arn,
+            "aud": audiences,
+            "iat": issued_at.timestamp(),
+            "exp": expiration_at.timestamp(),
+            "nbf": issued_at.timestamp(),
+        });
+        // Custom tag claims: every `Tags.member.N.Key` / `.Value` pair
+        // becomes a top-level JWT claim, matching the AWS contract.
+        for i in 1..=50 {
+            let kkey = format!("Tags.member.{i}.Key");
+            let vkey = format!("Tags.member.{i}.Value");
+            match (req.query_params.get(&kkey), req.query_params.get(&vkey)) {
+                (Some(k), Some(v)) => {
+                    payload[k] = serde_json::json!(v);
+                }
+                _ => break,
+            }
+        }
+
+        let header_b64 = b64.encode(header.to_string().as_bytes());
+        let payload_b64 = b64.encode(payload.to_string().as_bytes());
+        let sig_b64 = b64.encode(b"fakecloud-stub-signature");
+        let token = format!("{header_b64}.{payload_b64}.{sig_b64}");
+
+        let xml = xml_responses::get_web_identity_token_response(
+            &token,
+            &format_expiration(expiration_at),
+            &req.request_id,
+        );
+        Ok(AwsResponse::xml(StatusCode::OK, xml))
+    }
+
+    /// `GetDelegatedAccessToken`: trade in a previously-minted
+    /// trade-in token for short-lived AWS credentials. The Smithy op
+    /// declares `ExpiredTradeInTokenException`,
+    /// `PackedPolicyTooLargeException`, `RegionDisabledException`.
+    /// We accept any non-empty trade-in token and mint a fresh
+    /// `StsTempCredential` attributed to the caller's account.
+    fn get_delegated_access_token(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // The Smithy model marks `TradeInToken` as `@required`, but the
+        // op declares no `MissingParameter`-style shape. Tolerate the
+        // missing case by treating it as a no-op-grade stub token.
+        let _trade_in_token = req
+            .query_params
+            .get("TradeInToken")
+            .cloned()
+            .unwrap_or_else(|| "fakecloud-stub-trade-in-token".to_string());
+
+        let account_id = req
+            .principal
+            .as_ref()
+            .map(|p| p.account_id.clone())
+            .unwrap_or_else(|| {
+                let accounts = self.state.read();
+                accounts.default_account_id().to_string()
+            });
+        let assumed_principal = req
+            .principal
+            .as_ref()
+            .map(|p| p.arn.clone())
+            .unwrap_or_else(|| {
+                let partition = partition_for_region(&req.region);
+                format!("arn:{partition}:iam::{account_id}:root")
+            });
+
+        let expiration_at = Utc::now() + chrono::Duration::seconds(3600);
+        let expiration = format_expiration(expiration_at);
+        let creds = StsCredentials::generate();
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&account_id);
+        state.credential_identities.insert(
+            creds.access_key_id.clone(),
+            CredentialIdentity {
+                arn: assumed_principal.clone(),
+                user_id: account_id.clone(),
+                account_id: account_id.clone(),
+            },
+        );
+        state.sts_temp_credentials.insert(
+            creds.access_key_id.clone(),
+            StsTempCredential {
+                access_key_id: creds.access_key_id.clone(),
+                secret_access_key: creds.secret_access_key.clone(),
+                session_token: creds.session_token.clone(),
+                principal_arn: assumed_principal.clone(),
+                user_id: account_id.clone(),
+                account_id: account_id.clone(),
+                expiration: expiration_at,
+                session_policies: Vec::new(),
+                mfa_present: false,
+                issued_at: Utc::now(),
+                federated_provider: None,
+            },
+        );
+
+        let xml = xml_responses::get_delegated_access_token_response(
+            &creds,
+            &expiration,
+            &assumed_principal,
+            &req.request_id,
+        );
+        Ok(AwsResponse::xml(StatusCode::OK, xml))
+    }
+}
+
+/// Pull every `Audience.member.N` entry from an awsQuery body. Used by
+/// `GetWebIdentityToken` to populate the JWT `aud` claim. Stops at the
+/// first gap.
+fn collect_audiences(req: &AwsRequest) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in 1..=50 {
+        let key = format!("Audience.member.{i}");
+        match req.query_params.get(&key) {
+            Some(v) => out.push(v.clone()),
+            None => break,
+        }
+    }
+    out
 }
 
 /// Extract account ID from an ARN like `arn:aws:iam::123456789012:role/name`.
@@ -2793,18 +2982,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assume_root_missing_task_policy_errors() {
+    async fn assume_root_missing_task_policy_defaults() {
+        // `AssumeRoot` only declares `ExpiredTokenException` and
+        // `RegionDisabledException` — no `MissingParameter`-style shape.
+        // Missing `TaskPolicyArn` now falls back to the
+        // `IAMAuditRootUserCredentials` managed policy instead of
+        // emitting an undeclared error.
         let (svc, _) = make_sts_service();
         let req = sts_request("AssumeRoot", vec![("TargetPrincipal", "111122223333")]);
-        let err = match svc.assume_root(&req) {
-            Err(e) => e,
-            Ok(_) => panic!("expected err"),
-        };
-        assert!(err.to_string().contains("TaskPolicyArn"));
+        let resp = svc
+            .assume_root(&req)
+            .expect("should succeed with default policy");
+        assert!(resp.status.is_success());
     }
 
     #[tokio::test]
-    async fn assume_root_invalid_principal_errors() {
+    async fn assume_root_unparseable_principal_falls_back_to_default_account() {
+        // An unparseable `TargetPrincipal` no longer emits the
+        // undeclared `ValidationError`; we attribute the session to
+        // the caller's default account instead.
         let (svc, _) = make_sts_service();
         let req = sts_request(
             "AssumeRoot",
@@ -2813,11 +3009,15 @@ mod tests {
                 ("TaskPolicyArn.arn", "arn:aws:iam::aws:policy/X"),
             ],
         );
-        assert!(svc.assume_root(&req).is_err());
+        let resp = svc.assume_root(&req).expect("should succeed");
+        assert!(resp.status.is_success());
     }
 
     #[tokio::test]
-    async fn assume_root_duration_above_max_errors() {
+    async fn assume_root_duration_above_max_clamps() {
+        // `DurationSeconds` out-of-range now clamps into the legal
+        // 0..=900 window instead of emitting the undeclared
+        // `ValidationError`.
         let (svc, _) = make_sts_service();
         let req = sts_request(
             "AssumeRoot",
@@ -2827,6 +3027,7 @@ mod tests {
                 ("DurationSeconds", "1800"),
             ],
         );
-        assert!(svc.assume_root(&req).is_err());
+        let resp = svc.assume_root(&req).expect("should succeed (clamped)");
+        assert!(resp.status.is_success());
     }
 }
