@@ -199,7 +199,7 @@ impl AwsService for Wafv2Service {
 impl Wafv2Service {
     fn create_web_acl(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let name = require_str(&body, "Name")?;
+        let name = require_str_len(&body, "Name", 1, 128)?;
         let scope = require_scope(&body)?;
         let default_action = body
             .get("DefaultAction")
@@ -318,6 +318,8 @@ impl Wafv2Service {
     fn list_web_acls(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let scope = require_scope(&body)?;
+        validate_opt_limit(&body)?;
+        validate_opt_next_marker(&body)?;
         let limit = body.get("Limit").and_then(Value::as_u64).unwrap_or(100) as usize;
         let next_marker = body
             .get("NextMarker")
@@ -463,7 +465,7 @@ impl Wafv2Service {
 impl Wafv2Service {
     fn create_rule_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let name = require_str(&body, "Name")?;
+        let name = require_str_len(&body, "Name", 1, 128)?;
         let scope = require_scope(&body)?;
         let capacity = body
             .get("Capacity")
@@ -577,6 +579,8 @@ impl Wafv2Service {
     fn list_rule_groups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let scope = require_scope(&body)?;
+        validate_opt_limit(&body)?;
+        validate_opt_next_marker(&body)?;
         let limit = body.get("Limit").and_then(Value::as_u64).unwrap_or(100) as usize;
         let next_marker = body
             .get("NextMarker")
@@ -718,7 +722,7 @@ impl Wafv2Service {
 impl Wafv2Service {
     fn create_ip_set(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let name = require_str(&body, "Name")?;
+        let name = require_str_len(&body, "Name", 1, 128)?;
         let scope = require_scope(&body)?;
         let ip_address_version = require_str(&body, "IPAddressVersion")?;
         let addresses = parse_string_list(body.get("Addresses"));
@@ -757,9 +761,10 @@ impl Wafv2Service {
 
     fn get_ip_set(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let name = require_str(&body, "Name")?;
+        let name = require_str_len(&body, "Name", 1, 128)?;
         let scope = require_scope(&body)?;
-        let _id = body.get("Id").and_then(Value::as_str);
+        // Id is required (Smithy @required) and must be a length(1, 36) string.
+        let _id = require_str_len(&body, "Id", 1, 36)?;
         let state = self.state.read();
         let set = state
             .accounts
@@ -776,6 +781,8 @@ impl Wafv2Service {
     fn list_ip_sets(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let scope = require_scope(&body)?;
+        validate_opt_limit(&body)?;
+        validate_opt_next_marker(&body)?;
         let limit = body.get("Limit").and_then(Value::as_u64).unwrap_or(100) as usize;
         let next_marker = body
             .get("NextMarker")
@@ -879,7 +886,7 @@ impl Wafv2Service {
 impl Wafv2Service {
     fn create_regex_pattern_set(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let name = require_str(&body, "Name")?;
+        let name = require_str_len(&body, "Name", 1, 128)?;
         let scope = require_scope(&body)?;
         let regular_expressions = body
             .get("RegularExpressionList")
@@ -929,8 +936,9 @@ impl Wafv2Service {
 
     fn get_regex_pattern_set(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let name = require_str(&body, "Name")?;
+        let name = require_str_len(&body, "Name", 1, 128)?;
         let scope = require_scope(&body)?;
+        let _id = require_str_len(&body, "Id", 1, 36)?;
         let state = self.state.read();
         let set = state
             .accounts
@@ -947,6 +955,8 @@ impl Wafv2Service {
     fn list_regex_pattern_sets(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let scope = require_scope(&body)?;
+        validate_opt_limit(&body)?;
+        validate_opt_next_marker(&body)?;
         let limit = body.get("Limit").and_then(Value::as_u64).unwrap_or(100) as usize;
         let next_marker = body
             .get("NextMarker")
@@ -1067,7 +1077,8 @@ impl Wafv2Service {
 
     fn disassociate_web_acl(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let resource_arn = normalize_resource_arn(&require_str(&body, "ResourceArn")?);
+        let resource_arn =
+            normalize_resource_arn(&require_str_len(&body, "ResourceArn", 20, 2048)?);
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
         account.associations.remove(&resource_arn);
@@ -1076,7 +1087,8 @@ impl Wafv2Service {
 
     fn get_web_acl_for_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let resource_arn = normalize_resource_arn(&require_str(&body, "ResourceArn")?);
+        let resource_arn =
+            normalize_resource_arn(&require_str_len(&body, "ResourceArn", 20, 2048)?);
         let state = self.state.read();
         let account = state.accounts.get(&req.account_id);
         let acl_arn = account.and_then(|a| a.associations.get(&resource_arn).cloned());
@@ -1094,11 +1106,22 @@ impl Wafv2Service {
 
     fn list_resources_for_web_acl(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let acl_arn = require_str(&body, "WebACLArn")?;
-        let _resource_type = body
-            .get("ResourceType")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
+        let acl_arn = require_str_len(&body, "WebACLArn", 20, 2048)?;
+        if let Some(rt) = body.get("ResourceType").and_then(Value::as_str) {
+            validate_enum(
+                rt,
+                &[
+                    "APPLICATION_LOAD_BALANCER",
+                    "API_GATEWAY",
+                    "APPSYNC",
+                    "COGNITO_USER_POOL",
+                    "APP_RUNNER_SERVICE",
+                    "VERIFIED_ACCESS_INSTANCE",
+                    "AMPLIFY",
+                ],
+                "ResourceType",
+            )?;
+        }
         let state = self.state.read();
         let resources: Vec<String> = state
             .accounts
@@ -1176,11 +1199,20 @@ impl Wafv2Service {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let scope = body
-            .get("Scope")
-            .and_then(Value::as_str)
-            .unwrap_or("REGIONAL")
-            .to_string();
+        let scope = require_scope(&body)?;
+        validate_opt_limit(&body)?;
+        validate_opt_next_marker(&body)?;
+        if let Some(ls) = body.get("LogScope").and_then(Value::as_str) {
+            validate_enum(
+                ls,
+                &[
+                    "CUSTOMER",
+                    "SECURITY_LAKE",
+                    "CLOUDWATCH_TELEMETRY_RULE_MANAGED",
+                ],
+                "LogScope",
+            )?;
+        }
         let state = self.state.read();
         let configs: Vec<Value> = state
             .accounts
@@ -1235,7 +1267,7 @@ impl Wafv2Service {
 
     fn delete_permission_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let resource_arn = require_str(&body, "ResourceArn")?;
+        let resource_arn = require_str_len(&body, "ResourceArn", 20, 2048)?;
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
         account.permission_policies.remove(&resource_arn);
@@ -1375,6 +1407,8 @@ impl Wafv2Service {
     fn list_api_keys(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let scope = require_scope(&body)?;
+        validate_opt_limit(&body)?;
+        validate_opt_next_marker(&body)?;
         let limit = body.get("Limit").and_then(Value::as_u64).unwrap_or(100) as usize;
         let next_marker = body
             .get("NextMarker")
@@ -1424,8 +1458,10 @@ impl Wafv2Service {
 impl Wafv2Service {
     fn describe_all_managed_products(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let _scope = require_scope(&body)?;
         Ok(AwsResponse::ok_json(json!({
             "ManagedProducts": managed_products(),
         })))
@@ -1436,7 +1472,7 @@ impl Wafv2Service {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let vendor = require_str(&body, "VendorName")?;
+        let vendor = require_str_len(&body, "VendorName", 1, 128)?;
         let _scope = require_scope(&body)?;
         let products: Vec<Value> = managed_products()
             .into_iter()
@@ -1452,14 +1488,11 @@ impl Wafv2Service {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let vendor = require_str(&body, "VendorName")?;
-        let name = require_str(&body, "Name")?;
+        let vendor = require_str_len(&body, "VendorName", 1, 128)?;
+        let name = require_str_len(&body, "Name", 1, 128)?;
         let _scope = require_scope(&body)?;
-        let version = body
-            .get("VersionName")
-            .and_then(Value::as_str)
-            .unwrap_or("Version_1.0")
-            .to_string();
+        let version =
+            opt_str_len(&body, "VersionName", 1, 64)?.unwrap_or_else(|| "Version_1.0".to_string());
         Ok(AwsResponse::ok_json(json!({
             "VersionName": version,
             "SnsTopicArn": Arn::new("sns", "us-east-1", "", &format!("{vendor}-{name}-notifications")).to_string(),
@@ -1473,12 +1506,8 @@ impl Wafv2Service {
 
     fn get_managed_rule_set(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let name = require_str(&body, "Name")?;
-        let id = body
-            .get("Id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("mrs-{name}"));
+        let name = require_str_len(&body, "Name", 1, 128)?;
+        let id = require_str_len(&body, "Id", 1, 36)?;
         let _scope = require_scope(&body)?;
         Ok(AwsResponse::ok_json(json!({
             "ManagedRuleSet": {
@@ -1505,8 +1534,12 @@ impl Wafv2Service {
 
     fn list_available_managed_rule_groups(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let _scope = require_scope(&body)?;
+        validate_opt_limit(&body)?;
+        validate_opt_next_marker(&body)?;
         Ok(AwsResponse::ok_json(json!({
             "ManagedRuleGroups": [
                 {
@@ -1536,8 +1569,11 @@ impl Wafv2Service {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let _vendor = require_str(&body, "VendorName")?;
-        let _name = require_str(&body, "Name")?;
+        let _vendor = require_str_len(&body, "VendorName", 1, 128)?;
+        let _name = require_str_len(&body, "Name", 1, 128)?;
+        let _scope = require_scope(&body)?;
+        validate_opt_limit(&body)?;
+        validate_opt_next_marker(&body)?;
         Ok(AwsResponse::ok_json(json!({
             "Versions": [
                 {"Name": "Version_1.0", "LastUpdateTimestamp": Utc::now().timestamp() as f64},
@@ -1547,7 +1583,11 @@ impl Wafv2Service {
         })))
     }
 
-    fn list_managed_rule_sets(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn list_managed_rule_sets(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let _scope = require_scope(&body)?;
+        validate_opt_limit(&body)?;
+        validate_opt_next_marker(&body)?;
         // fakecloud does not expose vendor-side managed rule set publishing,
         // so this always returns an empty list (matches accounts without
         // FirewallManager publishing rights).
@@ -1562,7 +1602,7 @@ impl Wafv2Service {
         let name = require_str(&body, "Name")?;
         fakecloud_core::validation::validate_string_length("Name", &name, 1, 128)?;
         let id = require_str(&body, "Id")?;
-        fakecloud_core::validation::validate_string_length("Id", &id, 1, 255)?;
+        fakecloud_core::validation::validate_string_length("Id", &id, 1, 36)?;
         let lock_token = require_str(&body, "LockToken")?;
         fakecloud_core::validation::validate_string_length("LockToken", &lock_token, 1, 36)?;
         let _scope = require_scope(&body)?;
@@ -1587,7 +1627,7 @@ impl Wafv2Service {
         let name = require_str(&body, "Name")?;
         fakecloud_core::validation::validate_string_length("Name", &name, 1, 128)?;
         let id = require_str(&body, "Id")?;
-        fakecloud_core::validation::validate_string_length("Id", &id, 1, 255)?;
+        fakecloud_core::validation::validate_string_length("Id", &id, 1, 36)?;
         let lock_token = require_str(&body, "LockToken")?;
         fakecloud_core::validation::validate_string_length("LockToken", &lock_token, 1, 36)?;
         let _scope = require_scope(&body)?;
@@ -1619,7 +1659,8 @@ impl Wafv2Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let platform = require_str(&body, "Platform")?;
-        let release = require_str(&body, "ReleaseVersion")?;
+        validate_enum(&platform, &["IOS", "ANDROID"], "Platform")?;
+        let release = require_str_len(&body, "ReleaseVersion", 1, 64)?;
         Ok(AwsResponse::ok_json(json!({
             "Url": format!("https://wafv2-mobile-sdk.{}.amazonaws.com/{}/{}.zip", req.region, platform, release),
         })))
@@ -1628,7 +1669,8 @@ impl Wafv2Service {
     fn get_mobile_sdk_release(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let platform = require_str(&body, "Platform")?;
-        let release = require_str(&body, "ReleaseVersion")?;
+        validate_enum(&platform, &["IOS", "ANDROID"], "Platform")?;
+        let release = require_str_len(&body, "ReleaseVersion", 1, 64)?;
         Ok(AwsResponse::ok_json(json!({
             "MobileSdkRelease": {
                 "ReleaseVersion": release,
@@ -1641,7 +1683,10 @@ impl Wafv2Service {
 
     fn list_mobile_sdk_releases(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let _platform = require_str(&body, "Platform")?;
+        let platform = require_str(&body, "Platform")?;
+        validate_enum(&platform, &["IOS", "ANDROID"], "Platform")?;
+        validate_opt_limit(&body)?;
+        validate_opt_next_marker(&body)?;
         Ok(AwsResponse::ok_json(json!({
             "ReleaseSummaries": [
                 {"ReleaseVersion": "1.0.0", "Timestamp": Utc::now().timestamp() as f64},
@@ -1657,11 +1702,13 @@ impl Wafv2Service {
     fn check_capacity(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let _scope = require_scope(&body)?;
+        // Rules is @required; must be present (even if empty array is allowed
+        // semantically in some shapes, the field itself must be supplied).
         let rules = body
             .get("Rules")
             .and_then(Value::as_array)
             .cloned()
-            .unwrap_or_default();
+            .ok_or_else(|| invalid_param("Rules is required"))?;
         Ok(AwsResponse::ok_json(json!({
             "Capacity": compute_capacity(&rules),
         })))
@@ -1669,15 +1716,16 @@ impl Wafv2Service {
 
     fn get_sampled_requests(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let _web_acl_arn = require_str(&body, "WebAclArn")?;
-        let _rule_metric_name = require_str(&body, "RuleMetricName")?;
+        let _web_acl_arn = require_str_len(&body, "WebAclArn", 20, 2048)?;
+        let _rule_metric_name = require_str_len(&body, "RuleMetricName", 1, 255)?;
         let _scope = require_scope(&body)?;
-        let max_items = body.get("MaxItems").and_then(Value::as_u64).unwrap_or(100);
+        body.get("TimeWindow")
+            .ok_or_else(|| invalid_param("TimeWindow is required"))?;
+        let _max_items = require_int_range(&body, "MaxItems", 1, 500)?;
         Ok(AwsResponse::ok_json(json!({
             "SampledRequests": [],
             "PopulationSize": 0_u64,
             "TimeWindow": body.get("TimeWindow").cloned().unwrap_or(json!({})),
-            "MaxItemsExamined": max_items,
         })))
     }
 
@@ -1688,8 +1736,17 @@ impl Wafv2Service {
         let body = req.json_body();
         // Smithy member is `WebAclArn` (lowercase l), unlike most other ops
         // which use `WebACLArn`. Match the model exactly.
-        let _web_acl_arn = require_str(&body, "WebAclArn")?;
+        let _web_acl_arn = require_str_len(&body, "WebAclArn", 20, 2048)?;
         let _scope = require_scope(&body)?;
+        body.get("TimeWindow")
+            .ok_or_else(|| invalid_param("TimeWindow is required"))?;
+        let _limit = require_int_range(&body, "Limit", 1, 100)?;
+        let _bots_per_path = require_int_range(&body, "NumberOfTopTrafficBotsPerPath", 1, 10)?;
+        opt_str_len(&body, "UriPathPrefix", 1, 512)?;
+        opt_str_len(&body, "BotCategory", 1, 256)?;
+        opt_str_len(&body, "BotName", 1, 256)?;
+        opt_str_len(&body, "BotOrganization", 1, 256)?;
+        validate_opt_next_marker(&body)?;
         Ok(AwsResponse::ok_json(json!({
             "PathStatistics": [],
             "TopCategories": [],
@@ -1703,9 +1760,10 @@ impl Wafv2Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let _scope = require_scope(&body)?;
-        let _web_acl_name = require_str(&body, "WebACLName")?;
-        let _web_acl_id = require_str(&body, "WebACLId")?;
-        let _rule_name = require_str(&body, "RuleName")?;
+        let _web_acl_name = require_str_len(&body, "WebACLName", 1, 128)?;
+        let _web_acl_id = require_str_len(&body, "WebACLId", 1, 36)?;
+        let _rule_name = require_str_len(&body, "RuleName", 1, 128)?;
+        opt_str_len(&body, "RuleGroupRuleName", 1, 128)?;
         Ok(AwsResponse::ok_json(json!({
             "ManagedKeysIPV4": {"IPAddressVersion": "IPV4", "Addresses": []},
             "ManagedKeysIPV6": {"IPAddressVersion": "IPV6", "Addresses": []},
@@ -1750,10 +1808,120 @@ fn require_str(body: &Value, field: &str) -> Result<String, AwsServiceError> {
 
 fn require_scope(body: &Value) -> Result<String, AwsServiceError> {
     let scope = require_str(body, "Scope")?;
-    if scope != "REGIONAL" && scope != "CLOUDFRONT" {
-        return Err(invalid_param(format!("Invalid Scope: {scope}")));
-    }
+    validate_enum(&scope, &["REGIONAL", "CLOUDFRONT"], "Scope")?;
     Ok(scope)
+}
+
+/// Validate a string member against Smithy `@length(min, max)` constraints.
+fn validate_str_len(
+    value: &str,
+    min: usize,
+    max: usize,
+    field: &str,
+) -> Result<(), AwsServiceError> {
+    if value.len() < min || value.len() > max {
+        return Err(invalid_param(format!(
+            "{field} must be between {min} and {max} characters"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate an integer member against Smithy `@range(min, max)` constraints.
+fn validate_int_range(value: i64, min: i64, max: i64, field: &str) -> Result<(), AwsServiceError> {
+    if value < min || value > max {
+        return Err(invalid_param(format!(
+            "{field} must be between {min} and {max}"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate that a value is one of the allowed enum values.
+fn validate_enum(value: &str, allowed: &[&str], field: &str) -> Result<(), AwsServiceError> {
+    if !allowed.contains(&value) {
+        return Err(invalid_param(format!("Invalid {field}: {value}")));
+    }
+    Ok(())
+}
+
+/// Optional string with length bounds. Returns None when absent. When present
+/// the value is validated against `[min, max]`.
+fn opt_str_len(
+    body: &Value,
+    field: &str,
+    min: usize,
+    max: usize,
+) -> Result<Option<String>, AwsServiceError> {
+    match body.get(field).and_then(Value::as_str) {
+        Some(s) => {
+            validate_str_len(s, min, max, field)?;
+            Ok(Some(s.to_owned()))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Required string with length bounds.
+fn require_str_len(
+    body: &Value,
+    field: &str,
+    min: usize,
+    max: usize,
+) -> Result<String, AwsServiceError> {
+    let s = require_str(body, field)?;
+    validate_str_len(&s, min, max, field)?;
+    Ok(s)
+}
+
+/// Optional integer with range bounds.
+fn opt_int_range(
+    body: &Value,
+    field: &str,
+    min: i64,
+    max: i64,
+) -> Result<Option<i64>, AwsServiceError> {
+    match body.get(field) {
+        Some(v) => {
+            let n = v
+                .as_i64()
+                .ok_or_else(|| invalid_param(format!("{field} must be an integer")))?;
+            validate_int_range(n, min, max, field)?;
+            Ok(Some(n))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Required integer with range bounds.
+fn require_int_range(
+    body: &Value,
+    field: &str,
+    min: i64,
+    max: i64,
+) -> Result<i64, AwsServiceError> {
+    let v = body
+        .get(field)
+        .ok_or_else(|| invalid_param(format!("{field} is required")))?;
+    let n = v
+        .as_i64()
+        .ok_or_else(|| invalid_param(format!("{field} must be an integer")))?;
+    validate_int_range(n, min, max, field)?;
+    Ok(n)
+}
+
+/// Validate the standard `Limit` paging parameter when present. AWS WAFv2
+/// uses `@range(min=1, max=100)` on every list operation.
+fn validate_opt_limit(body: &Value) -> Result<(), AwsServiceError> {
+    opt_int_range(body, "Limit", 1, 100)?;
+    Ok(())
+}
+
+/// Validate the standard `NextMarker` paging token when present.
+/// AWS WAFv2 uses `@length(min=1, max=256)`.
+fn validate_opt_next_marker(body: &Value) -> Result<(), AwsServiceError> {
+    opt_str_len(body, "NextMarker", 1, 256)?;
+    Ok(())
 }
 
 fn invalid_param(msg: impl Into<String>) -> AwsServiceError {
