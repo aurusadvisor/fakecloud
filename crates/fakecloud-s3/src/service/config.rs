@@ -1845,8 +1845,23 @@ impl S3Service {
     pub(super) fn list_directory_buckets(
         &self,
         account_id: &str,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // The Smithy model constrains `max-directory-buckets` to the
+        // range [0, 1000]; values outside that range are an
+        // InvalidArgument from real S3 Express.
+        if let Some(raw) = req.query_params.get("max-directory-buckets") {
+            match raw.parse::<i64>() {
+                Ok(v) if (0..=1000).contains(&v) => {}
+                _ => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidArgument",
+                        format!("max-directory-buckets must be between 0 and 1000 (was {raw})"),
+                    ));
+                }
+            }
+        }
         // S3 Express directory buckets are not modeled separately in
         // fakecloud; return an empty list per the documented schema so
         // SDK calls succeed.
