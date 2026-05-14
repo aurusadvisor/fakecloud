@@ -22,6 +22,7 @@ pub mod models;
 pub mod prompt;
 pub mod prompt_routers;
 pub mod resource_policies;
+pub(crate) mod runtime_validation;
 pub(crate) mod service;
 pub(crate) mod state;
 pub mod streaming;

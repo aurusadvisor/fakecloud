@@ -19,6 +19,13 @@ pub(crate) fn start_async_invoke(
             "modelId is required",
         )
     })?;
+    // AsyncInvokeIdentifier: @length min=1 max=256.
+    crate::runtime_validation::validate_short_model_id(model_id)?;
+
+    // AsyncInvokeIdempotencyToken: @length min=1 max=256 when present.
+    if let Some(token) = body.get("clientRequestToken").and_then(|v| v.as_str()) {
+        crate::runtime_validation::validate_length("clientRequestToken", token, 1, 256)?;
+    }
 
     let output_data_config = body.get("outputDataConfig").ok_or_else(|| {
         AwsServiceError::aws_error(
@@ -58,7 +65,7 @@ pub(crate) fn start_async_invoke(
         model_input: model_input.clone(),
         output_data_config: output_data_config.clone(),
         client_request_token: body["clientRequestToken"].as_str().map(|s| s.to_string()),
-        status: "Completed".to_string(),
+        status: "COMPLETED".to_string(),
         submit_time: now,
         last_modified_time: now,
         end_time: Some(now),
@@ -80,6 +87,8 @@ pub(crate) fn get_async_invoke(
     req: &AwsRequest,
     invocation_id: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
+    // InvocationArn / AsyncInvokeIdentifier: @length min=1 max=2048.
+    crate::runtime_validation::validate_length("invocationArn", invocation_id, 1, 2048)?;
     let accts = state.read();
     let empty = crate::state::BedrockState::new(&req.account_id, &req.region);
     let s = accts.get(&req.account_id).unwrap_or(&empty);
@@ -93,9 +102,12 @@ pub(crate) fn get_async_invoke(
                 .find(|inv| inv.invocation_arn.ends_with(invocation_id))
         })
         .ok_or_else(|| {
+            // AWS Bedrock's GetAsyncInvoke Smithy model only declares
+            // ValidationException (not ResourceNotFoundException); a missing
+            // invocation surfaces as a validation failure on the input ARN.
             AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "ResourceNotFoundException",
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
                 format!("Async invocation {invocation_id} not found"),
             )
         })?;
@@ -107,14 +119,40 @@ pub(crate) fn list_async_invokes(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let max_results = req
-        .query_params
-        .get("maxResults")
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(100)
-        .max(1);
+    // MaxResults: @range min=1 max=1000.
+    let max_results = if let Some(raw) = req.query_params.get("maxResults") {
+        let n: i64 = raw
+            .parse()
+            .map_err(|_| crate::runtime_validation::validation("maxResults must be an integer"))?;
+        crate::runtime_validation::validate_range_i64("maxResults", n, 1, 1000)?;
+        n as usize
+    } else {
+        100
+    };
     let next_token = req.query_params.get("nextToken");
+    // PaginationToken: @length min=1 max=2048, @pattern ^\S*$.
+    if let Some(t) = next_token {
+        crate::runtime_validation::validate_length("nextToken", t, 1, 2048)?;
+        if t.chars().any(|c| c.is_whitespace()) {
+            return Err(crate::runtime_validation::validation(
+                "Value at 'nextToken' failed to satisfy constraint: Member must match pattern ^\\S*$",
+            ));
+        }
+    }
     let status_filter = req.query_params.get("statusEquals");
+    if let Some(s) = status_filter {
+        crate::runtime_validation::validate_enum(
+            "statusEquals",
+            s,
+            &["IN_PROGRESS", "COMPLETED", "FAILED"],
+        )?;
+    }
+    if let Some(s) = req.query_params.get("sortBy") {
+        crate::runtime_validation::validate_enum("sortBy", s, &["SUBMISSION_TIME"])?;
+    }
+    if let Some(s) = req.query_params.get("sortOrder") {
+        crate::runtime_validation::validate_enum("sortOrder", s, &["ASCENDING", "DESCENDING"])?;
+    }
 
     let accts = state.read();
     let empty = crate::state::BedrockState::new(&req.account_id, &req.region);
@@ -307,10 +345,13 @@ mod tests {
     }
 
     #[test]
-    fn get_unknown_returns_not_found() {
+    fn get_unknown_returns_validation_exception() {
+        // GetAsyncInvoke's Smithy model only declares ValidationException
+        // (no ResourceNotFoundException), so a missing invocation surfaces
+        // as a 400 validation failure rather than a 404.
         let s = shared();
         let err = get_async_invoke(&s, &req(), "missing").err().unwrap();
-        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
@@ -324,11 +365,11 @@ mod tests {
             let mut st = s.write();
             let acct = st.default_mut();
             let arn = acct.async_invocations.keys().next().unwrap().clone();
-            acct.async_invocations.get_mut(&arn).unwrap().status = "Failed".to_string();
+            acct.async_invocations.get_mut(&arn).unwrap().status = "FAILED".to_string();
         }
         let mut r = req();
         r.query_params
-            .insert("statusEquals".to_string(), "Failed".to_string());
+            .insert("statusEquals".to_string(), "FAILED".to_string());
         let resp = list_async_invokes(&s, &r).unwrap();
         let v: Value =
             serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
