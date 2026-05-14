@@ -10,7 +10,7 @@ use fakecloud_core::validation::*;
 
 use crate::state::{AutomationExecution, ExecutionPreview, SsmState};
 
-use super::{missing, SsmService};
+use super::{missing, missing_with_code, remap_validation_to, SsmService};
 
 impl SsmService {
     pub(super) fn start_automation_execution(
@@ -18,19 +18,28 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_optional_string_length("ClientToken", body["ClientToken"].as_str(), 36, 36)?;
-        validate_optional_string_length("MaxConcurrency", body["MaxConcurrency"].as_str(), 1, 7)?;
-        validate_optional_string_length("MaxErrors", body["MaxErrors"].as_str(), 1, 7)?;
-        validate_optional_enum("Mode", body["Mode"].as_str(), &["Auto", "Interactive"])?;
+        // StartAutomationExecution declares
+        // InvalidAutomationExecutionParametersException as the generic
+        // bad-input error; ValidationException is not in its errors list.
+        const VBAD: &str = "InvalidAutomationExecutionParametersException";
+        validate_optional_string_length("ClientToken", body["ClientToken"].as_str(), 36, 36)
+            .map_err(|e| remap_validation_to(e, VBAD))?;
+        validate_optional_string_length("MaxConcurrency", body["MaxConcurrency"].as_str(), 1, 7)
+            .map_err(|e| remap_validation_to(e, VBAD))?;
+        validate_optional_string_length("MaxErrors", body["MaxErrors"].as_str(), 1, 7)
+            .map_err(|e| remap_validation_to(e, VBAD))?;
+        validate_optional_enum("Mode", body["Mode"].as_str(), &["Auto", "Interactive"])
+            .map_err(|e| remap_validation_to(e, VBAD))?;
         validate_optional_string_length(
             "TargetParameterName",
             body["TargetParameterName"].as_str(),
             1,
             50,
-        )?;
+        )
+        .map_err(|e| remap_validation_to(e, VBAD))?;
         let document_name = body["DocumentName"]
             .as_str()
-            .ok_or_else(|| missing("DocumentName"))?
+            .ok_or_else(|| missing_with_code("DocumentName", VBAD))?
             .to_string();
         let document_version = body["DocumentVersion"].as_str().map(|s| s.to_string());
         let parameters: BTreeMap<String, Vec<String>> = body["Parameters"]
@@ -251,21 +260,28 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_optional_string_length("ClientToken", body["ClientToken"].as_str(), 36, 36)?;
+        // StartChangeRequestExecution declares
+        // InvalidAutomationExecutionParametersException as the generic
+        // bad-input error; ValidationException is not in its errors list.
+        const VBAD: &str = "InvalidAutomationExecutionParametersException";
+        validate_optional_string_length("ClientToken", body["ClientToken"].as_str(), 36, 36)
+            .map_err(|e| remap_validation_to(e, VBAD))?;
         validate_optional_string_length(
             "ChangeRequestName",
             body["ChangeRequestName"].as_str(),
             1,
             1024,
-        )?;
-        validate_optional_string_length("ChangeDetails", body["ChangeDetails"].as_str(), 1, 32768)?;
+        )
+        .map_err(|e| remap_validation_to(e, VBAD))?;
+        validate_optional_string_length("ChangeDetails", body["ChangeDetails"].as_str(), 1, 32768)
+            .map_err(|e| remap_validation_to(e, VBAD))?;
         let document_name = body["DocumentName"]
             .as_str()
-            .ok_or_else(|| missing("DocumentName"))?
+            .ok_or_else(|| missing_with_code("DocumentName", VBAD))?
             .to_string();
         let _runbooks = body["Runbooks"]
             .as_array()
-            .ok_or_else(|| missing("Runbooks"))?;
+            .ok_or_else(|| missing_with_code("Runbooks", VBAD))?;
         let change_request_name = body["ChangeRequestName"].as_str().map(|s| s.to_string());
         let runbooks: Vec<serde_json::Value> =
             body["Runbooks"].as_array().cloned().unwrap_or_default();

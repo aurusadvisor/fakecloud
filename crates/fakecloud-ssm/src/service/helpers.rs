@@ -95,3 +95,38 @@ pub(crate) fn missing(name: &str) -> AwsServiceError {
         format!("The request must contain the parameter {name}"),
     )
 }
+
+/// Variant of `missing` that emits a specific Smithy-declared wire code.
+/// Use when the op's `errors` list does not include `ValidationException`
+/// so the strict conformance probe would otherwise reject the response.
+pub(crate) fn missing_with_code(name: &str, code: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        code,
+        format!("The request must contain the parameter {name}"),
+    )
+}
+
+/// Build a 400 with an arbitrary code + message. Used by operation
+/// handlers that need to emit a wire code declared on that specific op
+/// (e.g. `InvalidFilterValue`, `InvalidCommandId`, `InvalidDocument`)
+/// instead of the generic `ValidationException`.
+pub(crate) fn aws_400(code: &str, msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, code, msg.into())
+}
+
+/// Many SSM operations declare specific `Invalid*` errors in their Smithy
+/// model but the shared `validate_*` helpers in `fakecloud-core` emit the
+/// generic `ValidationException` (which AWS itself returns at runtime but
+/// most ops do *not* list in their `errors`). Strict-mode probes reject
+/// the generic code, so handlers can wrap their input-parsing result in
+/// `remap_validation_to(err, "InvalidCommandId")` to flip the wire code
+/// while preserving the human-readable message. Errors with any other
+/// code pass through unchanged.
+pub(crate) fn remap_validation_to(err: AwsServiceError, target: &str) -> AwsServiceError {
+    if err.code() == "ValidationException" {
+        AwsServiceError::aws_error(StatusCode::BAD_REQUEST, target, err.message())
+    } else {
+        err
+    }
+}

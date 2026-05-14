@@ -11,7 +11,7 @@ use fakecloud_core::validation::*;
 
 use crate::state::{SsmCommand, SsmCommandInvocation, SsmState};
 
-use super::{missing, SsmService};
+use super::{missing, missing_with_code, remap_validation_to, SsmService};
 
 /// Delay before a freshly submitted command flips from `Pending` to
 /// `InProgress`. Real SSM takes a few seconds; we keep this small so
@@ -306,8 +306,11 @@ impl SsmService {
 
     pub(super) fn list_commands(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_optional_string_length("CommandId", body["CommandId"].as_str(), 36, 36)?;
-        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
+        // ListCommands declares InvalidCommandId, not ValidationException.
+        validate_optional_string_length("CommandId", body["CommandId"].as_str(), 36, 36)
+            .map_err(|e| remap_validation_to(e, "InvalidCommandId"))?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)
+            .map_err(|e| remap_validation_to(e, "InvalidCommandId"))?;
         let max_results = body["MaxResults"].as_i64().unwrap_or(50) as usize;
         let command_id = body["CommandId"].as_str();
         let instance_id = body["InstanceId"].as_str();
@@ -377,15 +380,19 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
+        // GetCommandInvocation declares InvalidCommandId / InvalidInstanceId /
+        // InvalidPluginName but not ValidationException.
         let command_id = body["CommandId"]
             .as_str()
-            .ok_or_else(|| missing("CommandId"))?;
-        validate_string_length("CommandId", command_id, 36, 36)?;
+            .ok_or_else(|| missing_with_code("CommandId", "InvalidCommandId"))?;
+        validate_string_length("CommandId", command_id, 36, 36)
+            .map_err(|e| remap_validation_to(e, "InvalidCommandId"))?;
         let instance_id = body["InstanceId"]
             .as_str()
-            .ok_or_else(|| missing("InstanceId"))?;
+            .ok_or_else(|| missing_with_code("InstanceId", "InvalidInstanceId"))?;
         let plugin_name = body["PluginName"].as_str();
-        validate_optional_string_length("PluginName", plugin_name, 4, 500)?;
+        validate_optional_string_length("PluginName", plugin_name, 4, 500)
+            .map_err(|e| remap_validation_to(e, "InvalidPluginName"))?;
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
@@ -449,8 +456,11 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_optional_string_length("CommandId", body["CommandId"].as_str(), 36, 36)?;
-        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
+        // ListCommandInvocations declares InvalidCommandId, not ValidationException.
+        validate_optional_string_length("CommandId", body["CommandId"].as_str(), 36, 36)
+            .map_err(|e| remap_validation_to(e, "InvalidCommandId"))?;
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)
+            .map_err(|e| remap_validation_to(e, "InvalidCommandId"))?;
         let max_results = body["MaxResults"].as_i64().unwrap_or(50) as usize;
         let command_id = body["CommandId"].as_str();
 
@@ -494,10 +504,13 @@ impl SsmService {
 
     pub(super) fn cancel_command(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
+        // CancelCommand declares InvalidCommandId / InvalidInstanceId, no
+        // ValidationException.
         let command_id = body["CommandId"]
             .as_str()
-            .ok_or_else(|| missing("CommandId"))?;
-        validate_string_length("CommandId", command_id, 36, 36)?;
+            .ok_or_else(|| missing_with_code("CommandId", "InvalidCommandId"))?;
+        validate_string_length("CommandId", command_id, 36, 36)
+            .map_err(|e| remap_validation_to(e, "InvalidCommandId"))?;
         let instance_filter: Option<Vec<String>> = body["InstanceIds"].as_array().map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))

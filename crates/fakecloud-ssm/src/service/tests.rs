@@ -2651,21 +2651,21 @@ fn expect_err_code(result: Result<AwsResponse, AwsServiceError>, code: &str) {
 fn put_parameter_missing_name() {
     let svc = make_service();
     let req = make_request("PutParameter", json!({"Value": "v", "Type": "String"}));
-    expect_err_code(svc.put_parameter(&req), "ValidationException");
+    expect_err_code(svc.put_parameter(&req), "InvalidAllowedPatternException");
 }
 
 #[test]
 fn put_parameter_missing_value() {
     let svc = make_service();
     let req = make_request("PutParameter", json!({"Name": "/test", "Type": "String"}));
-    expect_err_code(svc.put_parameter(&req), "ValidationException");
+    expect_err_code(svc.put_parameter(&req), "InvalidAllowedPatternException");
 }
 
 #[test]
 fn put_parameter_missing_type() {
     let svc = make_service();
     let req = make_request("PutParameter", json!({"Name": "/test", "Value": "v"}));
-    expect_err_code(svc.put_parameter(&req), "ValidationException");
+    expect_err_code(svc.put_parameter(&req), "InvalidAllowedPatternException");
 }
 
 #[test]
@@ -3238,9 +3238,12 @@ fn put_parameter_secure_string_hard_fails_when_kms_rejects() {
     );
     let err = match svc.put_parameter(&req) {
         Err(e) => e,
-        Ok(_) => panic!("expected KMSAccessDeniedException"),
+        Ok(_) => panic!("expected InvalidKeyId (KMS encrypt failure)"),
     };
-    assert_eq!(err.code(), "KMSAccessDeniedException");
+    // PutParameter's Smithy errors list doesn't include
+    // KMSAccessDeniedException, so KMS encrypt failures surface as
+    // InvalidKeyId (the declared shape covering key-related errors).
+    assert_eq!(err.code(), "InvalidKeyId");
 }
 
 #[test]
@@ -3301,7 +3304,7 @@ fn describe_parameters_invalid_filter_key_errors() {
             "ParameterFilters": [{"Key": "Bogus", "Values": ["x"]}]
         }),
     );
-    expect_err_code(svc.describe_parameters(&req), "ValidationException");
+    expect_err_code(svc.describe_parameters(&req), "InvalidFilterKey");
 }
 
 #[test]
@@ -3313,7 +3316,7 @@ fn describe_parameters_label_filter_rejected() {
             "ParameterFilters": [{"Key": "Label", "Values": ["v1"]}]
         }),
     );
-    expect_err_code(svc.describe_parameters(&req), "ValidationException");
+    expect_err_code(svc.describe_parameters(&req), "InvalidFilterKey");
 }
 
 #[test]
@@ -3323,7 +3326,7 @@ fn describe_parameters_missing_values_errors() {
         "DescribeParameters",
         json!({"ParameterFilters": [{"Key": "Name"}]}),
     );
-    expect_err_code(svc.describe_parameters(&req), "ValidationException");
+    expect_err_code(svc.describe_parameters(&req), "InvalidFilterKey");
 }
 
 #[test]
@@ -3338,7 +3341,7 @@ fn describe_parameters_duplicate_filter_key_errors() {
             ]
         }),
     );
-    expect_err_code(svc.describe_parameters(&req), "ValidationException");
+    expect_err_code(svc.describe_parameters(&req), "InvalidFilterKey");
 }
 
 #[test]
@@ -3352,7 +3355,7 @@ fn describe_parameters_path_invalid_option_errors() {
             ]
         }),
     );
-    expect_err_code(svc.describe_parameters(&req), "ValidationException");
+    expect_err_code(svc.describe_parameters(&req), "InvalidFilterKey");
 }
 
 #[test]
@@ -3366,7 +3369,7 @@ fn describe_parameters_path_aws_prefix_rejected() {
             ]
         }),
     );
-    expect_err_code(svc.describe_parameters(&req), "ValidationException");
+    expect_err_code(svc.describe_parameters(&req), "InvalidFilterKey");
 }
 
 #[test]
@@ -3376,7 +3379,7 @@ fn describe_parameters_tier_invalid_value_errors() {
         "DescribeParameters",
         json!({"ParameterFilters": [{"Key": "Tier", "Values": ["Bogus"]}]}),
     );
-    expect_err_code(svc.describe_parameters(&req), "ValidationException");
+    expect_err_code(svc.describe_parameters(&req), "InvalidFilterKey");
 }
 
 #[test]
@@ -3386,7 +3389,7 @@ fn describe_parameters_type_invalid_value_errors() {
         "DescribeParameters",
         json!({"ParameterFilters": [{"Key": "Type", "Values": ["Bogus"]}]}),
     );
-    expect_err_code(svc.describe_parameters(&req), "ValidationException");
+    expect_err_code(svc.describe_parameters(&req), "InvalidFilterKey");
 }
 
 #[test]
@@ -3400,7 +3403,7 @@ fn describe_parameters_name_invalid_option_errors() {
             ]
         }),
     );
-    expect_err_code(svc.describe_parameters(&req), "ValidationException");
+    expect_err_code(svc.describe_parameters(&req), "InvalidFilterKey");
 }
 
 #[test]
@@ -3415,7 +3418,7 @@ fn describe_parameters_key_length_exceeds() {
             ]
         }),
     );
-    expect_err_code(svc.describe_parameters(&req), "ValidationException");
+    expect_err_code(svc.describe_parameters(&req), "InvalidFilterKey");
 }
 
 #[test]
@@ -3430,7 +3433,7 @@ fn describe_parameters_option_length_exceeds() {
             ]
         }),
     );
-    expect_err_code(svc.describe_parameters(&req), "ValidationException");
+    expect_err_code(svc.describe_parameters(&req), "InvalidFilterKey");
 }
 
 #[test]
@@ -3445,7 +3448,7 @@ fn describe_parameters_value_length_exceeds() {
             ]
         }),
     );
-    expect_err_code(svc.describe_parameters(&req), "ValidationException");
+    expect_err_code(svc.describe_parameters(&req), "InvalidFilterKey");
 }
 
 #[test]
@@ -3460,14 +3463,14 @@ fn get_parameters_by_path_filters_disallow_name() {
             ]
         }),
     );
-    expect_err_code(svc.get_parameters_by_path(&req), "ValidationException");
+    expect_err_code(svc.get_parameters_by_path(&req), "InvalidFilterKey");
 }
 
 #[test]
 fn get_parameters_by_path_missing_path_errors() {
     let svc = make_service();
     let req = make_request("GetParametersByPath", json!({}));
-    expect_err_code(svc.get_parameters_by_path(&req), "ValidationException");
+    expect_err_code(svc.get_parameters_by_path(&req), "InvalidFilterValue");
 }
 
 #[test]
@@ -3639,10 +3642,17 @@ fn get_maintenance_window_not_found() {
 }
 
 #[test]
-fn delete_maintenance_window_not_found() {
+fn delete_maintenance_window_is_idempotent() {
+    // DeleteMaintenanceWindow's Smithy errors list is just
+    // InternalServerError — AWS docs explicitly state the op is
+    // idempotent on a missing WindowId, so fakecloud now mirrors that.
     let svc = make_service();
     let req = make_request("DeleteMaintenanceWindow", json!({"WindowId": "mw-ghost"}));
-    assert!(svc.delete_maintenance_window(&req).is_err());
+    let resp = svc
+        .delete_maintenance_window(&req)
+        .expect("delete on missing id should succeed");
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["WindowId"], "mw-ghost");
 }
 
 #[test]

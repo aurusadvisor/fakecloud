@@ -8,7 +8,7 @@ use fakecloud_core::validation::*;
 
 use crate::state::{InventoryDeletion, InventoryEntry, InventoryItem, SsmState};
 
-use super::{missing, SsmService};
+use super::{missing, missing_with_code, remap_validation_to, SsmService};
 
 impl SsmService {
     pub(super) fn put_inventory(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -241,15 +241,20 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_optional_string_length("TypeName", body["TypeName"].as_str(), 1, 100)?;
+        // DeleteInventory declares InvalidTypeNameException /
+        // InvalidOptionException / InvalidDeleteInventoryParametersException
+        // / InvalidInventoryRequestException — not ValidationException.
+        validate_optional_string_length("TypeName", body["TypeName"].as_str(), 1, 100)
+            .map_err(|e| remap_validation_to(e, "InvalidTypeNameException"))?;
         validate_optional_enum(
             "SchemaDeleteOption",
             body["SchemaDeleteOption"].as_str(),
             &["DISABLE_SCHEMA", "DELETE_SCHEMA"],
-        )?;
+        )
+        .map_err(|e| remap_validation_to(e, "InvalidOptionException"))?;
         let type_name = body["TypeName"]
             .as_str()
-            .ok_or_else(|| missing("TypeName"))?
+            .ok_or_else(|| missing_with_code("TypeName", "InvalidTypeNameException"))?
             .to_string();
 
         let mut accounts = self.state.write();

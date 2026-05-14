@@ -11,7 +11,7 @@ use fakecloud_core::validation::*;
 use crate::state::{SsmDocument, SsmDocumentVersion, SsmResourcePolicy, SsmState};
 use sha2::{Digest, Sha256};
 
-use super::{missing, SsmService};
+use super::{missing, missing_with_code, SsmService};
 
 fn review_status_for_action(action: &str) -> &'static str {
     match action {
@@ -659,7 +659,12 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
+        // ModifyDocumentPermission declares InvalidDocument, not the
+        // generic ValidationException, so missing-input + bad-version
+        // surface as InvalidDocument.
+        let name = body["Name"]
+            .as_str()
+            .ok_or_else(|| missing_with_code("Name", "InvalidDocument"))?;
         let permission_type = body["PermissionType"].as_str().unwrap_or("Share");
         let accounts_to_add = body["AccountIdsToAdd"].as_array();
         let accounts_to_remove = body["AccountIdsToRemove"].as_array();
@@ -682,7 +687,7 @@ impl SsmService {
             if ver != "$DEFAULT" && ver != "$LATEST" && ver.parse::<i64>().is_err() {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ValidationException",
+                    "InvalidDocument",
                     format!(
                         "1 validation error detected: Value '{ver}' at 'sharedDocumentVersion' \
                          failed to satisfy constraint: \
@@ -705,7 +710,7 @@ impl SsmService {
                     } else if id.len() != 12 || !id.chars().all(|c| c.is_ascii_digit()) {
                         return Err(AwsServiceError::aws_error(
                             StatusCode::BAD_REQUEST,
-                            "ValidationException",
+                            "InvalidPermissionType",
                             format!(
                                 "1 validation error detected: Value '[{id}]' at \
                                  'accountIdsToAdd' failed to satisfy constraint: \

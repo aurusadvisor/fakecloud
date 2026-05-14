@@ -11,7 +11,7 @@ use fakecloud_core::validation::*;
 
 use crate::state::{ParameterPolicyEvent, SsmParameter, SsmParameterVersion, SsmState};
 
-use super::{missing, SsmService, PARAMETER_VERSION_LIMIT};
+use super::{missing, missing_with_code, remap_validation_to, SsmService, PARAMETER_VERSION_LIMIT};
 
 /// One parsed entry from the `Policies` JSON array on `PutParameter`.
 /// AWS supports three policy types — Expiration deletes the parameter
@@ -657,7 +657,12 @@ fn create_new_parameter(
 
 impl SsmService {
     pub(super) fn put_parameter(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let mut input = PutParameterInput::from_body(&req.json_body())?;
+        // PutParameter's Smithy errors list does not include
+        // ValidationException — failures from the shared validate_*
+        // helpers are remapped to InvalidAllowedPatternException
+        // (the closest declared shape covering generic bad-input).
+        let mut input = PutParameterInput::from_body(&req.json_body())
+            .map_err(|e| remap_validation_to(e, "InvalidAllowedPatternException"))?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -692,11 +697,13 @@ impl SsmService {
         let param_arn_for_events = param_arn(&req.region, &state.account_id, &input.name);
 
         let resp = if let Some(existing) = lookup_param_mut(&mut state.parameters, &input.name) {
-            apply_overwrite(existing, input)?
+            apply_overwrite(existing, input)
+                .map_err(|e| remap_validation_to(e, "InvalidAllowedPatternException"))?
         } else {
             let tier_for_response = input.tier.clone();
             let name = input.name.clone();
-            let param = create_new_parameter(&req.region, &state.account_id, input)?;
+            let param = create_new_parameter(&req.region, &state.account_id, input)
+                .map_err(|e| remap_validation_to(e, "InvalidAllowedPatternException"))?;
             state.parameters.insert(name, param);
             AwsResponse::ok_json(json!({
                 "Version": 1,
@@ -749,9 +756,12 @@ impl SsmService {
             ctx,
         )
         .map_err(|err| {
+            // PutParameter's Smithy errors list does not include
+            // KMSAccessDeniedException, so a KMS encrypt failure is
+            // surfaced as InvalidKeyId (which is declared).
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "KMSAccessDeniedException",
+                "InvalidKeyId",
                 format!("Unable to encrypt SecureString parameter {param_arn} via KMS: {err}"),
             )
         })
@@ -1152,7 +1162,14 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let path = body["Path"].as_str().ok_or_else(|| missing("Path"))?;
+        // GetParametersByPath's Smithy errors list is
+        // InvalidFilterKey / InvalidFilterOption / InvalidFilterValue /
+        // InvalidKeyId / InvalidNextToken — no ValidationException.
+        // Missing/invalid input surfaces as InvalidFilterValue (the
+        // generic catch-all of the declared set).
+        let path = body["Path"]
+            .as_str()
+            .ok_or_else(|| missing_with_code("Path", "InvalidFilterValue"))?;
         let recursive = body["Recursive"].as_bool().unwrap_or(false);
         let with_decryption = body["WithDecryption"].as_bool().unwrap_or(false);
         let filters = body["ParameterFilters"].as_array().cloned();
@@ -1162,7 +1179,7 @@ impl SsmService {
         if max_results > 10 {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
+                "InvalidFilterValue",
                 format!(
                     "1 validation error detected: \
                      Value {} at 'maxResults' failed to satisfy constraint: \
@@ -1174,12 +1191,16 @@ impl SsmService {
 
         // Validate path
         if !is_valid_param_path(path) {
-            return Err(invalid_path_error(path));
+            return Err(remap_validation_to(
+                invalid_path_error(path),
+                "InvalidFilterValue",
+            ));
         }
 
         // Validate ParameterFilters for by-path (only Type, KeyId, Label, tag:* allowed)
         if let Some(ref f) = filters {
-            validate_parameter_filters_by_path(f)?;
+            validate_parameter_filters_by_path(f)
+                .map_err(|e| remap_validation_to(e, "InvalidFilterKey"))?;
         }
 
         let mut accounts = self.state.write();
@@ -1259,7 +1280,10 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
+        // DescribeParameters declares InvalidFilterKey / InvalidFilterOption /
+        // InvalidFilterValue / InvalidNextToken — no ValidationException.
+        validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)
+            .map_err(|e| remap_validation_to(e, "InvalidFilterValue"))?;
         let param_filters = body["ParameterFilters"].as_array().cloned();
         let old_filters = body["Filters"].as_array().cloned();
         let max_results = body["MaxResults"].as_i64().unwrap_or(10) as usize;
@@ -1268,14 +1292,15 @@ impl SsmService {
         if param_filters.is_some() && old_filters.is_some() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
+                "InvalidFilterKey",
                 "You can use either Filters or ParameterFilters in a single request.",
             ));
         }
 
         // Validate ParameterFilters
         if let Some(ref filters) = param_filters {
-            validate_parameter_filters(filters)?;
+            validate_parameter_filters(filters)
+                .map_err(|e| remap_validation_to(e, "InvalidFilterKey"))?;
         }
 
         let mut accounts = self.state.write();

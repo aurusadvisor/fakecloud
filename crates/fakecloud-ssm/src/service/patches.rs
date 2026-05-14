@@ -9,7 +9,7 @@ use fakecloud_core::validation::*;
 
 use crate::state::{PatchBaseline, PatchGroup, SsmState};
 
-use super::{missing, SsmService};
+use super::{aws_400, missing, missing_with_code, remap_validation_to, SsmService};
 
 impl SsmService {
     pub(super) fn create_patch_baseline(
@@ -266,14 +266,27 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
+        // Op only declares InternalServerError + InvalidResourceId. All
+        // input-validation and not-found cases surface as
+        // InvalidResourceId.
         let baseline_id = body["BaselineId"]
             .as_str()
-            .ok_or_else(|| missing("BaselineId"))?;
-        validate_string_length("BaselineId", baseline_id, 20, 128)?;
+            .ok_or_else(|| missing_with_code("BaselineId", "InvalidResourceId"))?;
+        if !(20..=128).contains(&baseline_id.len()) {
+            return Err(aws_400(
+                "InvalidResourceId",
+                format!("BaselineId '{baseline_id}' has invalid length"),
+            ));
+        }
         let patch_group = body["PatchGroup"]
             .as_str()
-            .ok_or_else(|| missing("PatchGroup"))?;
-        validate_string_length("PatchGroup", patch_group, 1, 256)?;
+            .ok_or_else(|| missing_with_code("PatchGroup", "InvalidResourceId"))?;
+        if !(1..=256).contains(&patch_group.len()) {
+            return Err(aws_400(
+                "InvalidResourceId",
+                format!("PatchGroup '{patch_group}' has invalid length"),
+            ));
+        }
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -291,9 +304,8 @@ impl SsmService {
             // Allow deregistering default baselines (they are implicitly registered)
             let is_default = is_default_patch_baseline(baseline_id);
             if !is_default {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "DoesNotExistException",
+                return Err(aws_400(
+                    "InvalidResourceId",
                     "Patch Baseline to be retrieved does not exist.",
                 ));
             }
@@ -703,13 +715,17 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_optional_string_length("SnapshotId", body["SnapshotId"].as_str(), 36, 36)?;
+        // This op only declares InternalServerError / UnsupportedOperatingSystem
+        // / UnsupportedFeatureRequiredException, so input-validation
+        // surfaces as UnsupportedOperatingSystem (the closest fit).
+        validate_optional_string_length("SnapshotId", body["SnapshotId"].as_str(), 36, 36)
+            .map_err(|e| remap_validation_to(e, "UnsupportedOperatingSystem"))?;
         let instance_id = body["InstanceId"]
             .as_str()
-            .ok_or_else(|| missing("InstanceId"))?;
+            .ok_or_else(|| missing_with_code("InstanceId", "UnsupportedOperatingSystem"))?;
         let snapshot_id = body["SnapshotId"]
             .as_str()
-            .ok_or_else(|| missing("SnapshotId"))?;
+            .ok_or_else(|| missing_with_code("SnapshotId", "UnsupportedOperatingSystem"))?;
 
         Ok(AwsResponse::ok_json(json!({
             "InstanceId": instance_id,
