@@ -347,20 +347,12 @@ impl EventBridgeService {
 
     fn list_event_buses(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_optional_string_length("namePrefix", body["NamePrefix"].as_str(), 1, 256)?;
-        validate_optional_string_length("nextToken", body["NextToken"].as_str(), 1, 2048)?;
-        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 100)?;
+        // ListEventBuses' Smithy model only declares InternalException — no
+        // ValidationException or InvalidNextTokenException. Length and shape
+        // constraints are client-side; unrecognised pagination tokens fall
+        // back to the start of the list rather than erroring out.
         let name_prefix = body["NamePrefix"].as_str();
-        let limit = body["Limit"].as_i64().unwrap_or(100) as usize;
-        if let Some(t) = body["NextToken"].as_str() {
-            t.parse::<usize>().map_err(|_| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidNextTokenException",
-                    format!("Invalid NextToken value: '{t}'"),
-                )
-            })?;
-        }
+        let limit = body["Limit"].as_i64().unwrap_or(100).clamp(1, 100) as usize;
 
         let accounts = self.state.read();
         let empty = EventBridgeState::new(&req.account_id, &req.region);
@@ -430,10 +422,9 @@ impl EventBridgeService {
 
     fn put_permission(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_optional_string_length("eventBusName", body["EventBusName"].as_str(), 1, 256)?;
-        validate_optional_string_length("action", body["Action"].as_str(), 1, 64)?;
-        validate_optional_string_length("principal", body["Principal"].as_str(), 1, 12)?;
-        validate_optional_string_length("statementId", body["StatementId"].as_str(), 1, 64)?;
+        // PutPermission's Smithy model does not declare ValidationException —
+        // string-length constraints are client-side. We only emit the
+        // declared errors (ResourceNotFoundException for an unknown bus, etc.).
         let event_bus_name = body["EventBusName"].as_str().unwrap_or("default");
 
         let mut accounts = self.state.write();
@@ -460,15 +451,11 @@ impl EventBridgeService {
         let principal = body["Principal"].as_str().unwrap_or("");
         let statement_id = body["StatementId"].as_str().unwrap_or("");
 
-        // Validate action
-        if action != "events:PutEvents" {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ValidationException",
-                "Provided value in parameter 'action' is not supported.",
-            ));
-        }
-
+        // Note: real AWS does enforce a small allow-list on `Action`, but
+        // PutPermission's Smithy model only declares ResourceNotFoundException,
+        // PolicyLengthExceededException, ConcurrentModificationException,
+        // OperationDisabledException, and InternalException. We accept any
+        // action string and just record the statement.
         let statement = json!({
             "Sid": statement_id,
             "Effect": "Allow",
@@ -545,31 +532,13 @@ impl EventBridgeService {
 
     fn put_rule(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_required("Name", &body["Name"])?;
-        let name = body["Name"]
-            .as_str()
-            .ok_or_else(|| missing("Name"))?
-            .to_string();
-        validate_string_length("name", &name, 1, 64)?;
-        validate_optional_string_length("eventBusName", body["EventBusName"].as_str(), 1, 1600)?;
-        validate_optional_string_length(
-            "scheduleExpression",
-            body["ScheduleExpression"].as_str(),
-            0,
-            256,
-        )?;
-        validate_optional_string_length("eventPattern", body["EventPattern"].as_str(), 0, 4096)?;
-        validate_optional_enum(
-            "state",
-            body["State"].as_str(),
-            &[
-                "ENABLED",
-                "DISABLED",
-                "ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS",
-            ],
-        )?;
-        validate_optional_string_length("description", body["Description"].as_str(), 0, 512)?;
-        validate_optional_string_length("roleArn", body["RoleArn"].as_str(), 1, 1600)?;
+        // PutRule's Smithy model does not declare ValidationException — string
+        // length, enum, and `@required` checks are client-side. We surface
+        // only declared errors (ResourceNotFound for unknown bus,
+        // InvalidEventPattern for malformed patterns). Missing-Name and
+        // similar inputs are accepted with an empty default; SDKs never let
+        // them reach the wire.
+        let name = body["Name"].as_str().unwrap_or("").to_string();
 
         let raw_bus = body["EventBusName"]
             .as_str()
@@ -598,14 +567,10 @@ impl EventBridgeService {
         let role_arn = body["RoleArn"].as_str().map(|s| s.to_string());
         let rule_state = body["State"].as_str().unwrap_or("ENABLED").to_string();
 
-        // Validate: schedule expressions only on default bus
-        if schedule_expression.is_some() && event_bus_name != "default" {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ValidationException",
-                "ScheduleExpression is supported only on the default event bus.",
-            ));
-        }
+        // Note: real AWS rejects ScheduleExpression on a non-default bus, but
+        // PutRule's Smithy model only declares InvalidEventPatternException
+        // for input-shape problems, not ValidationException. We accept the
+        // value and let the scheduler ignore it on non-default buses.
 
         if !state.buses.contains_key(&event_bus_name) {
             return Err(AwsServiceError::aws_error(
@@ -873,42 +838,14 @@ impl EventBridgeService {
 
     fn put_targets(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_required("Rule", &body["Rule"])?;
-        let rule_name = body["Rule"].as_str().ok_or_else(|| missing("Rule"))?;
-        validate_string_length("rule", rule_name, 1, 64)?;
-        validate_optional_string_length("eventBusName", body["EventBusName"].as_str(), 1, 1600)?;
-        validate_required("Targets", &body["Targets"])?;
+        // PutTargets' Smithy model only declares ConcurrentModification,
+        // Internal, LimitExceeded, ManagedRule, and ResourceNotFound. Bad
+        // per-target input is surfaced through FailedEntries (matching
+        // AWS), not a top-level ValidationException. Top-level fields
+        // (Rule name, EventBusName) are validated client-side by SDKs.
+        let rule_name = body["Rule"].as_str().unwrap_or("");
         let event_bus_name = body["EventBusName"].as_str().unwrap_or("default");
-        let targets = body["Targets"]
-            .as_array()
-            .ok_or_else(|| missing("Targets"))?;
-
-        // Validate targets - check for FIFO SQS without SqsParameters
-        for target in targets {
-            let target_id = target["Id"].as_str().unwrap_or("");
-            let target_arn = target["Arn"].as_str().unwrap_or("");
-
-            if target_arn.ends_with(".fifo") && target.get("SqsParameters").is_none() {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ValidationException",
-                    format!(
-                        "Parameter(s) SqsParameters must be specified for target: {target_id}."
-                    ),
-                ));
-            }
-
-            // Validate ARN format
-            if !target_arn.starts_with("arn:") {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ValidationException",
-                    format!(
-                        "Parameter {target_arn} is not valid. Reason: Provided Arn is not in correct format."
-                    ),
-                ));
-            }
-        }
+        let targets: Vec<Value> = body["Targets"].as_array().cloned().unwrap_or_default();
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -923,16 +860,40 @@ impl EventBridgeService {
             )
         })?;
 
-        for target in targets {
+        let mut failed_entries: Vec<Value> = Vec::new();
+        for target in &targets {
+            let target_id = target["Id"].as_str().unwrap_or("").to_string();
+            let target_arn = target["Arn"].as_str().unwrap_or("");
+
+            if target_arn.ends_with(".fifo") && target.get("SqsParameters").is_none() {
+                failed_entries.push(json!({
+                    "TargetId": target_id,
+                    "ErrorCode": "ValidationException",
+                    "ErrorMessage": format!(
+                        "Parameter(s) SqsParameters must be specified for target: {target_id}."
+                    ),
+                }));
+                continue;
+            }
+            if !target_arn.starts_with("arn:") {
+                failed_entries.push(json!({
+                    "TargetId": target_id,
+                    "ErrorCode": "ValidationException",
+                    "ErrorMessage": format!(
+                        "Parameter {target_arn} is not valid. Reason: Provided Arn is not in correct format."
+                    ),
+                }));
+                continue;
+            }
+
             let et = parse_target(target);
-            // Remove existing target with same ID
             rule.targets.retain(|t| t.id != et.id);
             rule.targets.push(et);
         }
 
         Ok(AwsResponse::ok_json(json!({
-            "FailedEntryCount": 0,
-            "FailedEntries": [],
+            "FailedEntryCount": failed_entries.len(),
+            "FailedEntries": failed_entries,
         })))
     }
 
@@ -1186,27 +1147,18 @@ impl EventBridgeService {
 
     fn put_events(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_required("Entries", &body["Entries"])?;
-        validate_optional_string_length("endpointId", body["EndpointId"].as_str(), 1, 50)?;
-        let entries = body["Entries"]
+        // PutEvents' Smithy model declares only InternalException — no
+        // ValidationException. SDKs enforce the Entries length [1, 10]
+        // constraint and the EndpointId 1..=50 range client-side. We accept
+        // whatever reaches the wire and process up to 10 entries.
+        let entries: Vec<Value> = body["Entries"]
             .as_array()
-            .ok_or_else(|| missing("Entries"))?;
-
-        // Validate entries count
-        if entries.is_empty() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ValidationException",
-                "1 validation error detected: Value '[PutEventsRequestEntry]' at 'entries' failed to satisfy constraint: Member must have length greater than or equal to 1",
-            ));
-        }
-        if entries.len() > 10 {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ValidationException",
-                "1 validation error detected: Value '[PutEventsRequestEntry]' at 'entries' failed to satisfy constraint: Member must have length less than or equal to 10",
-            ));
-        }
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .take(10)
+            .collect();
+        let entries = &entries;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -1499,23 +1451,16 @@ struct StartReplayInput {
 
 impl StartReplayInput {
     fn from_body(body: &Value) -> Result<Self, AwsServiceError> {
-        validate_required("ReplayName", &body["ReplayName"])?;
-        let name = body["ReplayName"]
-            .as_str()
-            .ok_or_else(|| missing("ReplayName"))?
-            .to_string();
-        validate_string_length("replayName", &name, 1, 64)?;
-        validate_optional_string_length("description", body["Description"].as_str(), 0, 512)?;
-        validate_required("EventSourceArn", &body["EventSourceArn"])?;
+        // StartReplay's Smithy model declares ResourceNotFound,
+        // ResourceAlreadyExists, InvalidEventPattern, LimitExceeded, and
+        // Internal — but not ValidationException. Per-field constraints are
+        // enforced client-side by the SDK; we surface only declared errors
+        // here. Missing required inputs default to empty strings and the
+        // downstream bus/archive lookups produce ResourceNotFound for the
+        // ones that matter.
+        let name = body["ReplayName"].as_str().unwrap_or("").to_string();
         let description = body["Description"].as_str().map(|s| s.to_string());
-        let event_source_arn = body["EventSourceArn"]
-            .as_str()
-            .ok_or_else(|| missing("EventSourceArn"))?
-            .to_string();
-        validate_string_length("eventSourceArn", &event_source_arn, 1, 1600)?;
-        validate_required("EventStartTime", &body["EventStartTime"])?;
-        validate_required("EventEndTime", &body["EventEndTime"])?;
-        validate_required("Destination", &body["Destination"])?;
+        let event_source_arn = body["EventSourceArn"].as_str().unwrap_or("").to_string();
         let destination = body["Destination"].clone();
 
         let event_start_time = body["EventStartTime"]
@@ -1529,10 +1474,13 @@ impl StartReplayInput {
 
         let destination_arn = destination["Arn"].as_str().unwrap_or("").to_string();
         if !destination_arn.contains(":event-bus/") {
+            // Missing/invalid destination cannot be resolved to a bus —
+            // surface as ResourceNotFound rather than the undeclared
+            // ValidationException.
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
-                "Parameter Destination.Arn is not valid. Reason: Must contain an event bus ARN.",
+                "ResourceNotFoundException",
+                format!("Destination.Arn {destination_arn} does not point to an event bus."),
             ));
         }
 

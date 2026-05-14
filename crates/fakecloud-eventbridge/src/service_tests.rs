@@ -779,15 +779,15 @@ fn list_replays_pagination() {
 }
 
 #[test]
-fn list_event_buses_invalid_next_token_returns_error() {
+fn list_event_buses_invalid_next_token_treated_as_first_page() {
+    // ListEventBuses' Smithy model declares only InternalException —
+    // InvalidNextTokenException is not part of the contract, so we fall
+    // back to the first page rather than emitting an undeclared error.
     let svc = make_service();
 
     let req = make_request("ListEventBuses", json!({ "NextToken": "not-a-number" }));
-    let result = svc.list_event_buses(&req);
-    assert!(
-        result.is_err(),
-        "non-numeric NextToken should return an error"
-    );
+    svc.list_event_buses(&req)
+        .expect("invalid token is accepted");
 }
 
 // ---- TestEventPattern tests ----
@@ -1101,22 +1101,24 @@ fn activate_deactivate_event_source() {
 
 #[test]
 fn delete_partner_event_source_verifies_account() {
+    // DeletePartnerEventSource's Smithy model has no ValidationException or
+    // ResourceNotFoundException — only ConcurrentModification, Internal,
+    // and OperationDisabled — so we treat unknown sources and wrong-account
+    // mismatches as idempotent no-ops, leaving any matching record alone.
     let svc = make_service();
 
-    // Create a partner event source
     let req = make_request(
         "CreatePartnerEventSource",
         json!({ "Name": "aws.partner/test", "Account": "123456789012" }),
     );
     svc.create_partner_event_source(&req).unwrap();
 
-    // Deleting with wrong account fails
+    // Deleting with wrong account is a no-op and leaves the source intact.
     let req = make_request(
         "DeletePartnerEventSource",
         json!({ "Name": "aws.partner/test", "Account": "999999999999" }),
     );
-    assert!(svc.delete_partner_event_source(&req).is_err());
-    // Source still exists
+    svc.delete_partner_event_source(&req).unwrap();
     assert!(svc
         .state
         .read()
@@ -1124,7 +1126,7 @@ fn delete_partner_event_source_verifies_account() {
         .partner_event_sources
         .contains_key("aws.partner/test"));
 
-    // Deleting with correct account succeeds
+    // Deleting with correct account removes the source.
     let req = make_request(
         "DeletePartnerEventSource",
         json!({ "Name": "aws.partner/test", "Account": "123456789012" }),
@@ -1137,12 +1139,12 @@ fn delete_partner_event_source_verifies_account() {
         .partner_event_sources
         .contains_key("aws.partner/test"));
 
-    // Deleting non-existent source returns error
+    // Deleting an already-absent source is also a no-op success.
     let req = make_request(
         "DeletePartnerEventSource",
         json!({ "Name": "aws.partner/test", "Account": "123456789012" }),
     );
-    assert!(svc.delete_partner_event_source(&req).is_err());
+    svc.delete_partner_event_source(&req).unwrap();
 }
 
 #[test]
@@ -1523,9 +1525,12 @@ fn put_rule_persists_event_pattern_and_state() {
 }
 
 #[test]
-fn put_rule_rejects_schedule_on_non_default_bus() {
+fn put_rule_accepts_schedule_on_non_default_bus() {
+    // PutRule's Smithy model does not declare ValidationException; we accept
+    // a ScheduleExpression on a non-default bus rather than rejecting it
+    // with an undeclared error. The scheduler simply does not fire schedules
+    // for non-default buses.
     let svc = make_service();
-    // Create a custom bus first.
     let bus_req = make_request("CreateEventBus", json!({ "Name": "custom" }));
     svc.create_event_bus(&bus_req).unwrap();
 
@@ -1537,8 +1542,8 @@ fn put_rule_rejects_schedule_on_non_default_bus() {
             "ScheduleExpression": "rate(5 minutes)"
         }),
     );
-    let err = svc.put_rule(&req).err().expect("expected error");
-    assert_eq!(err.code(), "ValidationException");
+    svc.put_rule(&req)
+        .expect("schedule on non-default bus is accepted");
 }
 
 #[test]
@@ -1815,7 +1820,9 @@ fn put_targets_round_trips_full_target_config() {
 }
 
 #[test]
-fn put_targets_rejects_fifo_without_sqs_parameters() {
+fn put_targets_reports_fifo_without_sqs_parameters_in_failed_entries() {
+    // PutTargets' Smithy model has no ValidationException; per-target
+    // input errors are surfaced via FailedEntries, matching AWS.
     let svc = make_service();
     put_rule_simple(&svc, "r1");
     let req = make_request(
@@ -1825,12 +1832,15 @@ fn put_targets_rejects_fifo_without_sqs_parameters() {
             "Targets": [{ "Id": "t1", "Arn": "arn:aws:sqs:us-east-1:123456789012:q.fifo" }]
         }),
     );
-    let err = svc.put_targets(&req).err().expect("expected error");
-    assert_eq!(err.code(), "ValidationException");
+    let resp = svc.put_targets(&req).expect("call succeeds");
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["FailedEntryCount"], 1);
+    assert_eq!(body["FailedEntries"][0]["TargetId"], "t1");
+    assert_eq!(body["FailedEntries"][0]["ErrorCode"], "ValidationException");
 }
 
 #[test]
-fn put_targets_rejects_invalid_arn() {
+fn put_targets_reports_invalid_arn_in_failed_entries() {
     let svc = make_service();
     put_rule_simple(&svc, "r1");
     let req = make_request(
@@ -1840,8 +1850,10 @@ fn put_targets_rejects_invalid_arn() {
             "Targets": [{ "Id": "t1", "Arn": "not-an-arn" }]
         }),
     );
-    let err = svc.put_targets(&req).err().expect("expected error");
-    assert_eq!(err.code(), "ValidationException");
+    let resp = svc.put_targets(&req).expect("call succeeds");
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["FailedEntryCount"], 1);
+    assert_eq!(body["FailedEntries"][0]["ErrorCode"], "ValidationException");
 }
 
 #[test]
@@ -2448,7 +2460,9 @@ fn put_permission_with_policy_json() {
 }
 
 #[test]
-fn put_permission_invalid_action_errors() {
+fn put_permission_accepts_any_action() {
+    // PutPermission's Smithy model has no ValidationException — bad Action
+    // values are accepted at the wire and never reach the policy evaluator.
     let svc = make_service();
     let req = make_request(
         "PutPermission",
@@ -2458,7 +2472,8 @@ fn put_permission_invalid_action_errors() {
             "StatementId": "s1"
         }),
     );
-    assert!(svc.put_permission(&req).is_err());
+    svc.put_permission(&req)
+        .expect("unknown action is accepted");
 }
 
 #[test]
@@ -2547,25 +2562,28 @@ fn remove_permission_unknown_statement_errors() {
 // ── put_rule invalid schedule expression ──
 
 #[test]
-fn put_rule_missing_name_errors() {
+fn put_rule_accepts_missing_name() {
+    // PutRule has no declared ValidationException in its Smithy model —
+    // missing/invalid input fields are accepted server-side; AWS SDKs
+    // enforce them client-side.
     let svc = make_service();
     let req = make_request("PutRule", json!({}));
-    assert!(svc.put_rule(&req).is_err());
+    svc.put_rule(&req).expect("missing Name is accepted");
 }
 
 #[test]
-fn put_rule_name_too_long_errors() {
+fn put_rule_accepts_long_name() {
     let svc = make_service();
     let name = "x".repeat(65);
     let req = make_request("PutRule", json!({"Name": name}));
-    assert!(svc.put_rule(&req).is_err());
+    svc.put_rule(&req).expect("long Name is accepted");
 }
 
 #[test]
-fn put_rule_invalid_state_errors() {
+fn put_rule_accepts_unknown_state() {
     let svc = make_service();
     let req = make_request("PutRule", json!({"Name": "r1", "State": "BOGUS"}));
-    assert!(svc.put_rule(&req).is_err());
+    svc.put_rule(&req).expect("unknown State is accepted");
 }
 
 // ── create_connection variants ──
@@ -2715,10 +2733,16 @@ fn cancel_replay_not_found() {
 // ── put_events empty ──
 
 #[test]
-fn put_events_empty_entries_errors() {
+fn put_events_empty_entries_returns_zero_failures() {
+    // PutEvents' Smithy model declares only InternalException — the [1, 10]
+    // Entries length constraint is enforced client-side, so an empty batch
+    // is a no-op success on the wire.
     let svc = make_service();
     let req = make_request("PutEvents", json!({"Entries": []}));
-    assert!(svc.put_events(&req).is_err());
+    let resp = svc.put_events(&req).expect("empty entries is accepted");
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["FailedEntryCount"], 0);
+    assert_eq!(body["Entries"].as_array().unwrap().len(), 0);
 }
 
 #[test]

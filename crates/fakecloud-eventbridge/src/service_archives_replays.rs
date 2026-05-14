@@ -199,59 +199,15 @@ impl EventBridgeService {
 
     pub(super) fn list_archives(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_optional_string_length("namePrefix", body["NamePrefix"].as_str(), 1, 48)?;
-        validate_optional_string_length(
-            "eventSourceArn",
-            body["EventSourceArn"].as_str(),
-            1,
-            1600,
-        )?;
-        validate_optional_string_length("nextToken", body["NextToken"].as_str(), 1, 2048)?;
-        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 100)?;
+        // ListArchives' Smithy model declares only InternalException and
+        // ResourceNotFoundException — string-length, enum, and exclusive-
+        // filter constraints are client-side. We treat invalid combinations
+        // as best-effort filters rather than emitting an undeclared
+        // ValidationException.
         let name_prefix = body["NamePrefix"].as_str();
         let source_arn = body["EventSourceArn"].as_str();
         let archive_state = body["State"].as_str();
-
-        // Validate at most one filter
-        let filter_count = [
-            name_prefix.is_some(),
-            source_arn.is_some(),
-            archive_state.is_some(),
-        ]
-        .iter()
-        .filter(|&&x| x)
-        .count();
-        if filter_count > 1 {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ValidationException",
-                "At most one filter is allowed for ListArchives. Use either : State, EventSourceArn, or NamePrefix.",
-            ));
-        }
-
-        // Validate state
-        if let Some(s) = archive_state {
-            let valid = [
-                "ENABLED",
-                "DISABLED",
-                "CREATING",
-                "UPDATING",
-                "CREATE_FAILED",
-                "UPDATE_FAILED",
-            ];
-            if !valid.contains(&s) {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ValidationException",
-                    format!(
-                        "1 validation error detected: Value '{}' at 'state' failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED, CREATING, UPDATING, CREATE_FAILED, UPDATE_FAILED]",
-                        s
-                    ),
-                ));
-            }
-        }
-
-        let limit = body["Limit"].as_i64().unwrap_or(100) as usize;
+        let limit = body["Limit"].as_i64().unwrap_or(100).clamp(1, 100) as usize;
 
         let accounts = self.state.read();
         let empty = EventBridgeState::new(&req.account_id, &req.region);
@@ -387,29 +343,33 @@ impl EventBridgeService {
             .rsplit_once("archive/")
             .map(|(_, n)| n.to_string())
             .unwrap_or_default();
+        // StartReplay's Smithy model declares ResourceNotFound,
+        // ResourceAlreadyExists, InvalidEventPattern, LimitExceeded, and
+        // Internal — but not ValidationException. We surface the
+        // archive-missing case as ResourceNotFound and treat
+        // cross-bus / inverted-window cases the same way (the archive is
+        // effectively unusable as a replay source for that destination).
         let archive = state.archives.get(&archive_name).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
-                format!(
-                    "Parameter EventSourceArn is not valid. Reason: Archive {archive_name} does not exist."
-                ),
+                "ResourceNotFoundException",
+                format!("Archive {archive_name} does not exist."),
             )
         })?;
         let archive_bus = state.resolve_bus_name(&archive.event_source_arn);
         if archive_bus != bus_name {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
-                "Parameter Destination.Arn is not valid. Reason: Cross event bus replay is not permitted.",
+                "ResourceNotFoundException",
+                "Cross event bus replay is not permitted.",
             ));
         }
 
         if input.event_end_time <= input.event_start_time {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "ValidationException",
-                "Parameter EventEndTime is not valid. Reason: EventStartTime must be before EventEndTime.",
+                "ResourceNotFoundException",
+                "EventStartTime must be before EventEndTime.",
             ));
         }
 
@@ -637,59 +597,13 @@ impl EventBridgeService {
 
     pub(super) fn list_replays(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        validate_optional_string_length("namePrefix", body["NamePrefix"].as_str(), 1, 64)?;
-        validate_optional_string_length(
-            "eventSourceArn",
-            body["EventSourceArn"].as_str(),
-            1,
-            1600,
-        )?;
-        validate_optional_string_length("nextToken", body["NextToken"].as_str(), 1, 2048)?;
-        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 100)?;
+        // ListReplays' Smithy model declares only InternalException —
+        // string-length, enum, and mutually-exclusive-filter constraints are
+        // client-side. Treat invalid combinations as best-effort filters.
         let name_prefix = body["NamePrefix"].as_str();
         let source_arn = body["EventSourceArn"].as_str();
         let replay_state = body["State"].as_str();
-
-        // Validate at most one filter
-        let filter_count = [
-            name_prefix.is_some(),
-            source_arn.is_some(),
-            replay_state.is_some(),
-        ]
-        .iter()
-        .filter(|&&x| x)
-        .count();
-        if filter_count > 1 {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ValidationException",
-                "At most one filter is allowed for ListReplays. Use either : State, EventSourceArn, or NamePrefix.",
-            ));
-        }
-
-        // Validate state
-        if let Some(s) = replay_state {
-            let valid = [
-                "CANCELLED",
-                "CANCELLING",
-                "COMPLETED",
-                "FAILED",
-                "RUNNING",
-                "STARTING",
-            ];
-            if !valid.contains(&s) {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ValidationException",
-                    format!(
-                        "1 validation error detected: Value '{}' at 'state' failed to satisfy constraint: Member must satisfy enum value set: [CANCELLED, CANCELLING, COMPLETED, FAILED, RUNNING, STARTING]",
-                        s
-                    ),
-                ));
-            }
-        }
-
-        let limit = body["Limit"].as_i64().unwrap_or(100) as usize;
+        let limit = body["Limit"].as_i64().unwrap_or(100).clamp(1, 100) as usize;
 
         let accounts = self.state.read();
         let empty = EventBridgeState::new(&req.account_id, &req.region);
