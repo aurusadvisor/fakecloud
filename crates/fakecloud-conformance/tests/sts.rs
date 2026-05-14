@@ -164,7 +164,10 @@ async fn sts_get_web_identity_token() {
         .await
         .unwrap();
     let token = resp.web_identity_token().unwrap();
-    assert!(token.split('.').count() == 3, "expected JWT triple, got {token}");
+    assert!(
+        token.split('.').count() == 3,
+        "expected JWT triple, got {token}"
+    );
 }
 
 #[test_action("sts", "GetDelegatedAccessToken", checksum = "93cb2870")]

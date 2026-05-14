@@ -720,7 +720,11 @@ async fn cognito_identity_delete_identities() {
         .any(|u| u.identity_id() == Some("us-east-1:00000000-0000-0000-0000-000000000000")));
 }
 
-#[test_action("cognito-identity", "SetPrincipalTagAttributeMap", checksum = "865e3d7e")]
+#[test_action(
+    "cognito-identity",
+    "SetPrincipalTagAttributeMap",
+    checksum = "865e3d7e"
+)]
 #[tokio::test]
 async fn cognito_identity_set_principal_tag_attribute_map() {
     let server = TestServer::start().await;
@@ -750,7 +754,11 @@ async fn cognito_identity_set_principal_tag_attribute_map() {
     assert_eq!(resp.identity_pool_id(), Some(pool_id.as_str()));
 }
 
-#[test_action("cognito-identity", "GetPrincipalTagAttributeMap", checksum = "89cfe04f")]
+#[test_action(
+    "cognito-identity",
+    "GetPrincipalTagAttributeMap",
+    checksum = "89cfe04f"
+)]
 #[tokio::test]
 async fn cognito_identity_get_principal_tag_attribute_map() {
     let server = TestServer::start().await;
