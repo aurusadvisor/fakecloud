@@ -1221,7 +1221,9 @@ async fn bedrock_async_invoke_lifecycle_raw() {
 
     assert_eq!(resp.status(), 200);
     let result: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(result["status"], "Completed");
+    // AsyncInvokeStatus is serialized in upstream UPPERCASE form
+    // (COMPLETED/FAILED/IN_PROGRESS) to match the Smithy enum.
+    assert_eq!(result["status"], "COMPLETED");
     assert_eq!(result["invocationArn"], invocation_arn);
 
     // List async invokes
