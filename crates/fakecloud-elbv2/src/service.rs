@@ -1028,7 +1028,7 @@ impl Elbv2Service {
         let arn = required_query_param(req, "TargetGroupArn")?;
         let targets = parse_target_descriptions(req);
         if targets.is_empty() {
-            return Err(invalid_param("Targets is required"));
+            return Err(invalid_target("Targets is required"));
         }
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
@@ -1048,7 +1048,7 @@ impl Elbv2Service {
         let arn = required_query_param(req, "TargetGroupArn")?;
         let targets = parse_target_descriptions(req);
         if targets.is_empty() {
-            return Err(invalid_param("Targets is required"));
+            return Err(invalid_target("Targets is required"));
         }
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);

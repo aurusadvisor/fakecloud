@@ -70,7 +70,7 @@ async fn create_validates_name() {
         .await
         .err()
         .expect("expected error");
-    assert_eq!(err.code(), "ValidationError");
+    assert_eq!(err.code(), "InvalidConfigurationRequest");
 }
 
 async fn create_lb_and_get_arn(svc: &Elbv2Service, name: &str) -> String {
@@ -315,7 +315,7 @@ async fn create_listener_rejects_invalid_protocol() {
         .await
         .err()
         .expect("expected validation error");
-    assert_eq!(err.code(), "ValidationError");
+    assert_eq!(err.code(), "InvalidConfigurationRequest");
     assert!(format!("{err:?}").contains("BOGUS"));
 }
 
@@ -337,7 +337,7 @@ async fn create_listener_rejects_port_zero() {
         .await
         .err()
         .expect("expected validation error");
-    assert_eq!(err.code(), "ValidationError");
+    assert_eq!(err.code(), "InvalidConfigurationRequest");
 }
 
 #[tokio::test]
@@ -358,7 +358,7 @@ async fn create_listener_rejects_port_above_65535() {
         .await
         .err()
         .expect("expected validation error");
-    assert_eq!(err.code(), "ValidationError");
+    assert_eq!(err.code(), "InvalidConfigurationRequest");
 }
 
 #[tokio::test]
@@ -423,7 +423,7 @@ async fn create_listener_alb_rejects_tcp() {
         .await
         .err()
         .expect("TCP should be rejected on an ALB");
-    assert_eq!(err.code(), "ValidationError");
+    assert_eq!(err.code(), "InvalidConfigurationRequest");
     assert!(format!("{err:?}").contains("application"));
 }
 
@@ -448,7 +448,7 @@ async fn create_listener_nlb_rejects_http() {
         .await
         .err()
         .expect("HTTP should be rejected on an NLB");
-    assert_eq!(err.code(), "ValidationError");
+    assert_eq!(err.code(), "InvalidConfigurationRequest");
 }
 
 #[tokio::test]
@@ -499,7 +499,7 @@ async fn create_listener_gwlb_requires_geneve_on_6081() {
         .await
         .err()
         .expect("TCP should be rejected on a GWLB");
-    assert_eq!(err.code(), "ValidationError");
+    assert_eq!(err.code(), "InvalidConfigurationRequest");
     // GENEVE but wrong port.
     let err = svc
         .handle(req(
@@ -518,7 +518,7 @@ async fn create_listener_gwlb_requires_geneve_on_6081() {
         .await
         .err()
         .expect("GENEVE on port 443 should be rejected on a GWLB");
-    assert_eq!(err.code(), "ValidationError");
+    assert_eq!(err.code(), "InvalidConfigurationRequest");
     // GENEVE on 6081 succeeds.
     let res = svc
         .handle(req(
@@ -559,7 +559,7 @@ async fn modify_load_balancer_attributes_validates_ipv6_source_nat_value() {
         .await
         .err()
         .expect("non-bool ipv6 SNAT value should be rejected");
-    assert_eq!(err.code(), "ValidationError");
+    assert_eq!(err.code(), "InvalidConfigurationRequest");
     // All four supported values round-trip without error.
     for v in ["true", "false", "on", "off"] {
         let res = svc
@@ -622,7 +622,7 @@ async fn modify_listener_validates_protocol_and_port() {
         .await
         .err()
         .expect("port 0 should fail");
-    assert_eq!(err.code(), "ValidationError");
+    assert_eq!(err.code(), "InvalidConfigurationRequest");
     let err = svc
         .handle(req(
             "ModifyListener",
@@ -631,7 +631,7 @@ async fn modify_listener_validates_protocol_and_port() {
         .await
         .err()
         .expect("bogus protocol should fail");
-    assert_eq!(err.code(), "ValidationError");
+    assert_eq!(err.code(), "InvalidConfigurationRequest");
 }
 
 #[tokio::test]
