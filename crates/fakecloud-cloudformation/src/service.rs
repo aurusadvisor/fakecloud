@@ -903,10 +903,18 @@ impl CloudFormationService {
     }
 
     fn list_stack_resources(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        // ListStackResources requires StackName in Smithy but declares no
-        // errors. Treat both omission and missing-stack as an empty list
-        // rather than emit an undeclared `ValidationError`.
-        let stack_name = Self::get_param(req, "StackName").unwrap_or_default();
+        // ListStackResources requires StackName in Smithy. The op's
+        // Smithy `errors` list is empty, so any AWS-shaped 4xx code
+        // counts as a handler response for conformance purposes. Reject
+        // an omitted name with `ValidationError`; treat a *missing* stack
+        // as an empty resource list (consistent with the rest of CFN).
+        let stack_name = Self::get_param(req, "StackName").ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                "StackName is required",
+            )
+        })?;
 
         let accounts = self.state.read();
         let empty = CloudFormationState::new(&req.account_id, &req.region);
@@ -1256,6 +1264,15 @@ impl AwsService for CloudFormationService {
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let action = req.action.as_str();
+
+        // Validate scalar field constraints against the Smithy model
+        // before dispatching. Per-handler logic still owns business
+        // validation (cross-field checks, parsing, existence). This
+        // catches length / range / enum violations uniformly so every
+        // operation returns a `ValidationError` instead of `200 OK` on
+        // malformed scalars.
+        crate::input_constraints::validate_input(action, &Self::get_all_params(&req))?;
+
         // Only ops whose handlers actually write to per-account state
         // need to trigger snapshot persistence. Pass-through ops that
         // return canned IDs but don't touch state are excluded.
@@ -2096,14 +2113,19 @@ mod tests {
     }
 
     #[test]
-    fn list_stack_resources_missing_name_returns_empty() {
-        // ListStackResources / DescribeStackResources / GetTemplate
-        // declare no `ValidationError` shape, so omitted or unknown
-        // StackName now returns an empty list / empty template body
-        // instead of an undeclared wire code.
+    fn list_stack_resources_missing_name_returns_validation_error() {
+        // ListStackResources declares no `errors` in Smithy, so any
+        // AWS-shaped 4xx counts as a handler response. We reject an
+        // omitted StackName with `ValidationError` to keep negative
+        // conformance variants honest; unknown-but-supplied names still
+        // resolve to an empty list (see the test below).
         let svc = make_service();
         let req = make_request("ListStackResources", HashMap::new());
-        svc.list_stack_resources(&req).expect("missing name is ok");
+        let err = match svc.list_stack_resources(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("omitted StackName must be rejected"),
+        };
+        assert_eq!(err.code(), "ValidationError");
     }
 
     #[test]

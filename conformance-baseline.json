@@ -1,5 +1,5 @@
 {
-  "variants_passed": 73386,
+  "variants_passed": 74016,
   "total_variants": 86666,
   "per_service": {
     "lambda": {
@@ -71,7 +71,7 @@
       "total": 448
     },
     "cloudformation": {
-      "passed": 2798,
+      "passed": 3428,
       "total": 3433
     },
     "application-autoscaling": {

@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const NO_VALUE_SENTINEL_KEY: &str = "__fakecloud_aws_no_value__";
 
 /// A parsed CloudFormation template.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ParsedTemplate {
     pub description: Option<String>,
     pub resources: Vec<ResourceDefinition>,
