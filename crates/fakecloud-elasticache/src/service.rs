@@ -723,7 +723,7 @@ impl ElastiCacheService {
             if nodes.is_empty() {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
-                    "ReservedCacheNodeNotFoundFault",
+                    "ReservedCacheNodeNotFound",
                     format!("ReservedCacheNode not found: {id}"),
                 ));
             }
@@ -791,7 +791,7 @@ impl ElastiCacheService {
             if offerings.is_empty() {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
-                    "ReservedCacheNodesOfferingNotFoundFault",
+                    "ReservedCacheNodesOfferingNotFound",
                     format!("ReservedCacheNodesOffering not found: {id}"),
                 ));
             }
@@ -1552,7 +1552,7 @@ impl ElastiCacheService {
             if !state.begin_replication_group_creation(&replication_group_id) {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ReplicationGroupAlreadyExistsFault",
+                    "ReplicationGroupAlreadyExists",
                     format!("ReplicationGroup {replication_group_id} already exists."),
                 ));
             }
@@ -1754,7 +1754,7 @@ impl ElastiCacheService {
         if primary_group.global_replication_group_id.is_some() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "InvalidReplicationGroupStateFault",
+                "InvalidReplicationGroupState",
                 format!(
                     "ReplicationGroup {primary_replication_group_id} is already associated with a GlobalReplicationGroup."
                 ),
@@ -2061,7 +2061,7 @@ impl ElastiCacheService {
                         state.cancel_serverless_cache_creation(&serverless_cache_name);
                         return Err(AwsServiceError::aws_error(
                             StatusCode::NOT_FOUND,
-                            "UserGroupNotFoundFault",
+                            "UserGroupNotFound",
                             format!("User group {group_id} not found."),
                         ));
                     }
@@ -2269,7 +2269,7 @@ impl ElastiCacheService {
             let user_group = state.user_groups.get(group_id).ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
-                    "UserGroupNotFoundFault",
+                    "UserGroupNotFound",
                     format!("User group {group_id} not found."),
                 )
             })?;
@@ -3546,7 +3546,7 @@ impl ElastiCacheService {
         if state.users.contains_key(&user_id) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "UserAlreadyExistsFault",
+                "UserAlreadyExists",
                 format!("User {user_id} already exists."),
             ));
         }
@@ -3594,7 +3594,7 @@ impl ElastiCacheService {
                 None => {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::NOT_FOUND,
-                        "UserNotFoundFault",
+                        "UserNotFound",
                         format!("User {id} not found."),
                     ));
                 }
@@ -3643,7 +3643,7 @@ impl ElastiCacheService {
         let user = state.users.remove(&user_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
-                "UserNotFoundFault",
+                "UserNotFound",
                 format!("User {user_id} not found."),
             )
         })?;
@@ -3685,7 +3685,7 @@ impl ElastiCacheService {
         if state.user_groups.contains_key(&user_group_id) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "UserGroupAlreadyExistsFault",
+                "UserGroupAlreadyExists",
                 format!("User Group {user_group_id} already exists."),
             ));
         }
@@ -3696,7 +3696,7 @@ impl ElastiCacheService {
                 None => {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::NOT_FOUND,
-                        "UserNotFoundFault",
+                        "UserNotFound",
                         format!("User {uid} not found."),
                     ));
                 }
@@ -3762,7 +3762,7 @@ impl ElastiCacheService {
                 None => {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::NOT_FOUND,
-                        "UserGroupNotFoundFault",
+                        "UserGroupNotFound",
                         format!("User Group {id} not found."),
                     ));
                 }
@@ -3803,7 +3803,7 @@ impl ElastiCacheService {
         let group = state.user_groups.remove(&user_group_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
-                "UserGroupNotFoundFault",
+                "UserGroupNotFound",
                 format!("User Group {user_group_id} not found."),
             )
         })?;
@@ -4710,7 +4710,7 @@ impl ElastiCacheService {
             let group = state.user_groups.get_mut(&id).ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
-                    "UserGroupNotFoundFault",
+                    "UserGroupNotFound",
                     format!("UserGroup {id} not found."),
                 )
             })?;

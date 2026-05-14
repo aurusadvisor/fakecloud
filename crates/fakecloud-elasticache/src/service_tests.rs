@@ -2637,7 +2637,7 @@ fn describe_user_not_found() {
     let svc = ElastiCacheService::new(shared);
     expect_ec_err(
         svc.describe_users(&request("DescribeUsers", &[("UserId", "nope")])),
-        "UserNotFoundFault",
+        "UserNotFound",
     );
 }
 
@@ -2649,7 +2649,7 @@ fn delete_user_not_found() {
     let svc = ElastiCacheService::new(shared);
     expect_ec_err(
         svc.delete_user(&request("DeleteUser", &[("UserId", "nope")])),
-        "UserNotFoundFault",
+        "UserNotFound",
     );
 }
 
@@ -2661,7 +2661,7 @@ fn describe_user_group_not_found() {
     let svc = ElastiCacheService::new(shared);
     expect_ec_err(
         svc.describe_user_groups(&request("DescribeUserGroups", &[("UserGroupId", "nope")])),
-        "UserGroupNotFoundFault",
+        "UserGroupNotFound",
     );
 }
 
@@ -2673,7 +2673,7 @@ fn delete_user_group_not_found() {
     let svc = ElastiCacheService::new(shared);
     expect_ec_err(
         svc.delete_user_group(&request("DeleteUserGroup", &[("UserGroupId", "nope")])),
-        "UserGroupNotFoundFault",
+        "UserGroupNotFound",
     );
 }
 
@@ -2747,7 +2747,7 @@ fn create_user_duplicate() {
         ],
     );
     svc.create_user(&req).unwrap();
-    expect_ec_err(svc.create_user(&req), "UserAlreadyExistsFault");
+    expect_ec_err(svc.create_user(&req), "UserAlreadyExists");
 }
 
 // ── Describe cache engine versions ──
@@ -3851,7 +3851,7 @@ async fn modify_unknown_user_group_errors() {
         Err(e) => e,
         Ok(_) => panic!("expected error"),
     };
-    assert_eq!(err.code(), "UserGroupNotFoundFault");
+    assert_eq!(err.code(), "UserGroupNotFound");
 }
 
 #[test]
