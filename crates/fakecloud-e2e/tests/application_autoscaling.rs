@@ -497,7 +497,11 @@ async fn tag_untag_list_tags_round_trip() {
 }
 
 #[tokio::test]
-async fn list_tags_unknown_resource_returns_object_not_found() {
+async fn list_tags_unknown_resource_returns_resource_not_found() {
+    // ListTagsForResource's Smithy model only declares
+    // ResourceNotFoundException, so unknown ARNs surface that code
+    // (not the ObjectNotFoundException used by the Delete/Put
+    // scaling-target/policy/scheduled-action ops).
     let server = TestServer::start().await;
     let aas = server.application_autoscaling_client().await;
     let err = aas
@@ -508,7 +512,7 @@ async fn list_tags_unknown_resource_returns_object_not_found() {
         .send()
         .await
         .expect_err("missing arn");
-    assert!(format!("{err:?}").contains("ObjectNotFound"));
+    assert!(format!("{err:?}").contains("ResourceNotFound"));
 }
 
 #[tokio::test]
@@ -578,7 +582,10 @@ async fn describe_with_stale_next_token_does_not_panic() {
 }
 
 #[tokio::test]
-async fn tag_unknown_resource_returns_object_not_found() {
+async fn tag_unknown_resource_returns_resource_not_found() {
+    // TagResource declares ResourceNotFoundException in its Smithy model;
+    // ObjectNotFoundException is reserved for the Delete/Put
+    // scaling-target/policy/scheduled-action ops.
     let server = TestServer::start().await;
     let aas = server.application_autoscaling_client().await;
     let mut tags = HashMap::new();
@@ -593,7 +600,7 @@ async fn tag_unknown_resource_returns_object_not_found() {
         .send()
         .await
         .expect_err("missing arn");
-    assert!(format!("{err:?}").contains("ObjectNotFound"));
+    assert!(format!("{err:?}").contains("ResourceNotFound"));
 }
 
 /// POST `/_fakecloud/application-autoscaling/tick` to force the
