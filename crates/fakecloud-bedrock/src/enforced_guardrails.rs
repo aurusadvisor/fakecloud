@@ -63,7 +63,7 @@ pub(crate) fn list_enforced_guardrails_configuration(
         })
         .collect();
 
-    let mut resp = json!({ "enforcedGuardrailsConfigurations": page });
+    let mut resp = json!({ "guardrailsConfig": page });
     let end = start.saturating_add(max_results);
     if end < items.len() {
         if let Some(last) = items.get(end - 1) {
@@ -149,7 +149,7 @@ mod tests {
         let resp = list_enforced_guardrails_configuration(&s, &req()).unwrap();
         let v: Value =
             serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
-        let arr = v["enforcedGuardrailsConfigurations"].as_array().unwrap();
+        let arr = v["guardrailsConfig"].as_array().unwrap();
         assert_eq!(arr.len(), 2);
         for item in arr {
             assert!(item["configId"].is_string());
@@ -168,13 +168,7 @@ mod tests {
         let resp = list_enforced_guardrails_configuration(&s, &r).unwrap();
         let v: Value =
             serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
-        assert_eq!(
-            v["enforcedGuardrailsConfigurations"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
+        assert_eq!(v["guardrailsConfig"].as_array().unwrap().len(), 2);
         assert!(v["nextToken"].is_string());
     }
 

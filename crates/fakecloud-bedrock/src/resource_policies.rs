@@ -1,6 +1,5 @@
 use http::StatusCode;
 use serde_json::{json, Value};
-use uuid::Uuid;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
@@ -27,16 +26,16 @@ pub(crate) fn put_resource_policy(
         )
     })?;
 
-    let revision_id = Uuid::new_v4().to_string();
-
     let mut accts = state.write();
     let s = accts.get_or_create(&req.account_id);
     s.resource_policies
         .insert(resource_arn.to_string(), policy.to_string());
 
+    // PutResourcePolicyResponse only carries `resourceArn` per the Smithy
+    // model; older drafts of this handler emitted a `revisionId` that doesn't
+    // exist on the wire.
     Ok(AwsResponse::ok_json(json!({
         "resourceArn": resource_arn,
-        "revisionId": revision_id,
     })))
 }
 
@@ -65,11 +64,8 @@ pub(crate) fn get_resource_policy(
             )
         })?;
 
-    let revision_id = Uuid::new_v4().to_string();
-
     Ok(AwsResponse::ok_json(json!({
         "resourcePolicy": policy,
-        "revisionId": revision_id,
     })))
 }
 
@@ -178,7 +174,6 @@ mod tests {
         let v: Value =
             serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
         assert!(v["resourcePolicy"].is_string());
-        assert!(v["revisionId"].is_string());
     }
 
     #[test]

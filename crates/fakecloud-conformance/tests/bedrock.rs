@@ -1293,7 +1293,7 @@ async fn bedrock_marketplace_endpoint_lifecycle() {
         .unwrap();
     assert_eq!(r.status(), 201);
     let v: serde_json::Value = r.json().await.unwrap();
-    let arn = v["marketplaceModelEndpointArn"]
+    let arn = v["marketplaceModelEndpoint"]["endpointArn"]
         .as_str()
         .unwrap()
         .to_string();
