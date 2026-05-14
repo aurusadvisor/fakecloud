@@ -618,7 +618,7 @@ async fn cloudformation_closure_routes_exist() {
         .await
         .status()
         .is_success());
-    assert!(cfn_post(&server, "DeactivateType", &[("TypeName", "X")])
+    assert!(cfn_post(&server, "DeactivateType", &[("TypeName", "AWS::Demo::Type")])
         .await
         .status()
         .is_success());
@@ -639,14 +639,14 @@ async fn cloudformation_closure_routes_exist() {
         "RegisterType",
         &[
             ("Type", "RESOURCE"),
-            ("TypeName", "X"),
+            ("TypeName", "AWS::Demo::Type"),
             ("SchemaHandlerPackage", "s3://x")
         ]
     )
     .await
     .status()
     .is_success());
-    assert!(cfn_post(&server, "DeregisterType", &[("TypeName", "X")])
+    assert!(cfn_post(&server, "DeregisterType", &[("TypeName", "AWS::Demo::Type")])
         .await
         .status()
         .is_success());
@@ -658,7 +658,7 @@ async fn cloudformation_closure_routes_exist() {
         .await
         .status()
         .is_success());
-    assert!(cfn_post(&server, "ListTypeVersions", &[("TypeName", "X")])
+    assert!(cfn_post(&server, "ListTypeVersions", &[("TypeName", "AWS::Demo::Type")])
         .await
         .status()
         .is_success());
@@ -677,16 +677,16 @@ async fn cloudformation_closure_routes_exist() {
             .is_success()
     );
     assert!(
-        cfn_post(&server, "SetTypeDefaultVersion", &[("TypeName", "X")])
+        cfn_post(&server, "SetTypeDefaultVersion", &[("TypeName", "AWS::Demo::Type")])
             .await
             .status()
             .is_success()
     );
-    assert!(cfn_post(&server, "TestType", &[("TypeName", "X")])
+    assert!(cfn_post(&server, "TestType", &[("TypeName", "AWS::Demo::Type")])
         .await
         .status()
         .is_success());
-    assert!(cfn_post(&server, "PublishType", &[("TypeName", "X")])
+    assert!(cfn_post(&server, "PublishType", &[("TypeName", "AWS::Demo::Type")])
         .await
         .status()
         .is_success());
