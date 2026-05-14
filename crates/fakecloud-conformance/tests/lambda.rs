@@ -850,24 +850,35 @@ async fn lambda_recursion_config() {
 #[test_action("lambda", "GetFunctionScalingConfig", checksum = "8096164f")]
 #[tokio::test]
 async fn lambda_scaling_config_via_route() {
-    // Scaling config requires an event-source mapping uuid; just hit the
-    // routes with a synthetic uuid to exercise dispatch.
+    // Function scaling config — the live AWS route is
+    // `/2025-11-30/functions/{name}/function-scaling-config?Qualifier=...`.
+    // We just need to exercise the dispatch path; the function
+    // doesn't need to exist for the validation guards to pass.
     let server = TestServer::start().await;
+    let auth = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/lambda/aws4_request, SignedHeaders=host, Signature=0";
     let resp = reqwest::Client::new()
-        .put(format!("{}/2015-03-31/event-source-mappings/test-uuid/scaling-config", server.endpoint()))
-        .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/lambda/aws4_request, SignedHeaders=host, Signature=0")
-        .body(r#"{"MaximumConcurrency": 10}"#)
+        .put(format!(
+            "{}/2025-11-30/functions/scaling-fn/function-scaling-config?Qualifier=%24LATEST",
+            server.endpoint()
+        ))
+        .header("Authorization", auth)
+        .body(
+            r#"{"FunctionScalingConfig":{"MinExecutionEnvironments":1,"MaxExecutionEnvironments":10}}"#,
+        )
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success());
+    assert!(resp.status().is_success(), "put status: {}", resp.status());
     let resp = reqwest::Client::new()
-        .get(format!("{}/2015-03-31/event-source-mappings/test-uuid/scaling-config", server.endpoint()))
-        .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/lambda/aws4_request, SignedHeaders=host, Signature=0")
+        .get(format!(
+            "{}/2025-11-30/functions/scaling-fn/function-scaling-config?Qualifier=%24LATEST",
+            server.endpoint()
+        ))
+        .header("Authorization", auth)
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success());
+    assert!(resp.status().is_success(), "get status: {}", resp.status());
 }
 
 #[test_action("lambda", "TagResource", checksum = "481a09a0")]

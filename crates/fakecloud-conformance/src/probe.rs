@@ -750,11 +750,8 @@ fn rest_request_config(
             ),
             "ListProvisionedConcurrencyConfigs" => (
                 reqwest::Method::GET,
-                format!(
-                    "/2019-09-30/functions/{}/provisioned-concurrency-configs",
-                    FUNC
-                ),
-                None,
+                format!("/2019-09-30/functions/{}/provisioned-concurrency", FUNC),
+                Some("List=ALL".to_string()),
             ),
             // Recursion config (2024-08-31).
             "PutFunctionRecursionConfig" => (

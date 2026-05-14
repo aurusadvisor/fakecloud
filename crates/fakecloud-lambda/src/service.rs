@@ -732,11 +732,20 @@ impl LambdaService {
             };
         }
 
-        // Provisioned concurrency at any prefix.
+        // Provisioned concurrency at any prefix. AWS overloads
+        // `GET /functions/{name}/provisioned-concurrency` on the
+        // `List=ALL` query parameter — with it, the op is
+        // `ListProvisionedConcurrencyConfigs`; without, it's
+        // `GetProvisionedConcurrencyConfig` (which needs a
+        // `Qualifier`). Disambiguate before falling into the
+        // per-method match.
         if segs.get(1).map(|s| s.as_str()) == Some("functions")
             && segs.get(3).map(|s| s.as_str()) == Some("provisioned-concurrency")
         {
             let res = segs.get(2).map(|s| s.to_string());
+            if req.method == Method::GET && req.query_params.contains_key("List") {
+                return Some(("ListProvisionedConcurrencyConfigs", res));
+            }
             return match req.method {
                 Method::PUT => Some(("PutProvisionedConcurrencyConfig", res)),
                 Method::GET => Some(("GetProvisionedConcurrencyConfig", res)),
@@ -744,6 +753,9 @@ impl LambdaService {
                 _ => None,
             };
         }
+        // Legacy alias path (`provisioned-concurrency-configs`) — kept
+        // for backward compatibility with conformance fixtures that
+        // hand-craft the URL.
         if segs.get(1).map(|s| s.as_str()) == Some("functions")
             && segs.get(3).map(|s| s.as_str()) == Some("provisioned-concurrency-configs")
             && req.method == Method::GET
@@ -939,44 +951,16 @@ impl LambdaService {
         let third = segs.get(3).map(|s| s.as_str());
         let fourth = segs.get(4).map(|s| s.as_str());
 
-        // Disambiguate collapsed URLs that synthetic probes can produce
-        // when an httpLabel was elided. `path_segments` strips empty
-        // segments, so `/functions/` (a malformed `GetFunction`)
-        // collapses to look like `/functions` (`ListFunctions`).
-        // Inspect the raw path to recover the missing-identifier
-        // case and route it to the intended op with an empty resource
-        // — every downstream length check will then reject it.
-        let raw = req.raw_path.split('?').next().unwrap_or(&req.raw_path);
-        if req.method == Method::GET
-            && collection == Some("functions")
-            && segs.len() == 2
-            && raw.ends_with("/functions/")
-        {
-            return Some(("GetFunction", Some(String::new())));
-        }
-        // Aliases: `/functions/{fn}/aliases/` -> `GetAlias` with empty
-        // alias name (instead of falling through to `ListAliases`).
-        if req.method == Method::GET
-            && collection == Some("functions")
-            && segs.len() == 4
-            && third == Some("aliases")
-            && raw.ends_with("/aliases/")
-        {
-            return Some(("GetAlias", segs.get(2).map(|s| s.to_string())));
-        }
-        // Same for `DELETE` and `PUT` on the alias slot.
-        if collection == Some("functions")
-            && segs.len() == 4
-            && third == Some("aliases")
-            && raw.ends_with("/aliases/")
-        {
-            let res = segs.get(2).map(|s| s.to_string());
-            match req.method {
-                Method::DELETE => return Some(("DeleteAlias", res)),
-                Method::PUT => return Some(("UpdateAlias", res)),
-                _ => {}
-            }
-        }
+        // NOTE: We intentionally do not try to disambiguate URLs that
+        // collapsed because an httpLabel was elided (e.g.
+        // `/functions/` vs `/functions`). Real AWS treats those as
+        // the same path — both hit `ListFunctions` — and we have
+        // e2e coverage that relies on the trailing-slash behaviour
+        // (`host_routing::unsigned_lambda_list_functions_via_host_header`).
+        // Synthetic conformance probes that elide a required path
+        // identifier are inherently un-faithful to the SDK; accept
+        // the small false-positive count rather than break a real
+        // SDK convention.
 
         let action = match (&req.method, segs.len(), collection, third) {
             (&Method::POST, 2, Some("functions"), _) => "CreateFunction",
