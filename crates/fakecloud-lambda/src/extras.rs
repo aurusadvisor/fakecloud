@@ -142,6 +142,34 @@ fn layer_content_url(req: &AwsRequest, account_id: &str, layer_name: &str, versi
     )
 }
 
+/// Build a fakecloud-hosted download URL for a function version's ZIP. AWS
+/// Toolkit (and `aws lambda get-function --query 'Code.Location'`) expects
+/// this to resolve to an actual ZIP body, so the URL points back at the
+/// running fakecloud instance on the same authority the SDK used.
+pub(crate) fn function_code_url(
+    req: &AwsRequest,
+    account_id: &str,
+    function_name: &str,
+    version_label: &str,
+) -> String {
+    let host = req
+        .headers
+        .get(http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost");
+    let scheme = req
+        .headers
+        .get("x-forwarded-proto")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("http");
+    let file = if version_label == "$LATEST" {
+        "latest.zip".to_string()
+    } else {
+        format!("{version_label}.zip")
+    };
+    format!("{scheme}://{host}/_fakecloud/lambda/function-code/{account_id}/{function_name}/{file}")
+}
+
 /// AWS layer-version ARN: `arn:aws:lambda:<region>:<account>:layer:<name>:<version>`.
 /// Returns `(account_id, layer_name, version)`. Used to resolve cross-account
 /// layer references attached to a function.

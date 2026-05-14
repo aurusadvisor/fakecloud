@@ -1183,6 +1183,7 @@ impl LambdaService {
 
     fn get_function(
         &self,
+        req: &AwsRequest,
         function_name: &str,
         account_id: &str,
         region: &str,
@@ -1241,16 +1242,15 @@ impl LambdaService {
                 "RepositoryType": "ECR",
             })
         } else {
-            // fakecloud doesn't expose a presigned-download path yet; we
-            // synthesize a `_fakecloud/`-namespaced URL so it's obvious to
-            // operators that the URL isn't a real S3 link. (Real
-            // download support is tracked under follow-up GG batch.)
-            let region = func.function_arn.split(':').nth(3).unwrap_or("us-east-1");
+            // Serve the function's stored ZIP from a fakecloud-hosted route on
+            // the same authority the SDK used, so AWS Toolkit / `aws lambda
+            // get-function --query 'Code.Location'` can actually download it.
             json!({
-                "Location": format!(
-                    "https://prod-{region}-starport-layer-bucket.s3.{region}.amazonaws.com/_fakecloud/{account}/{name}/code.zip",
-                    account = state.account_id,
-                    name = function_name,
+                "Location": crate::extras::function_code_url(
+                    req,
+                    &state.account_id,
+                    function_name,
+                    &version_label,
                 ),
                 "RepositoryType": "S3",
             })
@@ -2160,6 +2160,7 @@ impl AwsService for LambdaService {
                 req.query_params.get("FunctionVersion").map(String::as_str),
             ),
             "GetFunction" => self.get_function(
+                &req,
                 resource_name.as_deref().unwrap_or(""),
                 aid,
                 req.region.as_str(),

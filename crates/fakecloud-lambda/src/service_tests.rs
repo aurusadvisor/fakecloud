@@ -1122,8 +1122,9 @@ async fn publish_version_unknown_function_errors() {
 #[tokio::test]
 async fn get_function_unknown_errors() {
     let svc = LambdaService::new(make_state());
+    let req = make_request(Method::GET, "/2015-03-31/functions/ghost", "");
     assert!(svc
-        .get_function("ghost", "123456789012", "us-east-1", None)
+        .get_function(&req, "ghost", "123456789012", "us-east-1", None)
         .is_err());
 }
 

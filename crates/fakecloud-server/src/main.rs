@@ -6340,6 +6340,54 @@ async fn main() {
             }),
         )
         .route(
+            "/_fakecloud/lambda/function-code/{account_id}/{function_name}/{file}",
+            axum::routing::get({
+                let ls = lambda_state.clone();
+                move |axum::extract::Path((account_id, function_name, file)): axum::extract::Path<(String, String, String)>| {
+                    let ls = ls.clone();
+                    async move {
+                        let qualifier: Option<String> = file
+                            .strip_suffix(".zip")
+                            .map(|s| s.to_string());
+                        let Some(qualifier) = qualifier else {
+                            return (
+                                axum::http::StatusCode::NOT_FOUND,
+                                [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                                axum::body::Bytes::from_static(b"function code not found"),
+                            );
+                        };
+                        let bytes_opt: Option<Vec<u8>> = {
+                            let accounts = ls.read();
+                            accounts.get(&account_id).and_then(|s| {
+                                if qualifier == "latest" {
+                                    s.functions
+                                        .get(&function_name)
+                                        .and_then(|f| f.code_zip.clone())
+                                } else {
+                                    s.function_version_snapshots
+                                        .get(&function_name)
+                                        .and_then(|m| m.get(&qualifier))
+                                        .and_then(|f| f.code_zip.clone())
+                                }
+                            })
+                        };
+                        match bytes_opt {
+                            Some(bytes) => (
+                                axum::http::StatusCode::OK,
+                                [(axum::http::header::CONTENT_TYPE, "application/zip")],
+                                axum::body::Bytes::from(bytes),
+                            ),
+                            None => (
+                                axum::http::StatusCode::NOT_FOUND,
+                                [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                                axum::body::Bytes::from_static(b"function code not found"),
+                            ),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
             "/_fakecloud/sns/pending-confirmations",
             axum::routing::get({
                 let ss = sns_sim_pending_state;

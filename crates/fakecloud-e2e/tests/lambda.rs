@@ -68,6 +68,78 @@ async fn lambda_create_get_delete_function() {
 }
 
 #[tokio::test]
+async fn lambda_get_function_code_location_is_downloadable() {
+    // Regression for #1375: AWS Toolkit + `aws lambda get-function` need
+    // Code.Location to resolve to the actual ZIP body.
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    let zip = make_python_zip();
+    client
+        .create_function()
+        .function_name("dl-target")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(zip.clone()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_function()
+        .function_name("dl-target")
+        .send()
+        .await
+        .unwrap();
+    let location = resp.code().unwrap().location().unwrap();
+    assert!(
+        location.contains("/_fakecloud/lambda/function-code/"),
+        "Code.Location should point at fakecloud route, got {location}"
+    );
+
+    let body = reqwest::get(location)
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), zip.as_slice());
+
+    // Published version is downloadable through the same route.
+    let publish = client
+        .publish_version()
+        .function_name("dl-target")
+        .send()
+        .await
+        .unwrap();
+    let v = publish.version().unwrap();
+    let resp = client
+        .get_function()
+        .function_name("dl-target")
+        .qualifier(v)
+        .send()
+        .await
+        .unwrap();
+    let location = resp.code().unwrap().location().unwrap();
+    let body = reqwest::get(location)
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), zip.as_slice());
+}
+
+#[tokio::test]
 async fn lambda_get_function_accepts_arn_partial_arn_and_qualifier() {
     let server = TestServer::start().await;
     let client = server.lambda_client().await;
