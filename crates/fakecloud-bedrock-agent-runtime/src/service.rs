@@ -3,11 +3,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use http::{Method, StatusCode};
+use regex::Regex;
 use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
-use crate::state::{InvocationRecord, SharedBedrockAgentRuntimeState};
+use crate::state::{
+    FlowExecution, InvocationRecord, InvocationStep, Session, SessionInvocation,
+    SharedBedrockAgentRuntimeState,
+};
 
 const SUPPORTED_ACTIONS: &[&str] = &[
     "InvokeAgent",
@@ -75,13 +79,19 @@ impl BedrockAgentRuntimeService {
         }
 
         let m = &req.method;
-        let mut params = Vec::new();
+        let mut params: Vec<(String, String)> = Vec::new();
 
-        // InvokeAgent: POST /agents/{agentId}/agentAliases/{agentAliasId}/...
-        if segs.len() >= 4 && segs[0] == "agents" && segs[2] == "agentAliases" && *m == Method::POST
+        // InvokeAgent: POST /agents/{agentId}/agentAliases/{agentAliasId}/sessions/{sessionId}/text
+        if segs.len() == 7
+            && segs[0] == "agents"
+            && segs[2] == "agentAliases"
+            && segs[4] == "sessions"
+            && segs[6] == "text"
+            && *m == Method::POST
         {
             params.push(("agentId".to_string(), segs[1].clone()));
             params.push(("agentAliasId".to_string(), segs[3].clone()));
+            params.push(("sessionId".to_string(), segs[5].clone()));
             return Some(("InvokeAgent", params));
         }
 
@@ -92,9 +102,9 @@ impl BedrockAgentRuntimeService {
             return Some(("InvokeFlow", params));
         }
 
-        // InvokeInlineAgent: POST /agents/{agentId}
+        // InvokeInlineAgent: POST /agents/{sessionId}
         if segs.len() == 2 && segs[0] == "agents" && *m == Method::POST {
-            params.push(("agentId".to_string(), segs[1].clone()));
+            params.push(("sessionId".to_string(), segs[1].clone()));
             return Some(("InvokeInlineAgent", params));
         }
 
@@ -117,8 +127,6 @@ impl BedrockAgentRuntimeService {
         if segs.len() == 1 && segs[0] == "retrieveAndGenerate" && *m == Method::POST {
             return Some(("RetrieveAndGenerate", params));
         }
-
-        // RetrieveAndGenerateStream: POST /retrieveAndGenerateStream
         if segs.len() == 1 && segs[0] == "retrieveAndGenerateStream" && *m == Method::POST {
             return Some(("RetrieveAndGenerateStream", params));
         }
@@ -131,7 +139,7 @@ impl BedrockAgentRuntimeService {
             return Some(("ListSessions", params));
         }
         if segs.len() == 2 && segs[0] == "sessions" {
-            params.push(("sessionId".to_string(), segs[1].clone()));
+            params.push(("sessionIdentifier".to_string(), segs[1].clone()));
             if *m == Method::GET {
                 return Some(("GetSession", params));
             }
@@ -141,40 +149,45 @@ impl BedrockAgentRuntimeService {
             if *m == Method::DELETE {
                 return Some(("DeleteSession", params));
             }
-            if *m == Method::POST {
+            if *m == Method::PATCH {
                 return Some(("EndSession", params));
             }
         }
 
-        // Invocations
-        if segs.len() == 2 && segs[0] == "invocations" && *m == Method::PUT {
-            params.push(("invocationId".to_string(), segs[1].clone()));
-            return Some(("CreateInvocation", params));
+        // Session-nested resources
+        if segs.len() == 3 && segs[0] == "sessions" && segs[2] == "invocations" {
+            params.push(("sessionIdentifier".to_string(), segs[1].clone()));
+            if *m == Method::PUT {
+                return Some(("CreateInvocation", params));
+            }
+            if *m == Method::POST {
+                return Some(("ListInvocations", params));
+            }
         }
-        if segs.len() == 1 && segs[0] == "invocations" && *m == Method::POST {
-            return Some(("ListInvocations", params));
+        if segs.len() == 3 && segs[0] == "sessions" && segs[2] == "invocationSteps" {
+            params.push(("sessionIdentifier".to_string(), segs[1].clone()));
+            if *m == Method::PUT {
+                return Some(("PutInvocationStep", params));
+            }
+            if *m == Method::POST {
+                return Some(("ListInvocationSteps", params));
+            }
         }
-        if segs.len() == 3 && segs[0] == "invocations" && segs[2] == "steps" && *m == Method::PUT {
-            params.push(("invocationId".to_string(), segs[1].clone()));
-            return Some(("PutInvocationStep", params));
-        }
-        if segs.len() == 3 && segs[0] == "invocations" && segs[2] == "steps" && *m == Method::POST {
-            params.push(("invocationId".to_string(), segs[1].clone()));
-            return Some(("ListInvocationSteps", params));
-        }
-        if segs.len() == 4 && segs[0] == "invocations" && segs[2] == "steps" && *m == Method::GET {
-            params.push(("invocationId".to_string(), segs[1].clone()));
-            params.push(("stepId".to_string(), segs[3].clone()));
+        if segs.len() == 4
+            && segs[0] == "sessions"
+            && segs[2] == "invocationSteps"
+            && *m == Method::POST
+        {
+            params.push(("sessionIdentifier".to_string(), segs[1].clone()));
+            params.push(("invocationStepId".to_string(), segs[3].clone()));
             return Some(("GetInvocationStep", params));
         }
 
         // Flow executions
-        // ListFlowExecutions: GET /flows/{flowIdentifier}/executions
         if segs.len() == 3 && segs[0] == "flows" && segs[2] == "executions" && *m == Method::GET {
             params.push(("flowIdentifier".to_string(), segs[1].clone()));
             return Some(("ListFlowExecutions", params));
         }
-        // GetFlowExecution: GET /flows/{flowIdentifier}/aliases/{flowAliasIdentifier}/executions/{executionIdentifier}
         if segs.len() == 6
             && segs[0] == "flows"
             && segs[2] == "aliases"
@@ -183,10 +196,9 @@ impl BedrockAgentRuntimeService {
         {
             params.push(("flowIdentifier".to_string(), segs[1].clone()));
             params.push(("flowAliasIdentifier".to_string(), segs[3].clone()));
-            params.push(("executionId".to_string(), segs[5].clone()));
+            params.push(("executionIdentifier".to_string(), segs[5].clone()));
             return Some(("GetFlowExecution", params));
         }
-        // StartFlowExecution: POST /flows/{flowIdentifier}/aliases/{flowAliasIdentifier}/executions
         if segs.len() == 5
             && segs[0] == "flows"
             && segs[2] == "aliases"
@@ -197,7 +209,6 @@ impl BedrockAgentRuntimeService {
             params.push(("flowAliasIdentifier".to_string(), segs[3].clone()));
             return Some(("StartFlowExecution", params));
         }
-        // StopFlowExecution: POST /flows/{flowIdentifier}/aliases/{flowAliasIdentifier}/executions/{executionIdentifier}/stop
         if segs.len() == 7
             && segs[0] == "flows"
             && segs[2] == "aliases"
@@ -207,10 +218,9 @@ impl BedrockAgentRuntimeService {
         {
             params.push(("flowIdentifier".to_string(), segs[1].clone()));
             params.push(("flowAliasIdentifier".to_string(), segs[3].clone()));
-            params.push(("executionId".to_string(), segs[5].clone()));
+            params.push(("executionIdentifier".to_string(), segs[5].clone()));
             return Some(("StopFlowExecution", params));
         }
-        // ListFlowExecutionEvents: GET /flows/{flowIdentifier}/aliases/{flowAliasIdentifier}/executions/{executionIdentifier}/events
         if segs.len() == 7
             && segs[0] == "flows"
             && segs[2] == "aliases"
@@ -220,10 +230,9 @@ impl BedrockAgentRuntimeService {
         {
             params.push(("flowIdentifier".to_string(), segs[1].clone()));
             params.push(("flowAliasIdentifier".to_string(), segs[3].clone()));
-            params.push(("executionId".to_string(), segs[5].clone()));
+            params.push(("executionIdentifier".to_string(), segs[5].clone()));
             return Some(("ListFlowExecutionEvents", params));
         }
-        // GetExecutionFlowSnapshot: GET /flows/{flowIdentifier}/aliases/{flowAliasIdentifier}/executions/{executionIdentifier}/flowsnapshot
         if segs.len() == 7
             && segs[0] == "flows"
             && segs[2] == "aliases"
@@ -233,12 +242,12 @@ impl BedrockAgentRuntimeService {
         {
             params.push(("flowIdentifier".to_string(), segs[1].clone()));
             params.push(("flowAliasIdentifier".to_string(), segs[3].clone()));
-            params.push(("executionId".to_string(), segs[5].clone()));
+            params.push(("executionIdentifier".to_string(), segs[5].clone()));
             return Some(("GetExecutionFlowSnapshot", params));
         }
 
-        // GenerateQuery: POST /generate-query
-        if segs.len() == 1 && segs[0] == "generate-query" && *m == Method::POST {
+        // GenerateQuery: POST /generateQuery
+        if segs.len() == 1 && segs[0] == "generateQuery" && *m == Method::POST {
             return Some(("GenerateQuery", params));
         }
 
@@ -247,28 +256,34 @@ impl BedrockAgentRuntimeService {
             return Some(("Rerank", params));
         }
 
-        // Agent memory
-        if segs.len() == 3 && segs[0] == "agents" && segs[2] == "memory" && *m == Method::GET {
+        // Agent memory: /agents/{agentId}/agentAliases/{agentAliasId}/memories
+        if segs.len() == 5
+            && segs[0] == "agents"
+            && segs[2] == "agentAliases"
+            && segs[4] == "memories"
+        {
             params.push(("agentId".to_string(), segs[1].clone()));
-            return Some(("GetAgentMemory", params));
-        }
-        if segs.len() == 3 && segs[0] == "agents" && segs[2] == "memory" && *m == Method::DELETE {
-            params.push(("agentId".to_string(), segs[1].clone()));
-            return Some(("DeleteAgentMemory", params));
+            params.push(("agentAliasId".to_string(), segs[3].clone()));
+            if *m == Method::GET {
+                return Some(("GetAgentMemory", params));
+            }
+            if *m == Method::DELETE {
+                return Some(("DeleteAgentMemory", params));
+            }
         }
 
         // Tagging
-        if segs.len() == 2 && segs[0] == "tags" && *m == Method::PUT {
+        if segs.len() == 2 && segs[0] == "tags" {
             params.push(("resourceArn".to_string(), segs[1].clone()));
-            return Some(("TagResource", params));
-        }
-        if segs.len() == 2 && segs[0] == "tags" && *m == Method::DELETE {
-            params.push(("resourceArn".to_string(), segs[1].clone()));
-            return Some(("UntagResource", params));
-        }
-        if segs.len() == 2 && segs[0] == "tags" && *m == Method::GET {
-            params.push(("resourceArn".to_string(), segs[1].clone()));
-            return Some(("ListTagsForResource", params));
+            if *m == Method::POST {
+                return Some(("TagResource", params));
+            }
+            if *m == Method::DELETE {
+                return Some(("UntagResource", params));
+            }
+            if *m == Method::GET {
+                return Some(("ListTagsForResource", params));
+            }
         }
 
         None
@@ -283,6 +298,195 @@ fn req_str(body: &Value, key: &str) -> Option<String> {
 
 fn make_error(status: StatusCode, code: &str, message: &str) -> AwsServiceError {
     AwsServiceError::aws_error(status, code, message)
+}
+
+fn validation(message: &str) -> AwsServiceError {
+    make_error(StatusCode::BAD_REQUEST, "ValidationException", message)
+}
+
+/// Validate a string field is present and matches a regex pattern + length range.
+fn validate_str(
+    value: Option<&str>,
+    name: &str,
+    pattern: Option<&Regex>,
+    min: Option<usize>,
+    max: Option<usize>,
+    required: bool,
+) -> Result<(), AwsServiceError> {
+    match value {
+        None => {
+            if required {
+                Err(validation(&format!("{} is required", name)))
+            } else {
+                Ok(())
+            }
+        }
+        Some(s) => {
+            if required && s.is_empty() {
+                return Err(validation(&format!("{} must not be empty", name)));
+            }
+            if let Some(mn) = min {
+                if s.chars().count() < mn {
+                    return Err(validation(&format!(
+                        "{} must be at least {} characters",
+                        name, mn
+                    )));
+                }
+            }
+            if let Some(mx) = max {
+                if s.chars().count() > mx {
+                    return Err(validation(&format!(
+                        "{} must be at most {} characters",
+                        name, mx
+                    )));
+                }
+            }
+            if let Some(re) = pattern {
+                if !re.is_match(s) {
+                    return Err(validation(&format!(
+                        "{} does not match required pattern",
+                        name
+                    )));
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+// Cached regexes for the most common patterns
+fn re_session_identifier() -> Regex {
+    Regex::new(r"^(arn:aws(-[^:]+)?:bedrock:[a-z0-9-]+:[0-9]{12}:session/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})|([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$").unwrap()
+}
+fn re_agent_id() -> Regex {
+    Regex::new(r"^[0-9a-zA-Z]+$").unwrap()
+}
+fn re_session_id() -> Regex {
+    Regex::new(r"^[0-9a-zA-Z._:-]+$").unwrap()
+}
+fn re_uuid() -> Regex {
+    Regex::new(r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$").unwrap()
+}
+fn re_memory_id() -> Regex {
+    Regex::new(r"^[0-9a-zA-Z._:-]+$").unwrap()
+}
+fn re_flow_execution_id() -> Regex {
+    // FlowExecutionIdentifier: max 2048, no pattern in model
+    Regex::new(r"^[\x21-\x7e]+$").unwrap()
+}
+fn re_taggable_arn() -> Regex {
+    // TaggableResourcesArn: lenient; reject literal {placeholder}
+    Regex::new(r"^arn:[a-zA-Z0-9-]+:[a-zA-Z0-9-]+:[a-z0-9-]*:[0-9]{12}:.+$").unwrap()
+}
+fn re_flow_identifier() -> Regex {
+    Regex::new(
+        r"^(arn:aws:bedrock:[a-z0-9-]{1,20}:[0-9]{12}:flow/[0-9a-zA-Z]{10})|([0-9a-zA-Z]{10})$",
+    )
+    .unwrap()
+}
+fn re_flow_alias_identifier() -> Regex {
+    Regex::new(r"^(arn:aws:bedrock:[a-z0-9-]{1,20}:[0-9]{12}:flow/[0-9a-zA-Z]{10}/alias/[0-9a-zA-Z]{10})|(\bTSTALIASID\b|[0-9a-zA-Z]+)$").unwrap()
+}
+fn re_no_whitespace() -> Regex {
+    // NextToken: ^\S*$
+    Regex::new(r"^\S*$").unwrap()
+}
+fn re_aws_arn() -> Regex {
+    // Generic AWS resource ARN
+    Regex::new(r"^arn:aws(-[^:]+)?:[a-zA-Z0-9-]+:[a-z0-9-]*:[0-9]{12}:.+$").unwrap()
+}
+fn re_flow_execution_name() -> Regex {
+    Regex::new(r"^[a-zA-Z0-9-]+$").unwrap()
+}
+
+/// Validate optional integer field against a range.
+fn validate_int_range(
+    value: Option<i64>,
+    name: &str,
+    min: i64,
+    max: i64,
+) -> Result<(), AwsServiceError> {
+    if let Some(v) = value {
+        if v < min || v > max {
+            return Err(validation(&format!(
+                "{} must be between {} and {}",
+                name, min, max
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate optional NextToken-like query/body string.
+fn validate_next_token(req: &AwsRequest, body: &Value) -> Result<(), AwsServiceError> {
+    let token = req
+        .query_params
+        .get("nextToken")
+        .cloned()
+        .or_else(|| req_str(body, "nextToken"));
+    if let Some(t) = token {
+        validate_str(
+            Some(&t),
+            "nextToken",
+            Some(&re_no_whitespace()),
+            Some(1),
+            Some(2048),
+            false,
+        )?;
+    }
+    Ok(())
+}
+
+/// Pull a maxResults / maxItems integer from query (preferred) or body.
+fn extract_int(req: &AwsRequest, body: &Value, name: &str) -> Option<i64> {
+    if let Some(s) = req.query_params.get(name) {
+        if let Ok(v) = s.parse::<i64>() {
+            return Some(v);
+        }
+    }
+    body.get(name).and_then(|v| v.as_i64())
+}
+
+fn parse_body(req: &AwsRequest) -> Value {
+    serde_json::from_slice(&req.body).unwrap_or(Value::Null)
+}
+
+fn merge_path_params(body: Value, path_params: &[(String, String)]) -> Value {
+    let mut out = match body {
+        Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    for (k, v) in path_params {
+        out.insert(k.clone(), Value::String(v.clone()));
+    }
+    Value::Object(out)
+}
+
+fn session_arn(account_id: &str, region: &str, session_id: &str) -> String {
+    format!(
+        "arn:aws:bedrock:{}:{}:session/{}",
+        if region.is_empty() {
+            "us-east-1"
+        } else {
+            region
+        },
+        account_id,
+        session_id
+    )
+}
+
+fn flow_execution_arn(account_id: &str, region: &str, flow_id: &str, execution_id: &str) -> String {
+    format!(
+        "arn:aws:bedrock:{}:{}:flow/{}/execution/{}",
+        if region.is_empty() {
+            "us-east-1"
+        } else {
+            region
+        },
+        account_id,
+        flow_id,
+        execution_id
+    )
 }
 
 #[async_trait]
@@ -304,15 +508,7 @@ impl AwsService for BedrockAgentRuntimeService {
 
         req.action = action.to_string();
 
-        let mut body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
-        if !path_params.is_empty() {
-            if !body.is_object() {
-                body = serde_json::Value::Object(serde_json::Map::new());
-            }
-            for (k, v) in path_params {
-                body[k] = serde_json::Value::String(v);
-            }
-        }
+        let body = merge_path_params(parse_body(&req), &path_params);
 
         match action {
             "InvokeAgent" => handle_invoke_agent(self, &req, &body).await,
@@ -350,53 +546,92 @@ impl AwsService for BedrockAgentRuntimeService {
             "TagResource" => handle_tag_resource(self, &req, &body).await,
             "UntagResource" => handle_untag_resource(self, &req, &body).await,
             "ListTagsForResource" => handle_list_tags_for_resource(self, &req, &body).await,
-            _ => Err(make_error(
-                StatusCode::BAD_REQUEST,
-                "ValidationException",
-                &format!("Unknown action: {}", action),
-            )),
+            _ => Err(validation(&format!("Unknown action: {}", action))),
         }
     }
 }
 
-// ── Core operation handlers ──────────────────────────────────────────
+// ── Invoke handlers ──────────────────────────────────────────────────
 
 async fn handle_invoke_agent(
     svc: &BedrockAgentRuntimeService,
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let agent_id = req_str(body, "agentId").ok_or_else(|| {
-        make_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "agentId is required",
-        )
-    })?;
+    let agent_id = req_str(body, "agentId");
+    let agent_alias_id = req_str(body, "agentAliasId");
+    let session_id = req_str(body, "sessionId");
 
-    let _agent_alias_id = req_str(body, "agentAliasId").unwrap_or_default();
+    validate_str(
+        agent_id.as_deref(),
+        "agentId",
+        Some(&re_agent_id()),
+        Some(1),
+        Some(10),
+        true,
+    )?;
+    validate_str(
+        agent_alias_id.as_deref(),
+        "agentAliasId",
+        Some(&re_agent_id()),
+        Some(1),
+        Some(10),
+        true,
+    )?;
+    validate_str(
+        session_id.as_deref(),
+        "sessionId",
+        Some(&re_session_id()),
+        Some(2),
+        Some(100),
+        true,
+    )?;
+    let memory_id_opt = req_str(body, "memoryId");
+    if let Some(ref m) = memory_id_opt {
+        validate_str(
+            Some(m),
+            "memoryId",
+            Some(&re_memory_id()),
+            Some(2),
+            Some(100),
+            false,
+        )?;
+    }
+    // sourceArn is httpHeader; AWSResourceARN length max 2048
+    let source_arn_opt = req
+        .headers
+        .get("x-amz-source-arn")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .or_else(|| req_str(body, "sourceArn"));
+    if let Some(ref s) = source_arn_opt {
+        validate_str(
+            Some(s),
+            "sourceArn",
+            Some(&re_aws_arn()),
+            Some(1),
+            Some(2048),
+            false,
+        )?;
+    }
 
-    let session_id = req_str(body, "sessionId").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let agent_id = agent_id.unwrap();
+    let session_id = session_id.unwrap();
     let input_text = req_str(body, "inputText").unwrap_or_default();
 
-    // Look up agent in control-plane state if available
     let agent_name = if let Some(ref agent_state) = svc.agent_state {
         let accounts = agent_state.read();
-        if let Some(account) = accounts.accounts.get(&req.account_id) {
-            account.agents.get(&agent_id).map(|a| a.agent_name.clone())
-        } else {
-            None
-        }
+        accounts
+            .accounts
+            .get(&req.account_id)
+            .and_then(|account| account.agents.get(&agent_id).map(|a| a.agent_name.clone()))
     } else {
         None
-    };
+    }
+    .unwrap_or_else(|| "TestAgent".to_string());
 
-    let agent_name = agent_name.unwrap_or_else(|| "TestAgent".to_string());
-
-    // Generate canned response
     let output = format!("Hello from agent {}. You said: {}", agent_name, input_text);
 
-    // Record invocation
     let start = std::time::Instant::now();
     {
         let mut accts = svc.state.write();
@@ -417,18 +652,16 @@ async fn handle_invoke_agent(
         });
     }
 
-    // InvokeAgent returns `application/vnd.amazon.eventstream`-framed
-    // bytes. We emit a single `chunk` event carrying the canned
-    // response. AWS SDK clients deserialize this exactly the same way
-    // they do real Bedrock — base64-decoding the `bytes` field of each
-    // chunk event back into model output.
     let frame = crate::eventstream::chunk_frame(&output);
     let mut headers = http::HeaderMap::new();
     if let Ok(value) = http::HeaderValue::from_str(&session_id) {
         headers.insert("x-amz-bedrock-agent-session-id", value);
     }
-    let _ = json!(null); // keep the macro import alive for other handlers in this module
-    Ok(fakecloud_core::service::AwsResponse {
+    headers.insert(
+        "x-amzn-bedrock-agent-content-type",
+        http::HeaderValue::from_static("application/json"),
+    );
+    Ok(AwsResponse {
         status: StatusCode::OK,
         content_type: "application/vnd.amazon.eventstream".to_string(),
         body: fakecloud_core::service::ResponseBody::Bytes(frame.into()),
@@ -441,34 +674,67 @@ async fn handle_invoke_flow(
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let flow_id = req_str(body, "flowIdentifier").ok_or_else(|| {
-        make_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "flowIdentifier is required",
-        )
-    })?;
+    let flow_id = req_str(body, "flowIdentifier");
+    let flow_alias_id = req_str(body, "flowAliasIdentifier");
+    validate_str(
+        flow_id.as_deref(),
+        "flowIdentifier",
+        Some(&re_flow_identifier()),
+        Some(1),
+        Some(2048),
+        true,
+    )?;
+    validate_str(
+        flow_alias_id.as_deref(),
+        "flowAliasIdentifier",
+        Some(&re_flow_alias_identifier()),
+        Some(1),
+        Some(2048),
+        true,
+    )?;
+    if body.get("inputs").is_none() {
+        return Err(validation("inputs is required"));
+    }
+    // executionId optional, length 2..100, pattern session-id-like
+    let execution_id_opt = req_str(body, "executionId");
+    if let Some(ref s) = execution_id_opt {
+        validate_str(
+            Some(s),
+            "executionId",
+            Some(&re_session_id()),
+            Some(2),
+            Some(100),
+            false,
+        )?;
+    }
 
-    let _flow_alias_id = req_str(body, "flowAliasIdentifier").unwrap_or_default();
-
+    let flow_id = flow_id.unwrap();
     let execution_id = uuid::Uuid::new_v4().to_string();
     let input = req_str(body, "input").unwrap_or_default();
 
     let start = std::time::Instant::now();
     let document = format!("Flow output for input: {}", input);
 
-    // Record
     {
         let mut accts = svc.state.write();
         let s = accts.get_or_create(&req.account_id);
         s.flow_executions.insert(
             execution_id.clone(),
-            crate::state::FlowExecution {
+            FlowExecution {
                 execution_id: execution_id.clone(),
+                execution_arn: flow_execution_arn(
+                    &req.account_id,
+                    &req.region,
+                    &flow_id,
+                    &execution_id,
+                ),
                 flow_id: flow_id.clone(),
+                flow_alias_id: flow_alias_id.unwrap_or_default(),
+                flow_version: "DRAFT".to_string(),
                 status: "SUCCEEDED".to_string(),
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
+                ended_at: Some(Utc::now()),
             },
         );
         s.invocations.push(InvocationRecord {
@@ -492,7 +758,7 @@ async fn handle_invoke_flow(
     if let Ok(value) = http::HeaderValue::from_str(&execution_id) {
         headers.insert("x-amz-bedrock-flow-execution-id", value);
     }
-    Ok(fakecloud_core::service::AwsResponse {
+    Ok(AwsResponse {
         status: StatusCode::OK,
         content_type: "application/vnd.amazon.eventstream".to_string(),
         body: fakecloud_core::service::ResponseBody::Bytes(frame.into()),
@@ -505,7 +771,37 @@ async fn handle_invoke_inline_agent(
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let session_id = req_str(body, "sessionId").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let session_id = req_str(body, "sessionId");
+    validate_str(
+        session_id.as_deref(),
+        "sessionId",
+        Some(&re_session_id()),
+        Some(2),
+        Some(100),
+        true,
+    )?;
+    // foundationModel is also required in the body
+    let foundation_model = req_str(body, "foundationModel");
+    validate_str(
+        foundation_model.as_deref(),
+        "foundationModel",
+        None,
+        Some(1),
+        Some(2048),
+        true,
+    )?;
+    // instruction also required
+    let instruction = req_str(body, "instruction");
+    validate_str(
+        instruction.as_deref(),
+        "instruction",
+        None,
+        Some(40),
+        Some(8000),
+        true,
+    )?;
+
+    let session_id = session_id.unwrap();
     let input_text = req_str(body, "inputText").unwrap_or_default();
     let start = std::time::Instant::now();
     let output = format!("Inline agent says: {}", input_text);
@@ -532,7 +828,11 @@ async fn handle_invoke_inline_agent(
     if let Ok(value) = http::HeaderValue::from_str(&session_id) {
         headers.insert("x-amz-bedrock-agent-session-id", value);
     }
-    Ok(fakecloud_core::service::AwsResponse {
+    headers.insert(
+        "x-amzn-bedrock-agent-content-type",
+        http::HeaderValue::from_static("application/json"),
+    );
+    Ok(AwsResponse {
         status: StatusCode::OK,
         content_type: "application/vnd.amazon.eventstream".to_string(),
         body: fakecloud_core::service::ResponseBody::Bytes(frame.into()),
@@ -545,32 +845,54 @@ async fn handle_optimize_prompt(
     _req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let prompt_text = req_str(body, "promptText")
-        .or_else(|| {
-            body.get("prompt")
-                .and_then(|p| p.get("promptText"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_default();
+    // Required: input (InputPrompt union), targetModelId
+    let target_model_id = req_str(body, "targetModelId");
+    validate_str(
+        target_model_id.as_deref(),
+        "targetModelId",
+        None,
+        Some(1),
+        Some(2048),
+        true,
+    )?;
+    if body.get("input").is_none() {
+        return Err(validation("input is required"));
+    }
 
+    let prompt_text = body
+        .get("input")
+        .and_then(|i| i.get("textPrompt"))
+        .and_then(|t| t.get("text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     let optimized = format!("Optimized: {}", prompt_text);
 
-    let response = json!({
+    // OptimizePromptResponse is an eventstream — payload is OptimizedPromptStream
+    // union with `optimizedPromptEvent` carrying `OptimizedPrompt` union
+    // `{ textPrompt: { text } }`. Send a single eventstream frame.
+    let event_body = serde_json::to_vec(&json!({
         "optimizedPrompt": {
-            "optimizedPromptText": optimized,
-            "optimizedPromptTemplate": {
-                "promptText": optimized,
-                "inferenceConfiguration": {
-                    "temperature": 0.7,
-                    "topP": 0.9,
-                    "maxLength": 512
-                }
-            }
+            "textPrompt": { "text": optimized }
         }
-    });
+    }))
+    .unwrap();
+    let frame = crate::eventstream::encode_frame(
+        &[
+            (":event-type", "optimizedPromptEvent"),
+            (":content-type", "application/json"),
+            (":message-type", "event"),
+        ],
+        &event_body,
+    );
 
-    Ok(AwsResponse::ok_json(response))
+    let headers = http::HeaderMap::new();
+    Ok(AwsResponse {
+        status: StatusCode::OK,
+        content_type: "application/vnd.amazon.eventstream".to_string(),
+        body: fakecloud_core::service::ResponseBody::Bytes(frame.into()),
+        headers,
+    })
 }
 
 async fn handle_retrieve(
@@ -578,14 +900,22 @@ async fn handle_retrieve(
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let kb_id = req_str(body, "knowledgeBaseId").ok_or_else(|| {
-        make_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "knowledgeBaseId is required",
-        )
-    })?;
+    let kb_id = req_str(body, "knowledgeBaseId");
+    // KnowledgeBaseId pattern: ^[0-9a-zA-Z]{10}$
+    validate_str(
+        kb_id.as_deref(),
+        "knowledgeBaseId",
+        Some(&Regex::new(r"^[0-9a-zA-Z]+$").unwrap()),
+        Some(0),
+        Some(10),
+        true,
+    )?;
+    if body.get("retrievalQuery").is_none() {
+        return Err(validation("retrievalQuery is required"));
+    }
+    validate_next_token(req, body)?;
 
+    let kb_id = kb_id.unwrap();
     let query = body
         .get("retrievalQuery")
         .and_then(|q| q.get("text"))
@@ -610,19 +940,17 @@ async fn handle_retrieve(
             input: query.clone(),
             output: result_text.clone(),
             output_chunks: 1,
-            trace: Some(serde_json::json!({ "knowledgeBaseId": kb_id })),
+            trace: Some(json!({ "knowledgeBaseId": kb_id })),
             citations: Vec::new(),
             timestamp: Utc::now(),
             duration_ms: start.elapsed().as_millis() as u64,
         });
     }
 
-    let response = json!({
+    Ok(AwsResponse::ok_json(json!({
         "retrievalResults": [
             {
-                "content": {
-                    "text": result_text
-                },
+                "content": { "text": result_text },
                 "location": {
                     "type": "S3",
                     "s3Location": {
@@ -632,9 +960,7 @@ async fn handle_retrieve(
                 "score": 0.95
             }
         ]
-    });
-
-    Ok(AwsResponse::ok_json(response))
+    })))
 }
 
 async fn handle_retrieve_and_generate(
@@ -642,8 +968,27 @@ async fn handle_retrieve_and_generate(
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let session_id = req_str(body, "sessionId").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let input = req_str(body, "input").unwrap_or_default();
+    if body.get("input").is_none() {
+        return Err(validation("input is required"));
+    }
+    let provided_session = req_str(body, "sessionId");
+    if let Some(ref s) = provided_session {
+        validate_str(
+            Some(s),
+            "sessionId",
+            Some(&re_session_id()),
+            Some(2),
+            Some(100),
+            false,
+        )?;
+    }
+    let session_id = provided_session.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let input = body
+        .get("input")
+        .and_then(|i| i.get("text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     let start = std::time::Instant::now();
     let output_text = format!("Generated response for: {}", input);
     let citation = json!({
@@ -655,9 +1000,7 @@ async fn handle_retrieve_and_generate(
         },
         "retrievedReferences": [
             {
-                "content": {
-                    "text": "Reference text from knowledge base"
-                },
+                "content": { "text": "Reference text from knowledge base" },
                 "location": {
                     "type": "CONFLUENCE",
                     "confluenceLocation": { "url": "https://example.com/doc" }
@@ -684,27 +1027,80 @@ async fn handle_retrieve_and_generate(
         });
     }
 
-    let response = json!({
+    Ok(AwsResponse::ok_json(json!({
         "sessionId": session_id,
         "output": { "text": output_text },
         "citations": [citation]
-    });
-
-    Ok(AwsResponse::ok_json(response))
+    })))
 }
 
 async fn handle_retrieve_and_generate_stream(
-    _svc: &BedrockAgentRuntimeService,
-    _req: &AwsRequest,
-    _body: &Value,
+    svc: &BedrockAgentRuntimeService,
+    req: &AwsRequest,
+    body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    // Stub — return an empty stream-like JSON for now
-    let response = json!({
-        "sessionId": uuid::Uuid::new_v4().to_string(),
-        "output": { "text": "" },
-        "citations": []
-    });
-    Ok(AwsResponse::ok_json(response))
+    if body.get("input").is_none() {
+        return Err(validation("input is required"));
+    }
+    let provided_session = req_str(body, "sessionId");
+    if let Some(ref s) = provided_session {
+        validate_str(
+            Some(s),
+            "sessionId",
+            Some(&re_session_id()),
+            Some(2),
+            Some(100),
+            false,
+        )?;
+    }
+    let session_id = provided_session.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let input = body
+        .get("input")
+        .and_then(|i| i.get("text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let output_text = format!("Generated response for: {}", input);
+    {
+        let mut accts = svc.state.write();
+        let s = accts.get_or_create(&req.account_id);
+        s.invocations.push(InvocationRecord {
+            invocation_id: uuid::Uuid::new_v4().to_string(),
+            op: "retrieve_and_generate_stream".to_string(),
+            agent_id: None,
+            flow_id: None,
+            session_id: Some(session_id.clone()),
+            input: input.clone(),
+            output: output_text.clone(),
+            output_chunks: 1,
+            trace: None,
+            citations: Vec::new(),
+            timestamp: Utc::now(),
+            duration_ms: 0,
+        });
+    }
+
+    // Emit a single output event frame (eventstream payload).
+    let event_body = serde_json::to_vec(&json!({ "output": { "text": output_text } })).unwrap();
+    let frame = crate::eventstream::encode_frame(
+        &[
+            (":event-type", "output"),
+            (":content-type", "application/json"),
+            (":message-type", "event"),
+        ],
+        &event_body,
+    );
+
+    let mut headers = http::HeaderMap::new();
+    if let Ok(value) = http::HeaderValue::from_str(&session_id) {
+        headers.insert("x-amzn-bedrock-knowledge-base-session-id", value);
+    }
+    Ok(AwsResponse {
+        status: StatusCode::OK,
+        content_type: "application/vnd.amazon.eventstream".to_string(),
+        body: fakecloud_core::service::ResponseBody::Bytes(frame.into()),
+        headers,
+    })
 }
 
 // ── Session handlers ────────────────────────────────────────────────
@@ -714,27 +1110,67 @@ async fn handle_create_session(
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let session_id = req_str(body, "sessionId").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // encryptionKeyArn length 1..2048 if present
+    let enc_key = req_str(body, "encryptionKeyArn");
+    validate_str(
+        enc_key.as_deref(),
+        "encryptionKeyArn",
+        None,
+        Some(1),
+        Some(2048),
+        false,
+    )?;
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    // Force into UUID format
     let now = Utc::now();
+    let arn = session_arn(&req.account_id, &req.region, &session_id);
+
+    let metadata: std::collections::BTreeMap<String, String> = body
+        .get("sessionMetadata")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
 
     {
         let mut accts = svc.state.write();
         let s = accts.get_or_create(&req.account_id);
         s.sessions.insert(
             session_id.clone(),
-            crate::state::Session {
+            Session {
                 session_id: session_id.clone(),
+                session_arn: arn.clone(),
+                status: "ACTIVE".to_string(),
                 created_at: now,
                 updated_at: now,
+                metadata,
+                encryption_key_arn: enc_key,
             },
         );
     }
 
-    let response = json!({
+    Ok(AwsResponse::ok_json(json!({
         "sessionId": session_id,
+        "sessionArn": arn,
+        "sessionStatus": "ACTIVE",
         "createdAt": now.to_rfc3339(),
-    });
-    Ok(AwsResponse::ok_json(response))
+    })))
+}
+
+fn resolve_session_id<'a>(
+    state: &'a crate::state::BedrockAgentRuntimeState,
+    ident: &str,
+) -> Option<&'a Session> {
+    // identifier may be session ARN or UUID
+    if let Some(s) = state.sessions.get(ident) {
+        return Some(s);
+    }
+    // try to find by ARN
+    state.sessions.values().find(|s| s.session_arn == ident)
 }
 
 async fn handle_delete_session(
@@ -742,20 +1178,36 @@ async fn handle_delete_session(
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let session_id = req_str(body, "sessionId").ok_or_else(|| {
-        make_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "sessionId is required",
-        )
-    })?;
-
-    {
-        let mut accts = svc.state.write();
-        let s = accts.get_or_create(&req.account_id);
-        s.sessions.remove(&session_id);
+    let session_ident = req_str(body, "sessionIdentifier");
+    validate_str(
+        session_ident.as_deref(),
+        "sessionIdentifier",
+        Some(&re_session_identifier()),
+        None,
+        None,
+        true,
+    )?;
+    let ident = session_ident.unwrap();
+    let mut accts = svc.state.write();
+    let s = accts.get_or_create(&req.account_id);
+    // Find key
+    let key = if s.sessions.contains_key(&ident) {
+        Some(ident.clone())
+    } else {
+        s.sessions
+            .iter()
+            .find(|(_, v)| v.session_arn == ident)
+            .map(|(k, _)| k.clone())
+    };
+    if let Some(k) = key {
+        s.sessions.remove(&k);
+    } else {
+        return Err(make_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            "Session not found",
+        ));
     }
-
     Ok(AwsResponse::ok_json(json!({})))
 }
 
@@ -764,23 +1216,47 @@ async fn handle_end_session(
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let session_id = req_str(body, "sessionId").ok_or_else(|| {
+    let session_ident = req_str(body, "sessionIdentifier");
+    validate_str(
+        session_ident.as_deref(),
+        "sessionIdentifier",
+        Some(&re_session_identifier()),
+        None,
+        None,
+        true,
+    )?;
+    let ident = session_ident.unwrap();
+    let now = Utc::now();
+    let mut accts = svc.state.write();
+    let s = accts.get_or_create(&req.account_id);
+    let key = if s.sessions.contains_key(&ident) {
+        Some(ident.clone())
+    } else {
+        s.sessions
+            .iter()
+            .find(|(_, v)| v.session_arn == ident)
+            .map(|(k, _)| k.clone())
+    };
+    let key = key.ok_or_else(|| {
         make_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "sessionId is required",
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            "Session not found",
         )
     })?;
-
-    {
-        let mut accts = svc.state.write();
-        let s = accts.get_or_create(&req.account_id);
-        if let Some(session) = s.sessions.get_mut(&session_id) {
-            session.updated_at = Utc::now();
-        }
-    }
-
-    Ok(AwsResponse::ok_json(json!({})))
+    let session = s.sessions.get_mut(&key).unwrap();
+    session.status = "ENDED".to_string();
+    session.updated_at = now;
+    let (sid, arn, status) = (
+        session.session_id.clone(),
+        session.session_arn.clone(),
+        session.status.clone(),
+    );
+    Ok(AwsResponse::ok_json(json!({
+        "sessionId": sid,
+        "sessionArn": arn,
+        "sessionStatus": status,
+    })))
 }
 
 async fn handle_get_session(
@@ -788,23 +1264,26 @@ async fn handle_get_session(
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let session_id = req_str(body, "sessionId").ok_or_else(|| {
-        make_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "sessionId is required",
-        )
-    })?;
+    let session_ident = req_str(body, "sessionIdentifier");
+    validate_str(
+        session_ident.as_deref(),
+        "sessionIdentifier",
+        Some(&re_session_identifier()),
+        None,
+        None,
+        true,
+    )?;
+    let ident = session_ident.unwrap();
 
     let accts = svc.state.read();
     let s = accts.accounts.get(&req.account_id).ok_or_else(|| {
         make_error(
             StatusCode::NOT_FOUND,
             "ResourceNotFoundException",
-            "Account not found",
+            "Session not found",
         )
     })?;
-    let session = s.sessions.get(&session_id).ok_or_else(|| {
+    let session = resolve_session_id(s, &ident).ok_or_else(|| {
         make_error(
             StatusCode::NOT_FOUND,
             "ResourceNotFoundException",
@@ -812,22 +1291,28 @@ async fn handle_get_session(
         )
     })?;
 
-    let response = json!({
+    Ok(AwsResponse::ok_json(json!({
         "sessionId": session.session_id,
+        "sessionArn": session.session_arn,
+        "sessionStatus": session.status,
         "createdAt": session.created_at.to_rfc3339(),
-        "updatedAt": session.updated_at.to_rfc3339(),
-    });
-    Ok(AwsResponse::ok_json(response))
+        "lastUpdatedAt": session.updated_at.to_rfc3339(),
+        "sessionMetadata": session.metadata.clone(),
+        "encryptionKeyArn": session.encryption_key_arn,
+    })))
 }
 
 async fn handle_list_sessions(
     svc: &BedrockAgentRuntimeService,
     req: &AwsRequest,
-    _body: &Value,
+    body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
+    validate_int_range(extract_int(req, body, "maxResults"), "maxResults", 1, 1000)?;
+    validate_next_token(req, body)?;
     let accts = svc.state.read();
-    let s = accts.accounts.get(&req.account_id);
-    let sessions: Vec<Value> = s
+    let summaries: Vec<Value> = accts
+        .accounts
+        .get(&req.account_id)
         .map(|state| {
             state
                 .sessions
@@ -835,16 +1320,19 @@ async fn handle_list_sessions(
                 .map(|sess| {
                     json!({
                         "sessionId": sess.session_id,
+                        "sessionArn": sess.session_arn,
+                        "sessionStatus": sess.status,
                         "createdAt": sess.created_at.to_rfc3339(),
-                        "updatedAt": sess.updated_at.to_rfc3339(),
+                        "lastUpdatedAt": sess.updated_at.to_rfc3339(),
                     })
                 })
                 .collect()
         })
         .unwrap_or_default();
 
-    let response = json!({ "sessions": sessions });
-    Ok(AwsResponse::ok_json(response))
+    Ok(AwsResponse::ok_json(
+        json!({ "sessionSummaries": summaries }),
+    ))
 }
 
 async fn handle_update_session(
@@ -852,23 +1340,51 @@ async fn handle_update_session(
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let session_id = req_str(body, "sessionId").ok_or_else(|| {
+    let session_ident = req_str(body, "sessionIdentifier");
+    validate_str(
+        session_ident.as_deref(),
+        "sessionIdentifier",
+        Some(&re_session_identifier()),
+        None,
+        None,
+        true,
+    )?;
+    let ident = session_ident.unwrap();
+
+    let now = Utc::now();
+    let mut accts = svc.state.write();
+    let s = accts.get_or_create(&req.account_id);
+    let key = if s.sessions.contains_key(&ident) {
+        Some(ident.clone())
+    } else {
+        s.sessions
+            .iter()
+            .find(|(_, v)| v.session_arn == ident)
+            .map(|(k, _)| k.clone())
+    };
+    let key = key.ok_or_else(|| {
         make_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "sessionId is required",
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            "Session not found",
         )
     })?;
-
-    {
-        let mut accts = svc.state.write();
-        let s = accts.get_or_create(&req.account_id);
-        if let Some(session) = s.sessions.get_mut(&session_id) {
-            session.updated_at = Utc::now();
-        }
+    let session = s.sessions.get_mut(&key).unwrap();
+    if let Some(meta) = body.get("sessionMetadata").and_then(|v| v.as_object()) {
+        session.metadata = meta
+            .iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect();
     }
+    session.updated_at = now;
 
-    Ok(AwsResponse::ok_json(json!({})))
+    Ok(AwsResponse::ok_json(json!({
+        "sessionId": session.session_id,
+        "sessionArn": session.session_arn,
+        "sessionStatus": session.status,
+        "createdAt": session.created_at.to_rfc3339(),
+        "lastUpdatedAt": session.updated_at.to_rfc3339(),
+    })))
 }
 
 // ── Invocation handlers ─────────────────────────────────────────────
@@ -878,105 +1394,318 @@ async fn handle_create_invocation(
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let invocation_id =
-        req_str(body, "invocationId").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-    {
-        let mut accts = svc.state.write();
-        let s = accts.get_or_create(&req.account_id);
-        s.invocations.push(InvocationRecord {
-            invocation_id: invocation_id.clone(),
-            op: "create_invocation".to_string(),
-            agent_id: req_str(body, "agentId"),
-            flow_id: None,
-            session_id: req_str(body, "sessionId"),
-            input: req_str(body, "input").unwrap_or_default(),
-            output: String::new(),
-            output_chunks: 0,
-            trace: None,
-            citations: Vec::new(),
-            timestamp: Utc::now(),
-            duration_ms: 0,
-        });
+    let session_ident = req_str(body, "sessionIdentifier");
+    validate_str(
+        session_ident.as_deref(),
+        "sessionIdentifier",
+        Some(&re_session_identifier()),
+        None,
+        None,
+        true,
+    )?;
+    // description optional with min=1, max=200
+    let description = req_str(body, "description");
+    validate_str(
+        description.as_deref(),
+        "description",
+        None,
+        Some(1),
+        Some(200),
+        false,
+    )?;
+    // invocationId optional, but if provided must be UUID
+    let invocation_id_opt = req_str(body, "invocationId");
+    if let Some(ref id) = invocation_id_opt {
+        if !re_uuid().is_match(id) {
+            return Err(validation("invocationId must be UUID"));
+        }
     }
+    let ident = session_ident.unwrap();
+    let invocation_id = invocation_id_opt.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let now = Utc::now();
 
-    let response = json!({ "invocationId": invocation_id });
-    Ok(AwsResponse::ok_json(response))
-}
-
-async fn handle_get_invocation_step(
-    _svc: &BedrockAgentRuntimeService,
-    _req: &AwsRequest,
-    body: &Value,
-) -> Result<AwsResponse, AwsServiceError> {
-    let step_id = req_str(body, "stepId").ok_or_else(|| {
+    let mut accts = svc.state.write();
+    let s = accts.get_or_create(&req.account_id);
+    let session_key = if s.sessions.contains_key(&ident) {
+        Some(ident.clone())
+    } else {
+        s.sessions
+            .iter()
+            .find(|(_, v)| v.session_arn == ident)
+            .map(|(k, _)| k.clone())
+    };
+    let session_id = session_key.ok_or_else(|| {
         make_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "stepId is required",
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            "Session not found",
         )
     })?;
 
-    let response = json!({
-        "stepId": step_id,
-        "stepType": "ACTION_GROUP",
-        "status": "COMPLETED",
-        "createdAt": Utc::now().to_rfc3339(),
-        "updatedAt": Utc::now().to_rfc3339(),
-    });
-    Ok(AwsResponse::ok_json(response))
+    s.session_invocations
+        .entry(session_id.clone())
+        .or_default()
+        .push(SessionInvocation {
+            invocation_id: invocation_id.clone(),
+            session_id: session_id.clone(),
+            description,
+            created_at: now,
+        });
+
+    Ok(AwsResponse::ok_json(json!({
+        "sessionId": session_id,
+        "invocationId": invocation_id,
+        "createdAt": now.to_rfc3339(),
+    })))
+}
+
+async fn handle_get_invocation_step(
+    svc: &BedrockAgentRuntimeService,
+    req: &AwsRequest,
+    body: &Value,
+) -> Result<AwsResponse, AwsServiceError> {
+    let session_ident = req_str(body, "sessionIdentifier");
+    validate_str(
+        session_ident.as_deref(),
+        "sessionIdentifier",
+        Some(&re_session_identifier()),
+        None,
+        None,
+        true,
+    )?;
+    let step_id = req_str(body, "invocationStepId");
+    validate_str(
+        step_id.as_deref(),
+        "invocationStepId",
+        Some(&re_uuid()),
+        None,
+        None,
+        true,
+    )?;
+    let invocation_id = req_str(body, "invocationIdentifier");
+    validate_str(
+        invocation_id.as_deref(),
+        "invocationIdentifier",
+        Some(&re_uuid()),
+        None,
+        None,
+        true,
+    )?;
+
+    let step_id = step_id.unwrap();
+    let accts = svc.state.read();
+    let s = accts.accounts.get(&req.account_id).ok_or_else(|| {
+        make_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            "Invocation step not found",
+        )
+    })?;
+    let step = s.invocation_steps.get(&step_id).ok_or_else(|| {
+        make_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            "Invocation step not found",
+        )
+    })?;
+
+    Ok(AwsResponse::ok_json(json!({
+        "invocationStep": {
+            "sessionId": step.session_id,
+            "invocationId": step.invocation_id,
+            "invocationStepId": step.invocation_step_id,
+            "invocationStepTime": step.invocation_step_time.to_rfc3339(),
+            "payload": step.payload,
+        }
+    })))
 }
 
 async fn handle_list_invocation_steps(
-    _svc: &BedrockAgentRuntimeService,
-    _req: &AwsRequest,
-    _body: &Value,
+    svc: &BedrockAgentRuntimeService,
+    req: &AwsRequest,
+    body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let response = json!({ "invocationSteps": [] });
-    Ok(AwsResponse::ok_json(response))
+    let session_ident = req_str(body, "sessionIdentifier");
+    validate_str(
+        session_ident.as_deref(),
+        "sessionIdentifier",
+        Some(&re_session_identifier()),
+        None,
+        None,
+        true,
+    )?;
+    let ident = session_ident.unwrap();
+    let invocation_filter = req_str(body, "invocationIdentifier");
+
+    let accts = svc.state.read();
+    let s = match accts.accounts.get(&req.account_id) {
+        Some(s) => s,
+        None => {
+            return Ok(AwsResponse::ok_json(json!({
+                "invocationStepSummaries": []
+            })));
+        }
+    };
+    let session = resolve_session_id(s, &ident);
+    let session_id = match session {
+        Some(s) => s.session_id.as_str(),
+        None => {
+            return Ok(AwsResponse::ok_json(json!({
+                "invocationStepSummaries": []
+            })));
+        }
+    };
+
+    let summaries: Vec<Value> = s
+        .invocation_steps
+        .values()
+        .filter(|step| {
+            step.session_id == session_id
+                && invocation_filter
+                    .as_ref()
+                    .map(|f| step.invocation_id == *f)
+                    .unwrap_or(true)
+        })
+        .map(|step| {
+            json!({
+                "sessionId": step.session_id,
+                "invocationId": step.invocation_id,
+                "invocationStepId": step.invocation_step_id,
+                "invocationStepTime": step.invocation_step_time.to_rfc3339(),
+            })
+        })
+        .collect();
+
+    Ok(AwsResponse::ok_json(json!({
+        "invocationStepSummaries": summaries
+    })))
 }
 
 async fn handle_list_invocations(
     svc: &BedrockAgentRuntimeService,
     req: &AwsRequest,
-    _body: &Value,
+    body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let session_ident = req_str(body, "sessionIdentifier");
+    validate_str(
+        session_ident.as_deref(),
+        "sessionIdentifier",
+        Some(&re_session_identifier()),
+        None,
+        None,
+        true,
+    )?;
+    let ident = session_ident.unwrap();
+
     let accts = svc.state.read();
-    let s = accts.accounts.get(&req.account_id);
-    let invocations: Vec<Value> = s
-        .map(|state| {
-            state
-                .invocations
-                .iter()
+    let s = match accts.accounts.get(&req.account_id) {
+        Some(s) => s,
+        None => return Ok(AwsResponse::ok_json(json!({ "invocationSummaries": [] }))),
+    };
+    let session = match resolve_session_id(s, &ident) {
+        Some(s) => s,
+        None => return Ok(AwsResponse::ok_json(json!({ "invocationSummaries": [] }))),
+    };
+
+    let summaries: Vec<Value> = s
+        .session_invocations
+        .get(&session.session_id)
+        .map(|list| {
+            list.iter()
                 .map(|inv| {
                     json!({
+                        "sessionId": inv.session_id,
                         "invocationId": inv.invocation_id,
-                        "agentId": inv.agent_id,
-                        "createdAt": inv.timestamp.to_rfc3339(),
+                        "createdAt": inv.created_at.to_rfc3339(),
                     })
                 })
                 .collect()
         })
         .unwrap_or_default();
 
-    let response = json!({ "invocations": invocations });
-    Ok(AwsResponse::ok_json(response))
+    Ok(AwsResponse::ok_json(json!({
+        "invocationSummaries": summaries
+    })))
 }
 
 async fn handle_put_invocation_step(
-    _svc: &BedrockAgentRuntimeService,
-    _req: &AwsRequest,
+    svc: &BedrockAgentRuntimeService,
+    req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let step_id = req_str(body, "stepId").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let session_ident = req_str(body, "sessionIdentifier");
+    validate_str(
+        session_ident.as_deref(),
+        "sessionIdentifier",
+        Some(&re_session_identifier()),
+        None,
+        None,
+        true,
+    )?;
+    let invocation_id = req_str(body, "invocationIdentifier");
+    validate_str(
+        invocation_id.as_deref(),
+        "invocationIdentifier",
+        Some(&re_uuid()),
+        None,
+        None,
+        true,
+    )?;
+    if body.get("invocationStepTime").is_none() {
+        return Err(validation("invocationStepTime is required"));
+    }
+    if body.get("payload").is_none() {
+        return Err(validation("payload is required"));
+    }
 
-    let response = json!({
-        "stepId": step_id,
-        "status": "COMPLETED",
-        "createdAt": Utc::now().to_rfc3339(),
-        "updatedAt": Utc::now().to_rfc3339(),
-    });
-    Ok(AwsResponse::ok_json(response))
+    let session_ident = session_ident.unwrap();
+    let invocation_id = invocation_id.unwrap();
+    let step_id =
+        req_str(body, "invocationStepId").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    if !re_uuid().is_match(&step_id) {
+        return Err(validation("invocationStepId must be UUID"));
+    }
+    let step_time = body
+        .get("invocationStepTime")
+        .cloned()
+        .unwrap_or(Value::String(Utc::now().to_rfc3339()));
+    let parsed_time = step_time
+        .as_str()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&Utc))
+        .unwrap_or_else(Utc::now);
+    let payload = body.get("payload").cloned().unwrap_or(Value::Null);
+
+    let mut accts = svc.state.write();
+    let s = accts.get_or_create(&req.account_id);
+    let session_id = if s.sessions.contains_key(&session_ident) {
+        session_ident.clone()
+    } else {
+        s.sessions
+            .iter()
+            .find(|(_, v)| v.session_arn == session_ident)
+            .map(|(k, _)| k.clone())
+            .ok_or_else(|| {
+                make_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFoundException",
+                    "Session not found",
+                )
+            })?
+    };
+
+    s.invocation_steps.insert(
+        step_id.clone(),
+        InvocationStep {
+            session_id: session_id.clone(),
+            invocation_id: invocation_id.clone(),
+            invocation_step_id: step_id.clone(),
+            invocation_step_time: parsed_time,
+            payload,
+        },
+    );
+
+    Ok(AwsResponse::ok_json(json!({ "invocationStepId": step_id })))
 }
 
 // ── Flow execution handlers ─────────────────────────────────────────
@@ -986,84 +1715,173 @@ async fn handle_get_flow_execution(
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let execution_id = req_str(body, "executionId").ok_or_else(|| {
-        make_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "executionId is required",
-        )
-    })?;
+    let flow_id = req_str(body, "flowIdentifier");
+    let flow_alias_id = req_str(body, "flowAliasIdentifier");
+    let exec_id = req_str(body, "executionIdentifier");
+    validate_str(
+        flow_id.as_deref(),
+        "flowIdentifier",
+        Some(&re_flow_identifier()),
+        Some(1),
+        Some(2048),
+        true,
+    )?;
+    validate_str(
+        flow_alias_id.as_deref(),
+        "flowAliasIdentifier",
+        Some(&re_flow_alias_identifier()),
+        Some(1),
+        Some(2048),
+        true,
+    )?;
+    validate_str(
+        exec_id.as_deref(),
+        "executionIdentifier",
+        Some(&re_flow_execution_id()),
+        None,
+        Some(2048),
+        true,
+    )?;
 
+    let exec_id = exec_id.unwrap();
     let accts = svc.state.read();
     let s = accts.accounts.get(&req.account_id).ok_or_else(|| {
-        make_error(
-            StatusCode::NOT_FOUND,
-            "ResourceNotFoundException",
-            "Account not found",
-        )
-    })?;
-    let exec = s.flow_executions.get(&execution_id).ok_or_else(|| {
         make_error(
             StatusCode::NOT_FOUND,
             "ResourceNotFoundException",
             "Flow execution not found",
         )
     })?;
+    // Match by execution_id or ARN
+    let exec = s
+        .flow_executions
+        .values()
+        .find(|e| e.execution_id == exec_id || e.execution_arn == exec_id)
+        .ok_or_else(|| {
+            make_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                "Flow execution not found",
+            )
+        })?;
 
-    let response = json!({
-        "executionId": exec.execution_id,
-        "flowId": exec.flow_id,
+    Ok(AwsResponse::ok_json(json!({
+        "executionArn": exec.execution_arn,
+        "flowIdentifier": exec.flow_id,
+        "flowAliasIdentifier": exec.flow_alias_id,
+        "flowVersion": exec.flow_version,
         "status": exec.status,
-        "createdAt": exec.created_at.to_rfc3339(),
-        "updatedAt": exec.updated_at.to_rfc3339(),
-    });
-    Ok(AwsResponse::ok_json(response))
+        "startedAt": exec.created_at.to_rfc3339(),
+        "endedAt": exec.ended_at.map(|d| d.to_rfc3339()),
+    })))
 }
 
 async fn handle_list_flow_execution_events(
     _svc: &BedrockAgentRuntimeService,
-    _req: &AwsRequest,
+    req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let _execution_id = req_str(body, "executionId").ok_or_else(|| {
-        make_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "executionId is required",
-        )
-    })?;
+    let flow_id = req_str(body, "flowIdentifier");
+    let flow_alias_id = req_str(body, "flowAliasIdentifier");
+    let exec_id = req_str(body, "executionIdentifier");
+    validate_str(
+        flow_id.as_deref(),
+        "flowIdentifier",
+        Some(&re_flow_identifier()),
+        Some(1),
+        Some(2048),
+        true,
+    )?;
+    validate_str(
+        flow_alias_id.as_deref(),
+        "flowAliasIdentifier",
+        Some(&re_flow_alias_identifier()),
+        Some(1),
+        Some(2048),
+        true,
+    )?;
+    validate_str(
+        exec_id.as_deref(),
+        "executionIdentifier",
+        Some(&re_flow_execution_id()),
+        None,
+        Some(2048),
+        true,
+    )?;
+    // eventType is required (httpQuery)
+    let event_type = req
+        .query_params
+        .get("eventType")
+        .cloned()
+        .or_else(|| req_str(body, "eventType"));
+    let event_type = event_type.ok_or_else(|| validation("eventType is required"))?;
+    if event_type != "Node" && event_type != "Flow" {
+        return Err(validation("eventType must be Node or Flow"));
+    }
+    validate_int_range(extract_int(req, body, "maxResults"), "maxResults", 1, 1000)?;
+    validate_next_token(req, body)?;
 
-    let response = json!({ "events": [] });
-    Ok(AwsResponse::ok_json(response))
+    Ok(AwsResponse::ok_json(json!({
+        "flowExecutionEvents": []
+    })))
 }
 
 async fn handle_list_flow_executions(
     svc: &BedrockAgentRuntimeService,
     req: &AwsRequest,
-    _body: &Value,
+    body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let flow_id = req_str(body, "flowIdentifier");
+    validate_str(
+        flow_id.as_deref(),
+        "flowIdentifier",
+        Some(&re_flow_identifier()),
+        Some(1),
+        Some(2048),
+        true,
+    )?;
+    let alias = req.query_params.get("flowAliasIdentifier").cloned();
+    if let Some(ref a) = alias {
+        validate_str(
+            Some(a),
+            "flowAliasIdentifier",
+            Some(&re_flow_alias_identifier()),
+            Some(1),
+            Some(2048),
+            false,
+        )?;
+    }
+    validate_int_range(extract_int(req, body, "maxResults"), "maxResults", 1, 1000)?;
+    validate_next_token(req, body)?;
+    let flow_id = flow_id.unwrap();
+
     let accts = svc.state.read();
-    let s = accts.accounts.get(&req.account_id);
-    let executions: Vec<Value> = s
+    let summaries: Vec<Value> = accts
+        .accounts
+        .get(&req.account_id)
         .map(|state| {
             state
                 .flow_executions
                 .values()
-                .map(|exec| {
+                .filter(|e| e.flow_id == flow_id)
+                .map(|e| {
                     json!({
-                        "executionId": exec.execution_id,
-                        "flowId": exec.flow_id,
-                        "status": exec.status,
-                        "createdAt": exec.created_at.to_rfc3339(),
-                        "updatedAt": exec.updated_at.to_rfc3339(),
+                        "executionArn": e.execution_arn,
+                        "flowIdentifier": e.flow_id,
+                        "flowAliasIdentifier": e.flow_alias_id,
+                        "flowVersion": e.flow_version,
+                        "status": e.status,
+                        "createdAt": e.created_at.to_rfc3339(),
+                        "endedAt": e.ended_at.map(|d| d.to_rfc3339()),
                     })
                 })
                 .collect()
         })
         .unwrap_or_default();
 
-    let response = json!({ "executions": executions });
-    Ok(AwsResponse::ok_json(response))
+    Ok(AwsResponse::ok_json(json!({
+        "flowExecutionSummaries": summaries
+    })))
 }
 
 async fn handle_start_flow_execution(
@@ -1071,8 +1889,43 @@ async fn handle_start_flow_execution(
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let flow_id = req_str(body, "flowId").unwrap_or_default();
+    let flow_id = req_str(body, "flowIdentifier");
+    let flow_alias_id = req_str(body, "flowAliasIdentifier");
+    validate_str(
+        flow_id.as_deref(),
+        "flowIdentifier",
+        Some(&re_flow_identifier()),
+        Some(1),
+        Some(2048),
+        true,
+    )?;
+    validate_str(
+        flow_alias_id.as_deref(),
+        "flowAliasIdentifier",
+        Some(&re_flow_alias_identifier()),
+        Some(1),
+        Some(2048),
+        true,
+    )?;
+    if body.get("inputs").is_none() {
+        return Err(validation("inputs is required"));
+    }
+    let exec_name = req_str(body, "flowExecutionName");
+    if let Some(ref n) = exec_name {
+        validate_str(
+            Some(n),
+            "flowExecutionName",
+            Some(&re_flow_execution_name()),
+            Some(1),
+            Some(36),
+            false,
+        )?;
+    }
+
+    let flow_id = flow_id.unwrap();
+    let flow_alias_id = flow_alias_id.unwrap();
     let execution_id = uuid::Uuid::new_v4().to_string();
+    let arn = flow_execution_arn(&req.account_id, &req.region, &flow_id, &execution_id);
     let now = Utc::now();
 
     {
@@ -1080,22 +1933,21 @@ async fn handle_start_flow_execution(
         let s = accts.get_or_create(&req.account_id);
         s.flow_executions.insert(
             execution_id.clone(),
-            crate::state::FlowExecution {
+            FlowExecution {
                 execution_id: execution_id.clone(),
+                execution_arn: arn.clone(),
                 flow_id: flow_id.clone(),
-                status: "IN_PROGRESS".to_string(),
+                flow_alias_id,
+                flow_version: "DRAFT".to_string(),
+                status: "InProgress".to_string(),
                 created_at: now,
                 updated_at: now,
+                ended_at: None,
             },
         );
     }
 
-    let response = json!({
-        "executionId": execution_id,
-        "status": "IN_PROGRESS",
-        "createdAt": now.to_rfc3339(),
-    });
-    Ok(AwsResponse::ok_json(response))
+    Ok(AwsResponse::ok_json(json!({ "executionArn": arn })))
 }
 
 async fn handle_stop_flow_execution(
@@ -1103,72 +1955,170 @@ async fn handle_stop_flow_execution(
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let execution_id = req_str(body, "executionId").ok_or_else(|| {
-        make_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "executionId is required",
+    let flow_id = req_str(body, "flowIdentifier");
+    let flow_alias_id = req_str(body, "flowAliasIdentifier");
+    let exec_id = req_str(body, "executionIdentifier");
+    validate_str(
+        flow_id.as_deref(),
+        "flowIdentifier",
+        Some(&re_flow_identifier()),
+        Some(1),
+        Some(2048),
+        true,
+    )?;
+    validate_str(
+        flow_alias_id.as_deref(),
+        "flowAliasIdentifier",
+        Some(&re_flow_alias_identifier()),
+        Some(1),
+        Some(2048),
+        true,
+    )?;
+    validate_str(
+        exec_id.as_deref(),
+        "executionIdentifier",
+        Some(&re_flow_execution_id()),
+        None,
+        Some(2048),
+        true,
+    )?;
+    let exec_id = exec_id.unwrap();
+
+    let now = Utc::now();
+    let mut accts = svc.state.write();
+    let s = accts.get_or_create(&req.account_id);
+    let key = s
+        .flow_executions
+        .iter()
+        .find(|(_, e)| e.execution_id == exec_id || e.execution_arn == exec_id)
+        .map(|(k, _)| k.clone());
+    let (arn, status) = if let Some(k) = key {
+        let e = s.flow_executions.get_mut(&k).unwrap();
+        e.status = "Aborted".to_string();
+        e.updated_at = now;
+        e.ended_at = Some(now);
+        (e.execution_arn.clone(), e.status.clone())
+    } else {
+        // Allow stop on unknown execution: still return Aborted with synthetic ARN
+        (
+            flow_execution_arn(&req.account_id, &req.region, "unknown", &exec_id),
+            "Aborted".to_string(),
         )
-    })?;
+    };
 
-    {
-        let mut accts = svc.state.write();
-        let s = accts.get_or_create(&req.account_id);
-        if let Some(exec) = s.flow_executions.get_mut(&execution_id) {
-            exec.status = "STOPPED".to_string();
-            exec.updated_at = Utc::now();
-        }
-    }
-
-    let response = json!({ "executionId": execution_id });
-    Ok(AwsResponse::ok_json(response))
+    Ok(AwsResponse::ok_json(json!({
+        "executionArn": arn,
+        "status": status,
+    })))
 }
 
 async fn handle_get_execution_flow_snapshot(
     _svc: &BedrockAgentRuntimeService,
-    _req: &AwsRequest,
+    req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let execution_id = req_str(body, "executionId").ok_or_else(|| {
-        make_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "executionId is required",
-        )
-    })?;
+    let flow_id = req_str(body, "flowIdentifier");
+    let flow_alias_id = req_str(body, "flowAliasIdentifier");
+    let exec_id = req_str(body, "executionIdentifier");
+    validate_str(
+        flow_id.as_deref(),
+        "flowIdentifier",
+        Some(&re_flow_identifier()),
+        Some(1),
+        Some(2048),
+        true,
+    )?;
+    validate_str(
+        flow_alias_id.as_deref(),
+        "flowAliasIdentifier",
+        Some(&re_flow_alias_identifier()),
+        Some(1),
+        Some(2048),
+        true,
+    )?;
+    validate_str(
+        exec_id.as_deref(),
+        "executionIdentifier",
+        Some(&re_flow_execution_id()),
+        None,
+        Some(2048),
+        true,
+    )?;
 
-    let response = json!({
-        "executionId": execution_id,
-        "snapshot": {}
-    });
-    Ok(AwsResponse::ok_json(response))
+    let flow_id = flow_id.unwrap();
+    let flow_alias_id = flow_alias_id.unwrap();
+
+    let role_arn = format!(
+        "arn:aws:iam::{}:role/service-role/AmazonBedrockExecutionRoleForFlow_{}",
+        req.account_id, flow_id
+    );
+
+    let definition = serde_json::to_string(&json!({
+        "nodes": [
+            {
+                "name": "Start",
+                "type": "Input",
+                "configuration": { "input": {} }
+            }
+        ],
+        "connections": []
+    }))
+    .unwrap();
+
+    Ok(AwsResponse::ok_json(json!({
+        "flowIdentifier": flow_id,
+        "flowAliasIdentifier": flow_alias_id,
+        "flowVersion": "DRAFT",
+        "executionRoleArn": role_arn,
+        "definition": definition,
+    })))
 }
 
-// ── Other handlers ────────────────────────────────────────────────────
+// ── Other handlers ──────────────────────────────────────────────────
 
 async fn handle_generate_query(
     _svc: &BedrockAgentRuntimeService,
     _req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let input = req_str(body, "input").unwrap_or_default();
+    if body.get("queryGenerationInput").is_none() {
+        return Err(validation("queryGenerationInput is required"));
+    }
+    if body.get("transformationConfiguration").is_none() {
+        return Err(validation("transformationConfiguration is required"));
+    }
+    let input_text = body
+        .get("queryGenerationInput")
+        .and_then(|i| i.get("text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
-    let response = json!({
+    Ok(AwsResponse::ok_json(json!({
         "queries": [
             {
-                "type": "RETRIEVAL_QUERY",
-                "query": input,
+                "type": "REDSHIFT_SQL",
+                "sql": format!("SELECT 1 -- {}", input_text),
             }
         ]
-    });
-    Ok(AwsResponse::ok_json(response))
+    })))
 }
 
 async fn handle_rerank(
     _svc: &BedrockAgentRuntimeService,
-    _req: &AwsRequest,
+    req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
+    if body.get("queries").is_none() {
+        return Err(validation("queries is required"));
+    }
+    if body.get("sources").is_none() {
+        return Err(validation("sources is required"));
+    }
+    if body.get("rerankingConfiguration").is_none() {
+        return Err(validation("rerankingConfiguration is required"));
+    }
+    validate_next_token(req, body)?;
     let sources = body
         .get("sources")
         .and_then(|s| s.as_array())
@@ -1178,113 +2128,230 @@ async fn handle_rerank(
     let results: Vec<Value> = sources
         .iter()
         .enumerate()
-        .map(|(i, _source)| {
+        .map(|(i, _)| {
             json!({
                 "index": i,
-                "relevanceScore": 0.9 - (i as f64 * 0.1),
+                "relevanceScore": (0.9_f64 - (i as f64 * 0.1)).max(0.0),
             })
         })
         .collect();
 
-    let response = json!({ "results": results });
-    Ok(AwsResponse::ok_json(response))
+    Ok(AwsResponse::ok_json(json!({ "results": results })))
 }
 
 async fn handle_delete_agent_memory(
     _svc: &BedrockAgentRuntimeService,
-    _req: &AwsRequest,
+    req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let _agent_id = req_str(body, "agentId").ok_or_else(|| {
-        make_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "agentId is required",
-        )
-    })?;
+    let agent_id = req_str(body, "agentId");
+    let agent_alias_id = req_str(body, "agentAliasId");
+    validate_str(
+        agent_id.as_deref(),
+        "agentId",
+        Some(&re_agent_id()),
+        Some(1),
+        Some(10),
+        true,
+    )?;
+    validate_str(
+        agent_alias_id.as_deref(),
+        "agentAliasId",
+        Some(&re_agent_id()),
+        Some(1),
+        Some(10),
+        true,
+    )?;
+    let memory_id = req
+        .query_params
+        .get("memoryId")
+        .cloned()
+        .or_else(|| req_str(body, "memoryId"));
+    let session_id = req
+        .query_params
+        .get("sessionId")
+        .cloned()
+        .or_else(|| req_str(body, "sessionId"));
+    if let Some(ref m) = memory_id {
+        validate_str(
+            Some(m),
+            "memoryId",
+            Some(&re_memory_id()),
+            Some(2),
+            Some(100),
+            false,
+        )?;
+    }
+    if let Some(ref s) = session_id {
+        validate_str(
+            Some(s),
+            "sessionId",
+            Some(&re_session_id()),
+            Some(2),
+            Some(100),
+            false,
+        )?;
+    }
 
     Ok(AwsResponse::ok_json(json!({})))
 }
 
 async fn handle_get_agent_memory(
     _svc: &BedrockAgentRuntimeService,
-    _req: &AwsRequest,
+    req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let agent_id = req_str(body, "agentId").ok_or_else(|| {
-        make_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "agentId is required",
-        )
-    })?;
+    let agent_id = req_str(body, "agentId");
+    let agent_alias_id = req_str(body, "agentAliasId");
+    validate_str(
+        agent_id.as_deref(),
+        "agentId",
+        Some(&re_agent_id()),
+        Some(1),
+        Some(10),
+        true,
+    )?;
+    validate_str(
+        agent_alias_id.as_deref(),
+        "agentAliasId",
+        Some(&re_agent_id()),
+        Some(1),
+        Some(10),
+        true,
+    )?;
+    let memory_type = req.query_params.get("memoryType").cloned();
+    let memory_type = memory_type.ok_or_else(|| validation("memoryType is required"))?;
+    if memory_type != "SESSION_SUMMARY" {
+        return Err(validation("memoryType must be SESSION_SUMMARY"));
+    }
+    validate_int_range(extract_int(req, body, "maxItems"), "maxItems", 1, 1000)?;
+    validate_next_token(req, body)?;
+    let memory_id = req.query_params.get("memoryId").cloned();
+    if memory_id.is_none() {
+        return Err(validation("memoryId is required"));
+    }
+    let memory_id = memory_id.unwrap();
+    validate_str(
+        Some(&memory_id),
+        "memoryId",
+        Some(&re_memory_id()),
+        Some(2),
+        Some(100),
+        true,
+    )?;
 
-    let response = json!({
-        "memoryId": uuid::Uuid::new_v4().to_string(),
-        "agentId": agent_id,
+    Ok(AwsResponse::ok_json(json!({
         "memoryContents": []
-    });
-    Ok(AwsResponse::ok_json(response))
+    })))
 }
 
 // ── Tagging handlers ────────────────────────────────────────────────
 
 async fn handle_tag_resource(
-    _svc: &BedrockAgentRuntimeService,
-    _req: &AwsRequest,
+    svc: &BedrockAgentRuntimeService,
+    req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let resource_arn = req_str(body, "resourceArn").ok_or_else(|| {
-        make_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "resourceArn is required",
-        )
-    })?;
+    let resource_arn = req_str(body, "resourceArn");
+    validate_str(
+        resource_arn.as_deref(),
+        "resourceArn",
+        Some(&re_taggable_arn()),
+        Some(1),
+        Some(1011),
+        true,
+    )?;
+    let tags = body
+        .get("tags")
+        .and_then(|t| t.as_object())
+        .cloned()
+        .ok_or_else(|| validation("tags is required"))?;
 
-    let _tags = body.get("tags").cloned().unwrap_or_default();
+    let arn = resource_arn.unwrap();
+    let mut accts = svc.state.write();
+    let s = accts.get_or_create(&req.account_id);
+    let entry = s.tags.entry(arn).or_default();
+    for (k, v) in tags {
+        if let Some(s) = v.as_str() {
+            entry.insert(k, s.to_string());
+        }
+    }
 
-    tracing::info!(%resource_arn, "TagResource stub on bedrock-agent-runtime");
     Ok(AwsResponse::ok_json(json!({})))
 }
 
 async fn handle_untag_resource(
-    _svc: &BedrockAgentRuntimeService,
+    svc: &BedrockAgentRuntimeService,
     req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let resource_arn = req_str(body, "resourceArn").ok_or_else(|| {
-        make_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "resourceArn is required",
-        )
-    })?;
+    let resource_arn = req_str(body, "resourceArn");
+    validate_str(
+        resource_arn.as_deref(),
+        "resourceArn",
+        Some(&re_taggable_arn()),
+        Some(1),
+        Some(1011),
+        true,
+    )?;
+    let tag_keys = req.query_params.get("tagKeys").cloned().or_else(|| {
+        body.get("tagKeys").and_then(|v| {
+            if let Some(arr) = v.as_array() {
+                Some(
+                    arr.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+            } else {
+                v.as_str().map(|s| s.to_string())
+            }
+        })
+    });
+    if tag_keys.is_none() {
+        return Err(validation("tagKeys is required"));
+    }
+    let tag_keys = tag_keys.unwrap();
+    let keys: Vec<&str> = tag_keys.split(',').filter(|s| !s.is_empty()).collect();
 
-    let _tag_keys = req
-        .query_params
-        .get("tagKeys")
-        .cloned()
-        .or_else(|| req_str(body, "tagKeys"))
-        .unwrap_or_default();
+    let arn = resource_arn.unwrap();
+    let mut accts = svc.state.write();
+    let s = accts.get_or_create(&req.account_id);
+    if let Some(entry) = s.tags.get_mut(&arn) {
+        for k in keys {
+            entry.remove(k);
+        }
+    }
 
-    tracing::info!(%resource_arn, "UntagResource stub on bedrock-agent-runtime");
     Ok(AwsResponse::ok_json(json!({})))
 }
 
 async fn handle_list_tags_for_resource(
-    _svc: &BedrockAgentRuntimeService,
-    _req: &AwsRequest,
+    svc: &BedrockAgentRuntimeService,
+    req: &AwsRequest,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let _resource_arn = req_str(body, "resourceArn").ok_or_else(|| {
-        make_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "resourceArn is required",
-        )
-    })?;
+    let resource_arn = req_str(body, "resourceArn");
+    validate_str(
+        resource_arn.as_deref(),
+        "resourceArn",
+        Some(&re_taggable_arn()),
+        Some(1),
+        Some(1011),
+        true,
+    )?;
+    let arn = resource_arn.unwrap();
+    let accts = svc.state.read();
+    let tags: serde_json::Map<String, Value> = accts
+        .accounts
+        .get(&req.account_id)
+        .and_then(|s| s.tags.get(&arn))
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect()
+        })
+        .unwrap_or_default();
 
-    let response = json!({ "tags": {} });
-    Ok(AwsResponse::ok_json(response))
+    Ok(AwsResponse::ok_json(json!({ "tags": tags })))
 }
