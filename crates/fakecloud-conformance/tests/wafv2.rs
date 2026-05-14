@@ -772,6 +772,7 @@ async fn waf_describe_all_managed_products() {
         .wafv2_client()
         .await
         .describe_all_managed_products()
+        .scope(Scope::Regional)
         .send()
         .await
         .unwrap();
@@ -967,6 +968,28 @@ async fn waf_check_capacity() {
         .await
         .check_capacity()
         .scope(Scope::Regional)
+        .rules(
+            aws_sdk_wafv2::types::Rule::builder()
+                .name("Rule1")
+                .priority(0)
+                .statement(
+                    aws_sdk_wafv2::types::Statement::builder()
+                        .geo_match_statement(
+                            aws_sdk_wafv2::types::GeoMatchStatement::builder()
+                                .country_codes(aws_sdk_wafv2::types::CountryCode::Us)
+                                .build(),
+                        )
+                        .build(),
+                )
+                .action(
+                    aws_sdk_wafv2::types::RuleAction::builder()
+                        .allow(aws_sdk_wafv2::types::AllowAction::builder().build())
+                        .build(),
+                )
+                .visibility_config(vis("Rule1"))
+                .build()
+                .unwrap(),
+        )
         .send()
         .await
         .unwrap();
@@ -1019,6 +1042,8 @@ async fn waf_get_top_path_statistics_by_traffic() {
                 .build()
                 .unwrap(),
         )
+        .limit(10)
+        .number_of_top_traffic_bots_per_path(5)
         .send()
         .await
         .unwrap();
