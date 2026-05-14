@@ -692,7 +692,11 @@ impl ApplicationAutoScalingService {
             .get(&req.account_id)
             .and_then(|a| a.scaling_policies.get(&policy_key))
             .ok_or_else(|| {
-                object_not_found(format!(
+                // GetPredictiveScalingForecast's Smithy model only declares
+                // InternalServiceException and ValidationException. Missing
+                // policies surface as ValidationException, not the
+                // ObjectNotFoundException used by the Delete/Put ops.
+                invalid_param(format!(
                     "No predictive scaling policy named {policy_name} found for ServiceNamespace={namespace} ResourceId={resource_id} ScalableDimension={dimension}"
                 ))
             })?;
@@ -729,12 +733,14 @@ impl ApplicationAutoScalingService {
         let arn = require_str(&body, "ResourceARN")?;
         let state = self.state.read();
         let account = state.accounts.get(&req.account_id);
-        // Real AWS rejects unknown ARNs with ObjectNotFoundException rather
+        // Real AWS rejects unknown ARNs with ResourceNotFoundException rather
         // than returning an empty tag set — match that so callers can tell
-        // a missing target apart from a target with no tags.
+        // a missing target apart from a target with no tags. The Smithy
+        // model for the tag-* ops declares ResourceNotFoundException, not the
+        // ObjectNotFoundException used by the Delete/Put scaling-target ops.
         let exists = account.is_some_and(|a| resource_exists(a, &arn));
         if !exists {
-            return Err(object_not_found(format!("Resource {arn} not found")));
+            return Err(resource_not_found(format!("Resource {arn} not found")));
         }
         let tags = account
             .and_then(|a| a.tags.get(&arn))
@@ -753,7 +759,7 @@ impl ApplicationAutoScalingService {
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
         if !resource_exists(account, &arn) {
-            return Err(object_not_found(format!("Resource {arn} not found")));
+            return Err(resource_not_found(format!("Resource {arn} not found")));
         }
         let entry = account.tags.entry(arn).or_default();
         for (k, v) in tags_in {
@@ -779,7 +785,7 @@ impl ApplicationAutoScalingService {
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
         if !resource_exists(account, &arn) {
-            return Err(object_not_found(format!("Resource {arn} not found")));
+            return Err(resource_not_found(format!("Resource {arn} not found")));
         }
         if let Some(tags) = account.tags.get_mut(&arn) {
             for k in keys {
@@ -810,6 +816,10 @@ fn invalid_param(msg: impl Into<String>) -> AwsServiceError {
 
 fn object_not_found(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ObjectNotFoundException", msg)
+}
+
+fn resource_not_found(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ResourceNotFoundException", msg)
 }
 
 fn parse_suspended_state(value: &Value) -> SuspendedState {
