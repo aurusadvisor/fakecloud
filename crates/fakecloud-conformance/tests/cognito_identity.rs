@@ -14,6 +14,7 @@ async fn cognito_identity_create_identity_pool() {
     let resp = client
         .create_identity_pool()
         .identity_pool_name("conformance-pool")
+        .allow_unauthenticated_identities(false)
         .send()
         .await
         .unwrap();
@@ -30,6 +31,7 @@ async fn cognito_identity_list_identity_pools() {
     client
         .create_identity_pool()
         .identity_pool_name("pool-a")
+        .allow_unauthenticated_identities(false)
         .send()
         .await
         .unwrap();
@@ -52,6 +54,7 @@ async fn cognito_identity_describe_identity_pool() {
     let create = client
         .create_identity_pool()
         .identity_pool_name("desc-pool")
+        .allow_unauthenticated_identities(false)
         .send()
         .await
         .unwrap();
@@ -75,6 +78,7 @@ async fn cognito_identity_update_identity_pool() {
     let create = client
         .create_identity_pool()
         .identity_pool_name("update-pool")
+        .allow_unauthenticated_identities(false)
         .send()
         .await
         .unwrap();
@@ -100,6 +104,7 @@ async fn cognito_identity_delete_identity_pool() {
     let create = client
         .create_identity_pool()
         .identity_pool_name("delete-pool")
+        .allow_unauthenticated_identities(false)
         .send()
         .await
         .unwrap();
@@ -244,6 +249,7 @@ async fn cognito_identity_get_open_id_token_for_developer_identity() {
     let create = client
         .create_identity_pool()
         .identity_pool_name("dev-pool")
+        .allow_unauthenticated_identities(false)
         .send()
         .await
         .unwrap();
@@ -272,6 +278,7 @@ async fn cognito_identity_lookup_developer_identity() {
     let create = client
         .create_identity_pool()
         .identity_pool_name("lookup-pool")
+        .allow_unauthenticated_identities(false)
         .send()
         .await
         .unwrap();
@@ -307,6 +314,7 @@ async fn cognito_identity_merge_developer_identities() {
     let create = client
         .create_identity_pool()
         .identity_pool_name("merge-pool")
+        .allow_unauthenticated_identities(false)
         .send()
         .await
         .unwrap();
@@ -353,6 +361,7 @@ async fn cognito_identity_unlink_developer_identity() {
     let create = client
         .create_identity_pool()
         .identity_pool_name("unlink-pool")
+        .allow_unauthenticated_identities(false)
         .send()
         .await
         .unwrap();
@@ -454,6 +463,7 @@ async fn cognito_identity_set_identity_pool_roles() {
     let create = client
         .create_identity_pool()
         .identity_pool_name("roles-pool")
+        .allow_unauthenticated_identities(false)
         .send()
         .await
         .unwrap();
@@ -502,6 +512,7 @@ async fn cognito_identity_get_identity_pool_roles() {
     let create = client
         .create_identity_pool()
         .identity_pool_name("get-roles-pool")
+        .allow_unauthenticated_identities(false)
         .send()
         .await
         .unwrap();
@@ -525,6 +536,7 @@ async fn cognito_identity_tag_resource() {
     let create = client
         .create_identity_pool()
         .identity_pool_name("tag-pool")
+        .allow_unauthenticated_identities(false)
         .send()
         .await
         .unwrap();
@@ -563,6 +575,7 @@ async fn cognito_identity_untag_resource() {
     let create = client
         .create_identity_pool()
         .identity_pool_name("untag-pool")
+        .allow_unauthenticated_identities(false)
         .send()
         .await
         .unwrap();
@@ -606,6 +619,7 @@ async fn cognito_identity_list_tags_for_resource() {
     let create = client
         .create_identity_pool()
         .identity_pool_name("list-tags-pool")
+        .allow_unauthenticated_identities(false)
         .send()
         .await
         .unwrap();
@@ -668,4 +682,103 @@ async fn cognito_identity_unlink_identity() {
         .send()
         .await
         .unwrap();
+}
+
+#[test_action("cognito-identity", "DeleteIdentities", checksum = "794b8494")]
+#[tokio::test]
+async fn cognito_identity_delete_identities() {
+    let server = TestServer::start().await;
+    let client = server.cognito_identity_client().await;
+
+    let create = client
+        .create_identity_pool()
+        .identity_pool_name("delete-ids-pool")
+        .allow_unauthenticated_identities(true)
+        .send()
+        .await
+        .unwrap();
+    let pool_id = create.identity_pool_id().to_string();
+
+    let get_id = client
+        .get_id()
+        .identity_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+    let identity_id = get_id.identity_id().unwrap().to_string();
+
+    let resp = client
+        .delete_identities()
+        .identity_ids_to_delete(identity_id)
+        .identity_ids_to_delete("us-east-1:00000000-0000-0000-0000-000000000000")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp
+        .unprocessed_identity_ids()
+        .iter()
+        .any(|u| u.identity_id() == Some("us-east-1:00000000-0000-0000-0000-000000000000")));
+}
+
+#[test_action(
+    "cognito-identity",
+    "SetPrincipalTagAttributeMap",
+    checksum = "865e3d7e"
+)]
+#[tokio::test]
+async fn cognito_identity_set_principal_tag_attribute_map() {
+    let server = TestServer::start().await;
+    let client = server.cognito_identity_client().await;
+
+    let create = client
+        .create_identity_pool()
+        .identity_pool_name("set-ptam-pool")
+        .allow_unauthenticated_identities(true)
+        .send()
+        .await
+        .unwrap();
+    let pool_id = create.identity_pool_id().to_string();
+
+    let mut tags = HashMap::new();
+    tags.insert("custom:role".to_string(), "role".to_string());
+
+    let resp = client
+        .set_principal_tag_attribute_map()
+        .identity_pool_id(&pool_id)
+        .identity_provider_name("login.provider")
+        .use_defaults(false)
+        .set_principal_tags(Some(tags))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.identity_pool_id(), Some(pool_id.as_str()));
+}
+
+#[test_action(
+    "cognito-identity",
+    "GetPrincipalTagAttributeMap",
+    checksum = "89cfe04f"
+)]
+#[tokio::test]
+async fn cognito_identity_get_principal_tag_attribute_map() {
+    let server = TestServer::start().await;
+    let client = server.cognito_identity_client().await;
+
+    let create = client
+        .create_identity_pool()
+        .identity_pool_name("get-ptam-pool")
+        .allow_unauthenticated_identities(true)
+        .send()
+        .await
+        .unwrap();
+    let pool_id = create.identity_pool_id().to_string();
+
+    let resp = client
+        .get_principal_tag_attribute_map()
+        .identity_pool_id(&pool_id)
+        .identity_provider_name("login.provider")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.identity_pool_id(), Some(pool_id.as_str()));
 }
