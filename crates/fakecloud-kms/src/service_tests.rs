@@ -1856,7 +1856,9 @@ fn create_alias_rejects_malformed_name() {
         ))
         .err()
         .expect("expected error");
-    assert_eq!(err.code(), "ValidationException");
+    // CreateAlias's Smithy contract declares InvalidAliasNameException for
+    // alias-shape failures, so we surface that rather than ValidationException.
+    assert_eq!(err.code(), "InvalidAliasNameException");
 }
 
 #[test]
@@ -1920,7 +1922,10 @@ fn delete_alias_rejects_missing_prefix() {
         ))
         .err()
         .expect("expected error");
-    assert_eq!(err.code(), "ValidationException");
+    // DeleteAlias only declares NotFoundException / KMSInternal /
+    // KMSInvalidState / DependencyTimeout — malformed input collapses into
+    // NotFoundException.
+    assert_eq!(err.code(), "NotFoundException");
 }
 
 #[test]
