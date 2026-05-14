@@ -768,11 +768,18 @@ fn tag_queue_merges_with_existing() {
 }
 
 #[test]
-fn tag_queue_empty_tags_fails() {
+fn tag_queue_empty_tags_is_noop() {
+    // Real SQS accepts `TagQueue` with an empty `Tags` map as a no-op.
+    // The op's Smithy `errors` list (`InvalidAddress`, `InvalidSecurity`,
+    // `QueueDoesNotExist`, `RequestThrottled`, `UnsupportedOperation`)
+    // doesn't include any "missing parameter" code, and we previously
+    // emitted an undeclared `MissingParameter` here.
     let svc = make_service();
     let url = create_queue(&svc, "empty-tag-queue");
     let req = make_request("TagQueue", json!({ "QueueUrl": url, "Tags": {} }));
-    assert!(svc.tag_queue(&req).is_err());
+    let resp = svc.tag_queue(&req).expect("empty Tags should be a no-op");
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert!(body.as_object().map(|o| o.is_empty()).unwrap_or(false));
 }
 
 #[test]
@@ -2022,29 +2029,38 @@ async fn start_message_move_task_query_protocol_parses_string_rate() {
     assert!(resp.status.is_success());
 }
 
-#[test]
-fn start_message_move_task_rejects_out_of_range_rate() {
+#[tokio::test]
+async fn start_message_move_task_clamps_out_of_range_rate() {
+    // `StartMessageMoveTask`'s declared Smithy errors don't include any
+    // "value out of range" code (`InvalidParameterValue` is not in
+    // `InvalidAddress` / `InvalidSecurity` / `RequestThrottled` /
+    // `ResourceNotFoundException` / `UnsupportedOperation`). Clamp
+    // out-of-range rates into the legal `1..=500` window and let the
+    // task run.
     let svc = make_service();
     let dlq_arn = create_dlq_with_source(&svc, "oor-dlq", "oor-src");
-    let req = make_request(
-        "StartMessageMoveTask",
-        json!({
-            "SourceArn": dlq_arn,
-            "MaxNumberOfMessagesPerSecond": 0
-        }),
-    );
-    let err = expect_err(svc.start_message_move_task(&req));
-    assert_eq!(err.code(), "InvalidParameterValue");
 
-    let req = make_request(
+    let req = make_query_request(
         "StartMessageMoveTask",
-        json!({
-            "SourceArn": dlq_arn,
-            "MaxNumberOfMessagesPerSecond": 501
-        }),
+        &[
+            ("SourceArn", dlq_arn.as_str()),
+            ("MaxNumberOfMessagesPerSecond", "0"),
+        ],
     );
+    let resp = svc.start_message_move_task(&req).unwrap();
+    assert!(resp.status.is_success());
+
+    let req = make_query_request(
+        "StartMessageMoveTask",
+        &[
+            ("SourceArn", dlq_arn.as_str()),
+            ("MaxNumberOfMessagesPerSecond", "501"),
+        ],
+    );
+    // The second call should fail because the source already has an
+    // active task (UnsupportedOperation), not because of the rate.
     let err = expect_err(svc.start_message_move_task(&req));
-    assert_eq!(err.code(), "InvalidParameterValue");
+    assert_eq!(err.code(), "AWS.SimpleQueueService.UnsupportedOperation");
 }
 
 #[test]
