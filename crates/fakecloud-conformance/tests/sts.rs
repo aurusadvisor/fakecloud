@@ -149,3 +149,34 @@ async fn sts_assume_root() {
         .unwrap();
     assert!(resp.credentials().is_some());
 }
+
+#[test_action("sts", "GetWebIdentityToken", checksum = "9ea6bbde")]
+#[tokio::test]
+async fn sts_get_web_identity_token() {
+    let server = TestServer::start().await;
+    let client = server.sts_client().await;
+    let resp = client
+        .get_web_identity_token()
+        .audience("fakecloud-test")
+        .duration_seconds(900)
+        .signing_algorithm("RS256")
+        .send()
+        .await
+        .unwrap();
+    let token = resp.web_identity_token().unwrap();
+    assert!(token.split('.').count() == 3, "expected JWT triple, got {token}");
+}
+
+#[test_action("sts", "GetDelegatedAccessToken", checksum = "93cb2870")]
+#[tokio::test]
+async fn sts_get_delegated_access_token() {
+    let server = TestServer::start().await;
+    let client = server.sts_client().await;
+    let resp = client
+        .get_delegated_access_token()
+        .trade_in_token("fakecloud-trade-in-token")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.credentials().is_some());
+}
