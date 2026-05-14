@@ -94,6 +94,39 @@ fn missing(name: &str) -> AwsServiceError {
     )
 }
 
+/// Awquery list/struct members arrive flattened as `Field.member.1.X`
+/// (or `Field.member.1` for scalar lists). A simple `params.get(field)`
+/// misses those entries. `has_collection_param` checks whether *any*
+/// key starts with `field.` to detect submission of a non-scalar
+/// required field.
+fn has_collection_param(params: &BTreeMap<String, String>, field: &str) -> bool {
+    let prefix = format!("{field}.");
+    params.keys().any(|k| k.starts_with(&prefix))
+}
+
+/// Validate a scalar required field. The `AnyError` conformance
+/// expectation only needs a 4xx response — the wire code can be any
+/// AWS-shaped value — so emitting `ValidationError` is fine even
+/// when the op's Smithy `errors` list doesn't include it.
+fn require_scalar(params: &BTreeMap<String, String>, field: &str) -> Result<(), AwsServiceError> {
+    if params.get(field).is_some() {
+        Ok(())
+    } else {
+        Err(missing(field))
+    }
+}
+
+fn require_collection(
+    params: &BTreeMap<String, String>,
+    field: &str,
+) -> Result<(), AwsServiceError> {
+    if has_collection_param(params, field) {
+        Ok(())
+    } else {
+        Err(missing(field))
+    }
+}
+
 impl CloudFormationService {
     pub(crate) fn handle_extra_action(
         &self,
@@ -355,11 +388,14 @@ impl CloudFormationService {
                 );
                 Ok(xml_response("DescribeChangeSet", inner, &rid))
             }
-            "DescribeChangeSetHooks" => Ok(xml_response(
-                "DescribeChangeSetHooks",
-                "    <Hooks/>".to_string(),
-                &rid,
-            )),
+            "DescribeChangeSetHooks" => {
+                require_scalar(&params, "ChangeSetName")?;
+                Ok(xml_response(
+                    "DescribeChangeSetHooks",
+                    "    <Hooks/>".to_string(),
+                    &rid,
+                ))
+            }
             "DeleteChangeSet" => {
                 let cs = params
                     .get("ChangeSetName")
@@ -375,13 +411,10 @@ impl CloudFormationService {
                 Ok(xml_response("DeleteChangeSet", String::new(), &rid))
             }
             "ExecuteChangeSet" => {
-                // Bare ExecuteChangeSet calls (no ChangeSetName) keep the
-                // legacy success behavior so route-coverage tests still
-                // pass. Real callers carry a ChangeSetName plus a stored
-                // template; only those go through the apply path.
-                let Some(cs) = params.get("ChangeSetName").cloned() else {
-                    return Ok(xml_response("ExecuteChangeSet", String::new(), &rid));
-                };
+                let cs = params
+                    .get("ChangeSetName")
+                    .cloned()
+                    .ok_or_else(|| missing("ChangeSetName"))?;
                 let stack_filter = params.get("StackName").cloned();
 
                 let entry = {
@@ -603,6 +636,7 @@ impl CloudFormationService {
                 Ok(xml_response("ExecuteChangeSet", String::new(), &rid))
             }
             "ListChangeSets" => {
+                require_scalar(&params, "StackName")?;
                 let accounts = self.state.read();
                 let items: Vec<Value> = accounts
                     .get(&aid)
@@ -686,6 +720,7 @@ impl CloudFormationService {
                 Ok(xml_response("ListStackSets", inner, &rid))
             }
             "UpdateStackSet" => {
+                require_scalar(&params, "StackSetName")?;
                 let op_id = rand_id();
                 Ok(xml_response(
                     "UpdateStackSet",
@@ -706,6 +741,8 @@ impl CloudFormationService {
                 Ok(xml_response("DeleteStackSet", String::new(), &rid))
             }
             "DescribeStackSetOperation" => {
+                require_scalar(&params, "StackSetName")?;
+                require_scalar(&params, "OperationId")?;
                 let op_id = params.get("OperationId").cloned().unwrap_or_else(rand_id);
                 let inner = format!(
                     "    <StackSetOperation>\n      <OperationId>{}</OperationId>\n      <Status>SUCCEEDED</Status>\n    </StackSetOperation>",
@@ -713,25 +750,38 @@ impl CloudFormationService {
                 );
                 Ok(xml_response("DescribeStackSetOperation", inner, &rid))
             }
-            "ListStackSetOperations" => Ok(xml_response(
-                "ListStackSetOperations",
-                "    <Summaries/>".to_string(),
-                &rid,
-            )),
-            "ListStackSetOperationResults" => Ok(xml_response(
-                "ListStackSetOperationResults",
-                "    <Summaries/>".to_string(),
-                &rid,
-            )),
-            "ListStackSetAutoDeploymentTargets" => Ok(xml_response(
-                "ListStackSetAutoDeploymentTargets",
-                "    <Summaries/>".to_string(),
-                &rid,
-            )),
+            "ListStackSetOperations" => {
+                require_scalar(&params, "StackSetName")?;
+                Ok(xml_response(
+                    "ListStackSetOperations",
+                    "    <Summaries/>".to_string(),
+                    &rid,
+                ))
+            }
+            "ListStackSetOperationResults" => {
+                require_scalar(&params, "StackSetName")?;
+                require_scalar(&params, "OperationId")?;
+                Ok(xml_response(
+                    "ListStackSetOperationResults",
+                    "    <Summaries/>".to_string(),
+                    &rid,
+                ))
+            }
+            "ListStackSetAutoDeploymentTargets" => {
+                require_scalar(&params, "StackSetName")?;
+                Ok(xml_response(
+                    "ListStackSetAutoDeploymentTargets",
+                    "    <Summaries/>".to_string(),
+                    &rid,
+                ))
+            }
             "StopStackSetOperation" => {
+                require_scalar(&params, "StackSetName")?;
+                require_scalar(&params, "OperationId")?;
                 Ok(xml_response("StopStackSetOperation", String::new(), &rid))
             }
             "ImportStacksToStackSet" => {
+                require_scalar(&params, "StackSetName")?;
                 let op_id = rand_id();
                 Ok(xml_response(
                     "ImportStacksToStackSet",
@@ -742,6 +792,8 @@ impl CloudFormationService {
 
             // ── Stack instances ──
             "CreateStackInstances" => {
+                require_scalar(&params, "StackSetName")?;
+                require_collection(&params, "Regions")?;
                 let op_id = rand_id();
                 Ok(xml_response(
                     "CreateStackInstances",
@@ -750,6 +802,8 @@ impl CloudFormationService {
                 ))
             }
             "UpdateStackInstances" => {
+                require_scalar(&params, "StackSetName")?;
+                require_collection(&params, "Regions")?;
                 let op_id = rand_id();
                 Ok(xml_response(
                     "UpdateStackInstances",
@@ -758,6 +812,9 @@ impl CloudFormationService {
                 ))
             }
             "DeleteStackInstances" => {
+                require_scalar(&params, "StackSetName")?;
+                require_collection(&params, "Regions")?;
+                require_scalar(&params, "RetainStacks")?;
                 let op_id = rand_id();
                 Ok(xml_response(
                     "DeleteStackInstances",
@@ -766,24 +823,37 @@ impl CloudFormationService {
                 ))
             }
             "DescribeStackInstance" => {
+                require_scalar(&params, "StackSetName")?;
+                require_scalar(&params, "StackInstanceAccount")?;
+                require_scalar(&params, "StackInstanceRegion")?;
                 let inner =
                     "    <StackInstance>\n      <Status>CURRENT</Status>\n    </StackInstance>"
                         .to_string();
                 Ok(xml_response("DescribeStackInstance", inner, &rid))
             }
-            "ListStackInstances" => Ok(xml_response(
-                "ListStackInstances",
-                "    <Summaries/>".to_string(),
-                &rid,
-            )),
-            "ListStackInstanceResourceDrifts" => Ok(xml_response(
-                "ListStackInstanceResourceDrifts",
-                "    <Summaries/>".to_string(),
-                &rid,
-            )),
+            "ListStackInstances" => {
+                require_scalar(&params, "StackSetName")?;
+                Ok(xml_response(
+                    "ListStackInstances",
+                    "    <Summaries/>".to_string(),
+                    &rid,
+                ))
+            }
+            "ListStackInstanceResourceDrifts" => {
+                require_scalar(&params, "StackSetName")?;
+                require_scalar(&params, "StackInstanceAccount")?;
+                require_scalar(&params, "StackInstanceRegion")?;
+                require_scalar(&params, "OperationId")?;
+                Ok(xml_response(
+                    "ListStackInstanceResourceDrifts",
+                    "    <Summaries/>".to_string(),
+                    &rid,
+                ))
+            }
 
             // ── Stack refactors ──
             "CreateStackRefactor" => {
+                require_collection(&params, "StackDefinitions")?;
                 let id = rand_id();
                 let entry = json!({"StackRefactorId": id.clone(), "Status": "CREATE_COMPLETE"});
                 let mut accounts = self.state.write();
@@ -806,17 +876,23 @@ impl CloudFormationService {
                 );
                 Ok(xml_response("DescribeStackRefactor", inner, &rid))
             }
-            "ExecuteStackRefactor" => Ok(xml_response("ExecuteStackRefactor", String::new(), &rid)),
+            "ExecuteStackRefactor" => {
+                require_scalar(&params, "StackRefactorId")?;
+                Ok(xml_response("ExecuteStackRefactor", String::new(), &rid))
+            }
             "ListStackRefactors" => Ok(xml_response(
                 "ListStackRefactors",
                 "    <StackRefactorSummaries/>".to_string(),
                 &rid,
             )),
-            "ListStackRefactorActions" => Ok(xml_response(
-                "ListStackRefactorActions",
-                "    <StackRefactorActions/>".to_string(),
-                &rid,
-            )),
+            "ListStackRefactorActions" => {
+                require_scalar(&params, "StackRefactorId")?;
+                Ok(xml_response(
+                    "ListStackRefactorActions",
+                    "    <StackRefactorActions/>".to_string(),
+                    &rid,
+                ))
+            }
 
             // ── Types / extensions ──
             "ActivateType" => {
@@ -846,7 +922,10 @@ impl CloudFormationService {
                 Ok(xml_response("DescribeType", inner, &rid))
             }
             "DescribeTypeRegistration" => {
-                let token = params.get("RegistrationToken").cloned().unwrap_or_default();
+                let token = params
+                    .get("RegistrationToken")
+                    .cloned()
+                    .ok_or_else(|| missing("RegistrationToken"))?;
                 let inner = format!(
                     "    <ProgressStatus>COMPLETE</ProgressStatus>\n    <Description>{}</Description>",
                     xml_escape(&token),
@@ -854,6 +933,8 @@ impl CloudFormationService {
                 Ok(xml_response("DescribeTypeRegistration", inner, &rid))
             }
             "RegisterType" => {
+                require_scalar(&params, "TypeName")?;
+                require_scalar(&params, "SchemaHandlerPackage")?;
                 let token = rand_id();
                 Ok(xml_response(
                     "RegisterType",
@@ -880,12 +961,16 @@ impl CloudFormationService {
                 "    <TypeVersionSummaries/>".to_string(),
                 &rid,
             )),
-            "BatchDescribeTypeConfigurations" => Ok(xml_response(
-                "BatchDescribeTypeConfigurations",
-                "    <Errors/>\n    <TypeConfigurations/>".to_string(),
-                &rid,
-            )),
+            "BatchDescribeTypeConfigurations" => {
+                require_collection(&params, "TypeConfigurationIdentifiers")?;
+                Ok(xml_response(
+                    "BatchDescribeTypeConfigurations",
+                    "    <Errors/>\n    <TypeConfigurations/>".to_string(),
+                    &rid,
+                ))
+            }
             "SetTypeConfiguration" => {
+                require_scalar(&params, "Configuration")?;
                 let arn = Arn::new(
                     "cloudformation",
                     "us-east-1",
@@ -1013,11 +1098,15 @@ impl CloudFormationService {
                 );
                 Ok(xml_response("DescribeGeneratedTemplate", inner, &rid))
             }
-            "GetGeneratedTemplate" => Ok(xml_response(
-                "GetGeneratedTemplate",
-                "    <Status>COMPLETE</Status>\n    <TemplateBody>{}</TemplateBody>".to_string(),
-                &rid,
-            )),
+            "GetGeneratedTemplate" => {
+                require_scalar(&params, "GeneratedTemplateName")?;
+                Ok(xml_response(
+                    "GetGeneratedTemplate",
+                    "    <Status>COMPLETE</Status>\n    <TemplateBody>{}</TemplateBody>"
+                        .to_string(),
+                    &rid,
+                ))
+            }
             "DeleteGeneratedTemplate" => {
                 let name = params
                     .get("GeneratedTemplateName")
@@ -1052,7 +1141,10 @@ impl CloudFormationService {
                 ))
             }
             "DescribeResourceScan" => {
-                let id = params.get("ResourceScanId").cloned().unwrap_or_default();
+                let id = params
+                    .get("ResourceScanId")
+                    .cloned()
+                    .ok_or_else(|| missing("ResourceScanId"))?;
                 let inner = format!(
                     "    <ResourceScanId>{}</ResourceScanId>\n    <Status>COMPLETE</Status>",
                     xml_escape(&id),
@@ -1064,16 +1156,23 @@ impl CloudFormationService {
                 "    <ResourceScanSummaries/>".to_string(),
                 &rid,
             )),
-            "ListResourceScanResources" => Ok(xml_response(
-                "ListResourceScanResources",
-                "    <Resources/>".to_string(),
-                &rid,
-            )),
-            "ListResourceScanRelatedResources" => Ok(xml_response(
-                "ListResourceScanRelatedResources",
-                "    <RelatedResources/>".to_string(),
-                &rid,
-            )),
+            "ListResourceScanResources" => {
+                require_scalar(&params, "ResourceScanId")?;
+                Ok(xml_response(
+                    "ListResourceScanResources",
+                    "    <Resources/>".to_string(),
+                    &rid,
+                ))
+            }
+            "ListResourceScanRelatedResources" => {
+                require_scalar(&params, "ResourceScanId")?;
+                require_collection(&params, "Resources")?;
+                Ok(xml_response(
+                    "ListResourceScanRelatedResources",
+                    "    <RelatedResources/>".to_string(),
+                    &rid,
+                ))
+            }
 
             // ── Drift detection ──
             "DetectStackDrift" => {
@@ -1291,6 +1390,7 @@ impl CloudFormationService {
                 Ok(xml_response("DetectStackResourceDrift", inner, &rid))
             }
             "DetectStackSetDrift" => {
+                require_scalar(&params, "StackSetName")?;
                 let op_id = rand_id();
                 Ok(xml_response(
                     "DetectStackSetDrift",
@@ -1330,7 +1430,10 @@ impl CloudFormationService {
                 ))
             }
             "DescribeStackResourceDrifts" => {
-                let stack_name = params.get("StackName").cloned().unwrap_or_default();
+                let stack_name = params
+                    .get("StackName")
+                    .cloned()
+                    .ok_or_else(|| missing("StackName"))?;
                 let accounts = self.state.read();
                 let drifted: Vec<Value> = accounts
                     .get(&aid)
@@ -1482,7 +1585,11 @@ impl CloudFormationService {
                 "    <HookResults/>".to_string(),
                 &rid,
             )),
-            "RecordHandlerProgress" => Ok(xml_response_no_result("RecordHandlerProgress", &rid)),
+            "RecordHandlerProgress" => {
+                require_scalar(&params, "BearerToken")?;
+                require_scalar(&params, "OperationStatus")?;
+                Ok(xml_response_no_result("RecordHandlerProgress", &rid))
+            }
 
             // ── Imports / exports ──
             "ListExports" => {
@@ -1565,10 +1672,10 @@ impl CloudFormationService {
                     .get("StackName")
                     .ok_or_else(|| missing("StackName"))?
                     .clone();
-                let enabled = params
+                let enabled_raw = params
                     .get("EnableTerminationProtection")
-                    .map(|v| v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
+                    .ok_or_else(|| missing("EnableTerminationProtection"))?;
+                let enabled = enabled_raw.eq_ignore_ascii_case("true");
                 let stack_id = {
                     let mut accounts = self.state.write();
                     let state = accounts.get_or_create(&aid);
@@ -1651,8 +1758,16 @@ impl CloudFormationService {
                 "    <Parameters/>\n    <ResourceTypes/>\n    <Capabilities/>".to_string(),
                 &rid,
             )),
-            "CancelUpdateStack" => Ok(xml_response_no_result("CancelUpdateStack", &rid)),
+            "CancelUpdateStack" => {
+                params
+                    .get("StackName")
+                    .ok_or_else(|| missing("StackName"))?;
+                Ok(xml_response_no_result("CancelUpdateStack", &rid))
+            }
             "ContinueUpdateRollback" => {
+                params
+                    .get("StackName")
+                    .ok_or_else(|| missing("StackName"))?;
                 Ok(xml_response("ContinueUpdateRollback", String::new(), &rid))
             }
             "RollbackStack" => {
@@ -1674,7 +1789,13 @@ impl CloudFormationService {
                     &rid,
                 ))
             }
-            "SignalResource" => Ok(xml_response_no_result("SignalResource", &rid)),
+            "SignalResource" => {
+                require_scalar(&params, "StackName")?;
+                require_scalar(&params, "LogicalResourceId")?;
+                require_scalar(&params, "UniqueId")?;
+                require_scalar(&params, "Status")?;
+                Ok(xml_response_no_result("SignalResource", &rid))
+            }
 
             _ => Err(AwsServiceError::action_not_implemented(
                 "cloudformation",
@@ -1813,9 +1934,9 @@ mod tests {
             &[("StackName", "s"), ("ChangeSetName", "cs")],
         );
         ok("DescribeChangeSet", &[("ChangeSetName", "cs")]);
-        ok("DescribeChangeSetHooks", &[]);
-        ok("ListChangeSets", &[]);
-        ok("ExecuteChangeSet", &[]);
+        ok("DescribeChangeSetHooks", &[("ChangeSetName", "cs")]);
+        ok("ListChangeSets", &[("StackName", "s")]);
+        ok("ExecuteChangeSet", &[("ChangeSetName", "cs")]);
         ok("DeleteChangeSet", &[("ChangeSetName", "cs")]);
     }
 
@@ -1824,25 +1945,68 @@ mod tests {
         ok("CreateStackSet", &[("StackSetName", "ss")]);
         ok("DescribeStackSet", &[("StackSetName", "ss")]);
         ok("ListStackSets", &[]);
-        ok("UpdateStackSet", &[]);
-        ok("DescribeStackSetOperation", &[]);
-        ok("ListStackSetOperations", &[]);
-        ok("ListStackSetOperationResults", &[]);
-        ok("ListStackSetAutoDeploymentTargets", &[]);
-        ok("StopStackSetOperation", &[]);
-        ok("ImportStacksToStackSet", &[]);
+        ok("UpdateStackSet", &[("StackSetName", "ss")]);
+        ok(
+            "DescribeStackSetOperation",
+            &[("StackSetName", "ss"), ("OperationId", "op")],
+        );
+        ok("ListStackSetOperations", &[("StackSetName", "ss")]);
+        ok(
+            "ListStackSetOperationResults",
+            &[("StackSetName", "ss"), ("OperationId", "op")],
+        );
+        ok(
+            "ListStackSetAutoDeploymentTargets",
+            &[("StackSetName", "ss")],
+        );
+        ok(
+            "StopStackSetOperation",
+            &[("StackSetName", "ss"), ("OperationId", "op")],
+        );
+        ok("ImportStacksToStackSet", &[("StackSetName", "ss")]);
         ok("DeleteStackSet", &[("StackSetName", "ss")]);
-        ok("CreateStackInstances", &[]);
-        ok("UpdateStackInstances", &[]);
-        ok("DeleteStackInstances", &[]);
-        ok("DescribeStackInstance", &[]);
-        ok("ListStackInstances", &[]);
-        ok("ListStackInstanceResourceDrifts", &[]);
-        ok("CreateStackRefactor", &[]);
+        ok(
+            "CreateStackInstances",
+            &[("StackSetName", "ss"), ("Regions.member.1", "us-east-1")],
+        );
+        ok(
+            "UpdateStackInstances",
+            &[("StackSetName", "ss"), ("Regions.member.1", "us-east-1")],
+        );
+        ok(
+            "DeleteStackInstances",
+            &[
+                ("StackSetName", "ss"),
+                ("Regions.member.1", "us-east-1"),
+                ("RetainStacks", "false"),
+            ],
+        );
+        ok(
+            "DescribeStackInstance",
+            &[
+                ("StackSetName", "ss"),
+                ("StackInstanceAccount", "000000000000"),
+                ("StackInstanceRegion", "us-east-1"),
+            ],
+        );
+        ok("ListStackInstances", &[("StackSetName", "ss")]);
+        ok(
+            "ListStackInstanceResourceDrifts",
+            &[
+                ("StackSetName", "ss"),
+                ("StackInstanceAccount", "000000000000"),
+                ("StackInstanceRegion", "us-east-1"),
+                ("OperationId", "op"),
+            ],
+        );
+        ok(
+            "CreateStackRefactor",
+            &[("StackDefinitions.member.1.StackName", "s")],
+        );
         ok("DescribeStackRefactor", &[("StackRefactorId", "r")]);
-        ok("ExecuteStackRefactor", &[]);
+        ok("ExecuteStackRefactor", &[("StackRefactorId", "r")]);
         ok("ListStackRefactors", &[]);
-        ok("ListStackRefactorActions", &[]);
+        ok("ListStackRefactorActions", &[("StackRefactorId", "r")]);
     }
 
     #[test]
@@ -1850,14 +2014,20 @@ mod tests {
         ok("ActivateType", &[]);
         ok("DeactivateType", &[]);
         ok("DescribeType", &[]);
-        ok("DescribeTypeRegistration", &[]);
-        ok("RegisterType", &[]);
+        ok("DescribeTypeRegistration", &[("RegistrationToken", "tok")]);
+        ok(
+            "RegisterType",
+            &[("TypeName", "T"), ("SchemaHandlerPackage", "pkg")],
+        );
         ok("DeregisterType", &[]);
         ok("ListTypes", &[]);
         ok("ListTypeRegistrations", &[]);
         ok("ListTypeVersions", &[]);
-        ok("BatchDescribeTypeConfigurations", &[]);
-        ok("SetTypeConfiguration", &[]);
+        ok(
+            "BatchDescribeTypeConfigurations",
+            &[("TypeConfigurationIdentifiers.member.1.Type", "RESOURCE")],
+        );
+        ok("SetTypeConfiguration", &[("Configuration", "{}")]);
         ok("SetTypeDefaultVersion", &[]);
         ok("TestType", &[]);
         ok("PublishType", &[]);
@@ -1879,17 +2049,23 @@ mod tests {
             "DescribeGeneratedTemplate",
             &[("GeneratedTemplateName", "gt")],
         );
-        ok("GetGeneratedTemplate", &[]);
+        ok("GetGeneratedTemplate", &[("GeneratedTemplateName", "gt")]);
         ok("ListGeneratedTemplates", &[]);
         ok(
             "DeleteGeneratedTemplate",
             &[("GeneratedTemplateName", "gt")],
         );
         ok("StartResourceScan", &[]);
-        ok("DescribeResourceScan", &[]);
+        ok("DescribeResourceScan", &[("ResourceScanId", "rs")]);
         ok("ListResourceScans", &[]);
-        ok("ListResourceScanResources", &[]);
-        ok("ListResourceScanRelatedResources", &[]);
+        ok("ListResourceScanResources", &[("ResourceScanId", "rs")]);
+        ok(
+            "ListResourceScanRelatedResources",
+            &[
+                ("ResourceScanId", "rs"),
+                ("Resources.member.1.ResourceType", "AWS::SQS::Queue"),
+            ],
+        );
         ok("DetectStackDrift", &[("StackName", "s")]);
         ok(
             "DetectStackResourceDrift",
@@ -1913,12 +2089,18 @@ mod tests {
         ok("DescribeEvents", &[]);
         ok("GetHookResult", &[]);
         ok("ListHookResults", &[]);
-        ok("RecordHandlerProgress", &[]);
+        ok(
+            "RecordHandlerProgress",
+            &[("BearerToken", "tok"), ("OperationStatus", "SUCCESS")],
+        );
         ok("ListExports", &[]);
         ok("ListImports", &[("ExportName", "SomeExport")]);
         ok("GetStackPolicy", &[("StackName", "s")]);
         ok("SetStackPolicy", &[("StackName", "s")]);
-        ok("UpdateTerminationProtection", &[("StackName", "s")]);
+        ok(
+            "UpdateTerminationProtection",
+            &[("StackName", "s"), ("EnableTerminationProtection", "false")],
+        );
         ok("DescribeAccountLimits", &[]);
         ok("ActivateOrganizationsAccess", &[]);
         ok("DescribeOrganizationsAccess", &[]);
@@ -1926,9 +2108,17 @@ mod tests {
         ok("ValidateTemplate", &[]);
         ok("EstimateTemplateCost", &[]);
         ok("GetTemplateSummary", &[]);
-        ok("CancelUpdateStack", &[]);
-        ok("ContinueUpdateRollback", &[]);
+        ok("CancelUpdateStack", &[("StackName", "s")]);
+        ok("ContinueUpdateRollback", &[("StackName", "s")]);
         ok("RollbackStack", &[("StackName", "s")]);
-        ok("SignalResource", &[]);
+        ok(
+            "SignalResource",
+            &[
+                ("StackName", "s"),
+                ("LogicalResourceId", "L"),
+                ("UniqueId", "U"),
+                ("Status", "SUCCESS"),
+            ],
+        );
     }
 }

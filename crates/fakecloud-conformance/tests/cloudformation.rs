@@ -515,30 +515,46 @@ async fn cloudformation_closure_routes_exist() {
     );
 
     // Stack instances
-    assert!(
-        cfn_post(&server, "CreateStackInstances", &[("StackSetName", "ss1")])
-            .await
-            .status()
-            .is_success()
-    );
-    assert!(
-        cfn_post(&server, "UpdateStackInstances", &[("StackSetName", "ss1")])
-            .await
-            .status()
-            .is_success()
-    );
-    assert!(
-        cfn_post(&server, "DeleteStackInstances", &[("StackSetName", "ss1")])
-            .await
-            .status()
-            .is_success()
-    );
-    assert!(
-        cfn_post(&server, "DescribeStackInstance", &[("StackSetName", "ss1")])
-            .await
-            .status()
-            .is_success()
-    );
+    assert!(cfn_post(
+        &server,
+        "CreateStackInstances",
+        &[("StackSetName", "ss1"), ("Regions.member.1", "us-east-1"),],
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(cfn_post(
+        &server,
+        "UpdateStackInstances",
+        &[("StackSetName", "ss1"), ("Regions.member.1", "us-east-1"),],
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(cfn_post(
+        &server,
+        "DeleteStackInstances",
+        &[
+            ("StackSetName", "ss1"),
+            ("Regions.member.1", "us-east-1"),
+            ("RetainStacks", "false"),
+        ],
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(cfn_post(
+        &server,
+        "DescribeStackInstance",
+        &[
+            ("StackSetName", "ss1"),
+            ("StackInstanceAccount", "000000000000"),
+            ("StackInstanceRegion", "us-east-1"),
+        ],
+    )
+    .await
+    .status()
+    .is_success());
     assert!(
         cfn_post(&server, "ListStackInstances", &[("StackSetName", "ss1")])
             .await
@@ -548,19 +564,26 @@ async fn cloudformation_closure_routes_exist() {
     assert!(cfn_post(
         &server,
         "ListStackInstanceResourceDrifts",
-        &[("StackSetName", "ss1")]
+        &[
+            ("StackSetName", "ss1"),
+            ("StackInstanceAccount", "000000000000"),
+            ("StackInstanceRegion", "us-east-1"),
+            ("OperationId", "op1"),
+        ],
     )
     .await
     .status()
     .is_success());
 
     // Refactors
-    assert!(
-        cfn_post(&server, "CreateStackRefactor", &[("StackName", "s1")])
-            .await
-            .status()
-            .is_success()
-    );
+    assert!(cfn_post(
+        &server,
+        "CreateStackRefactor",
+        &[("StackDefinitions.member.1.StackName", "s1")],
+    )
+    .await
+    .status()
+    .is_success());
     assert!(cfn_post(
         &server,
         "DescribeStackRefactor",
@@ -639,10 +662,14 @@ async fn cloudformation_closure_routes_exist() {
         .await
         .status()
         .is_success());
-    assert!(cfn_post(&server, "BatchDescribeTypeConfigurations", &[])
-        .await
-        .status()
-        .is_success());
+    assert!(cfn_post(
+        &server,
+        "BatchDescribeTypeConfigurations",
+        &[("TypeConfigurationIdentifiers.member.1.Type", "RESOURCE")],
+    )
+    .await
+    .status()
+    .is_success());
     assert!(
         cfn_post(&server, "SetTypeConfiguration", &[("Configuration", "{}")])
             .await
@@ -748,7 +775,10 @@ async fn cloudformation_closure_routes_exist() {
     assert!(cfn_post(
         &server,
         "ListResourceScanRelatedResources",
-        &[("ResourceScanId", "rs1")]
+        &[
+            ("ResourceScanId", "rs1"),
+            ("Resources.member.1.ResourceType", "AWS::SQS::Queue"),
+        ],
     )
     .await
     .status()
