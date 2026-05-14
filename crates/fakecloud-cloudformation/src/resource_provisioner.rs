@@ -3891,6 +3891,7 @@ impl ResourceProvisioner {
             file_system_configs: cfg.file_system_configs,
             logging_config: cfg.logging_config,
             image_config: None,
+            durable_config: None,
             signing_profile_version_arn: None,
             signing_job_arn: None,
             runtime_version_config: None,

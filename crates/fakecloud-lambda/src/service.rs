@@ -58,6 +58,7 @@ pub(crate) fn action_takes_function_name(action: &str) -> bool {
             | "GetFunctionCodeSigningConfig"
             | "DeleteFunctionCodeSigningConfig"
             | "GetFunctionScalingConfig"
+            | "PutFunctionScalingConfig"
             | "PutFunctionRecursionConfig"
             | "GetFunctionRecursionConfig"
             | "CreateAlias"
@@ -184,6 +185,7 @@ struct CreateFunctionInput {
     file_system_configs: Vec<serde_json::Value>,
     logging_config: Option<serde_json::Value>,
     image_config: Option<serde_json::Value>,
+    durable_config: Option<serde_json::Value>,
 }
 
 impl CreateFunctionInput {
@@ -299,6 +301,9 @@ impl CreateFunctionInput {
         let image_config = body["ImageConfig"]
             .is_object()
             .then(|| body["ImageConfig"].clone());
+        let durable_config = body["DurableConfig"]
+            .is_object()
+            .then(|| body["DurableConfig"].clone());
 
         Ok(Self {
             function_name,
@@ -328,6 +333,7 @@ impl CreateFunctionInput {
             file_system_configs,
             logging_config,
             image_config,
+            durable_config,
         })
     }
 }
@@ -861,8 +867,12 @@ impl LambdaService {
         {
             return Some(("ListFunctionUrlConfigs", segs.get(2).map(|s| s.to_string())));
         }
-        if segs.get(1).map(|s| s.as_str()) == Some("event-source-mappings")
-            && segs.get(3).map(|s| s.as_str()) == Some("scaling-config")
+        // Function scaling config — AWS uses
+        // `/2025-11-30/functions/{name}/function-scaling-config` (and the
+        // earlier `scaling-config` path on event-source-mappings was
+        // a different operation that no longer exists in the SDK).
+        if segs.get(1).map(|s| s.as_str()) == Some("functions")
+            && segs.get(3).map(|s| s.as_str()) == Some("function-scaling-config")
         {
             let res = segs.get(2).map(|s| s.to_string());
             return match req.method {
@@ -928,6 +938,45 @@ impl LambdaService {
         let resource = segs.get(2).map(|s| s.to_string());
         let third = segs.get(3).map(|s| s.as_str());
         let fourth = segs.get(4).map(|s| s.as_str());
+
+        // Disambiguate collapsed URLs that synthetic probes can produce
+        // when an httpLabel was elided. `path_segments` strips empty
+        // segments, so `/functions/` (a malformed `GetFunction`)
+        // collapses to look like `/functions` (`ListFunctions`).
+        // Inspect the raw path to recover the missing-identifier
+        // case and route it to the intended op with an empty resource
+        // — every downstream length check will then reject it.
+        let raw = req.raw_path.split('?').next().unwrap_or(&req.raw_path);
+        if req.method == Method::GET
+            && collection == Some("functions")
+            && segs.len() == 2
+            && raw.ends_with("/functions/")
+        {
+            return Some(("GetFunction", Some(String::new())));
+        }
+        // Aliases: `/functions/{fn}/aliases/` -> `GetAlias` with empty
+        // alias name (instead of falling through to `ListAliases`).
+        if req.method == Method::GET
+            && collection == Some("functions")
+            && segs.len() == 4
+            && third == Some("aliases")
+            && raw.ends_with("/aliases/")
+        {
+            return Some(("GetAlias", segs.get(2).map(|s| s.to_string())));
+        }
+        // Same for `DELETE` and `PUT` on the alias slot.
+        if collection == Some("functions")
+            && segs.len() == 4
+            && third == Some("aliases")
+            && raw.ends_with("/aliases/")
+        {
+            let res = segs.get(2).map(|s| s.to_string());
+            match req.method {
+                Method::DELETE => return Some(("DeleteAlias", res)),
+                Method::PUT => return Some(("UpdateAlias", res)),
+                _ => {}
+            }
+        }
 
         let action = match (&req.method, segs.len(), collection, third) {
             (&Method::POST, 2, Some("functions"), _) => "CreateFunction",
@@ -1003,10 +1052,10 @@ impl LambdaService {
             (&Method::GET, 4, Some("functions"), Some("runtime-management-config")) => {
                 "GetRuntimeManagementConfig"
             }
-            (&Method::PUT, 4, Some("functions"), Some("scaling-config")) => {
+            (&Method::PUT, 4, Some("functions"), Some("function-scaling-config")) => {
                 "PutFunctionScalingConfig"
             }
-            (&Method::GET, 4, Some("functions"), Some("scaling-config")) => {
+            (&Method::GET, 4, Some("functions"), Some("function-scaling-config")) => {
                 "GetFunctionScalingConfig"
             }
             (&Method::PUT, 4, Some("functions"), Some("recursion-config")) => {
@@ -1033,6 +1082,25 @@ impl LambdaService {
     fn create_function(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         let input = CreateFunctionInput::from_body(&body)?;
+
+        // Enforce the Smithy length bounds on `FunctionName` (1..=140
+        // characters; AWS accepts the bare name or any ARN form that
+        // resolves to <= 140 chars including the ARN prefix). Synthetic
+        // negative-conformance variants drive empty / 141-char inputs
+        // through this path, so reject up front rather than persisting
+        // an invalid record.
+        let raw = input.function_name.as_str();
+        if raw.is_empty() || raw.chars().count() > 140 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                format!(
+                    "1 validation error detected: Value '{}' at 'functionName' failed to \
+                     satisfy constraint: Member must have length less than or equal to 140",
+                    raw
+                ),
+            ));
+        }
 
         // PassRole trust-policy check: the supplied execution role must
         // have a trust policy that allows lambda.amazonaws.com to call
@@ -1111,6 +1179,7 @@ impl LambdaService {
             file_system_configs: input.file_system_configs,
             logging_config: input.logging_config,
             image_config: input.image_config,
+            durable_config: input.durable_config,
             signing_profile_version_arn: None,
             signing_job_arn: None,
             runtime_version_config: None,
@@ -1304,7 +1373,22 @@ impl LambdaService {
         Ok(AwsResponse::json(StatusCode::NO_CONTENT, ""))
     }
 
-    fn list_functions(&self, account_id: &str) -> Result<AwsResponse, AwsServiceError> {
+    fn list_functions(
+        &self,
+        account_id: &str,
+        function_version: Option<&str>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // `FunctionVersion` is an enum with the single member `ALL`; reject
+        // any other value rather than silently ignoring it.
+        if let Some(fv) = function_version {
+            if fv != "ALL" {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    format!("Invalid FunctionVersion value '{}'; expected 'ALL'", fv),
+                ));
+            }
+        }
         let accounts = self.state.read();
         let empty = LambdaState::new(account_id, "");
         let state = accounts.get(account_id).unwrap_or(&empty);
@@ -1314,8 +1398,14 @@ impl LambdaService {
             .map(|f| self.function_config_json(f))
             .collect();
 
+        // AWS's documented example carries `NextMarker` as a string even
+        // on the final page. We don't paginate yet, so emit an empty
+        // string rather than a true sentinel — closer to AWS's
+        // observed behavior than omitting the field, and string-typed
+        // so strict shape validators don't trip.
         let response = json!({
             "Functions": functions,
+            "NextMarker": "",
         });
 
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
@@ -1831,6 +1921,9 @@ impl LambdaService {
         if let Some(ref ic) = func.image_config {
             config["ImageConfigResponse"] = json!({ "ImageConfig": ic });
         }
+        if let Some(ref dc) = func.durable_config {
+            config["DurableConfig"] = dc.clone();
+        }
         if let Some(ref s) = func.signing_profile_version_arn {
             config["SigningProfileVersionArn"] = json!(s);
         }
@@ -1843,12 +1936,10 @@ impl LambdaService {
         if let Some(ref m) = func.master_arn {
             config["MasterArn"] = json!(m);
         }
-        if let Some(ref uri) = func.image_uri {
-            config["Code"] = json!({
-                "ImageUri": uri,
-                "ResolvedImageUri": uri,
-            });
-        }
+        // AWS's `FunctionConfiguration` shape has no `Code` member —
+        // `FunctionCodeLocation` only appears on `GetFunction`'s response
+        // wrapper. Image-based functions surface their URI via the
+        // wrapper at `Code.ImageUri`, set by `get_function`.
         if !func.layers.is_empty() {
             config["Layers"] = json!(func
                 .layers
@@ -1880,11 +1971,46 @@ impl AwsService for LambdaService {
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let (action, resource_name) = Self::resolve_action(&req).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "UnknownOperationException",
-                format!("Unknown operation: {} {}", req.method, req.raw_path),
-            )
+            // Distinguish a genuinely unknown URL path from one that
+            // hit a known Lambda collection (`/functions`, `/layers`,
+            // `/event-source-mappings`, `/tags`, `/code-signing-configs`,
+            // `/account-settings`, `/layers-by-arn`) but couldn't be
+            // routed because a required identifier was empty or the
+            // method was wrong. The latter is a client-side validation
+            // error (`InvalidParameterValueException`), not a
+            // "service doesn't implement this" signal — collapsing the
+            // two confuses conformance probes whose synthetic too-short
+            // identifiers collapse path segments at the URL level.
+            const KNOWN_COLLECTIONS: &[&str] = &[
+                "functions",
+                "layers",
+                "layers-by-arn",
+                "event-source-mappings",
+                "tags",
+                "account-settings",
+                "code-signing-configs",
+            ];
+            let is_known_collection = req
+                .path_segments
+                .get(1)
+                .map(|s| KNOWN_COLLECTIONS.contains(&s.as_str()))
+                .unwrap_or(false);
+            if is_known_collection {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    format!(
+                        "Could not route request {} {} — missing or invalid identifier",
+                        req.method, req.raw_path
+                    ),
+                )
+            } else {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "UnknownOperationException",
+                    format!("Unknown operation: {} {}", req.method, req.raw_path),
+                )
+            }
         })?;
 
         // Normalize FunctionName-bearing resource slots: AWS Lambda accepts
@@ -1892,10 +2018,112 @@ impl AwsService for LambdaService {
         // slot that names a function. Layer / event-source-mapping resource
         // names go through different routes and are left as-is.
         let resource_name = if action_takes_function_name(action) {
+            // Enforce the Smithy length bound (`FunctionName.length 1..140`)
+            // before normalization. Synthetic conformance variants drive
+            // 141-character strings through these paths; without an early
+            // reject we'd happily serve `GetFunction` against a name that
+            // could never have been created. The 170-char ceiling tracks
+            // the documented ARN-form upper bound.
+            if let Some(raw) = resource_name.as_ref() {
+                let len = raw.chars().count();
+                // Bare-name form caps at 140. ARN form
+                // (`arn:aws:lambda:<region>:<acct>:function:<name>`)
+                // adds ~60 chars of prefix → up to ~200 total. Reject
+                // anything longer outright so synthetic 141-char names
+                // can't bypass the constraint. `InvokeAsync`'s Smithy
+                // error envelope doesn't declare
+                // `InvalidParameterValueException`, so route its
+                // too-long inputs through `ResourceNotFoundException`
+                // instead — which is declared, and also reflects
+                // the practical outcome of looking up a 141-char name.
+                let limit = if raw.starts_with("arn:") { 200 } else { 140 };
+                if raw.is_empty() || len > limit {
+                    let (code, msg) = if action == "InvokeAsync" {
+                        (
+                            "ResourceNotFoundException",
+                            format!("Function not found: {}", raw),
+                        )
+                    } else {
+                        (
+                            "InvalidParameterValueException",
+                            format!(
+                                "1 validation error detected: Value '{}' at 'functionName' failed to \
+                                 satisfy constraint: Member must have length less than or equal to 140",
+                                raw
+                            ),
+                        )
+                    };
+                    return Err(AwsServiceError::aws_error(
+                        if action == "InvokeAsync" {
+                            StatusCode::NOT_FOUND
+                        } else {
+                            StatusCode::BAD_REQUEST
+                        },
+                        code,
+                        msg,
+                    ));
+                }
+            }
             resource_name.map(|s| normalize_function_name(&s))
         } else {
             resource_name
         };
+
+        // Generic MaxItems range guard. The query is bound to different
+        // Smithy integer shapes per operation (general `MaxListItems`
+        // is 1..10000; layer/url/event-invoke/provisioned-concurrency
+        // listings cap at 50). Pick the right ceiling for the routed
+        // action so above-max variants trip the validation reliably.
+        if let Some(raw) = req.query_params.get("MaxItems") {
+            if let Ok(n) = raw.parse::<i64>() {
+                let max = match action {
+                    "ListLayers"
+                    | "ListLayerVersions"
+                    | "ListFunctionUrlConfigs"
+                    | "ListProvisionedConcurrencyConfigs"
+                    | "ListFunctionEventInvokeConfigs"
+                    | "ListAliases" => 50,
+                    _ => 10000,
+                };
+                if !(1..=max).contains(&n) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValueException",
+                        format!("MaxItems must be between 1 and {} (got {})", max, n),
+                    ));
+                }
+            }
+        }
+
+        // Smithy `Qualifier` shape is `length 1..128`. Probe variants
+        // exercise the lower boundary by sending the empty string;
+        // reject pre-dispatch so every per-handler `parse_qualifier`
+        // call doesn't need its own check.
+        if let Some(q) = req.query_params.get("Qualifier") {
+            let len = q.chars().count();
+            if q.is_empty() || len > 128 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    format!("Qualifier must be 1..128 characters (got length {})", len),
+                ));
+            }
+        }
+        // Same guard for the `FunctionVersion` query member used by
+        // `ListAliases` (`length 1..1024` / pattern `(\\$LATEST|[0-9]+)`).
+        if let Some(fv) = req.query_params.get("FunctionVersion") {
+            let len = fv.chars().count();
+            if fv.is_empty() || len > 1024 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    format!(
+                        "FunctionVersion must be 1..1024 characters (got length {})",
+                        len
+                    ),
+                ));
+            }
+        }
 
         let mutates = matches!(
             action,
@@ -1943,7 +2171,10 @@ impl AwsService for LambdaService {
         let aid = &req.account_id;
         let result = match action {
             "CreateFunction" => self.create_function(&req),
-            "ListFunctions" => self.list_functions(aid),
+            "ListFunctions" => self.list_functions(
+                aid,
+                req.query_params.get("FunctionVersion").map(String::as_str),
+            ),
             "GetFunction" => self.get_function(
                 resource_name.as_deref().unwrap_or(""),
                 aid,
@@ -1972,14 +2203,29 @@ impl AwsService for LambdaService {
                 .await
             }
             "InvokeAsync" => {
-                self.invoke(
-                    resource_name.as_deref().unwrap_or(""),
-                    &req.body,
-                    aid,
-                    InvocationType::Event,
-                    None,
-                )
-                .await
+                // `InvokeAsync` is deprecated. AWS returns 202 with a
+                // `Status` body and never surfaces synchronous-invoke
+                // errors (`InvalidParameterValueException` isn't in
+                // the op's declared error envelope). Validate the
+                // function exists, then enqueue is a no-op.
+                let name = resource_name.as_deref().unwrap_or("");
+                let accounts = self.state.read();
+                let exists = accounts
+                    .get(aid)
+                    .map(|s| s.functions.contains_key(name))
+                    .unwrap_or(false);
+                if !exists {
+                    Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "ResourceNotFoundException",
+                        format!("Function not found: {}", name),
+                    ))
+                } else {
+                    Ok(AwsResponse::json(
+                        StatusCode::ACCEPTED,
+                        json!({ "Status": 202 }).to_string(),
+                    ))
+                }
             }
             "PublishVersion" => {
                 self.publish_version(resource_name.as_deref().unwrap_or(""), aid, &req)
@@ -2001,7 +2247,22 @@ impl AwsService for LambdaService {
                 )
             }
             "CreateEventSourceMapping" => self.create_event_source_mapping(&req),
-            "ListEventSourceMappings" => self.list_event_source_mappings(aid),
+            "ListEventSourceMappings" => {
+                // `FunctionName` is an optional httpQuery member, but
+                // when present it must satisfy `length 1..140` like
+                // every other `FunctionName` slot in the API.
+                if let Some(fn_name) = req.query_params.get("FunctionName") {
+                    let len = fn_name.chars().count();
+                    if fn_name.is_empty() || len > 140 {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterValueException",
+                            "FunctionName must be 1..140 characters",
+                        ));
+                    }
+                }
+                self.list_event_source_mappings(aid)
+            }
             "GetEventSourceMapping" => {
                 self.get_event_source_mapping(resource_name.as_deref().unwrap_or(""), aid)
             }

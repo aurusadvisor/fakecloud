@@ -475,8 +475,13 @@ async fn update_function_code_replaces_image_uri() {
         "/2015-03-31/functions/img-fn/code",
         &body.to_string(),
     );
-    let resp = svc.handle(req).await.unwrap();
-    let post: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    svc.handle(req).await.unwrap();
+    // UpdateFunctionCode returns a `FunctionConfiguration` shape, which
+    // has no `Code` member — that wrapper only appears on `GetFunction`.
+    // Verify the new image URI via `GetFunction`.
+    let req = make_request(Method::GET, "/2015-03-31/functions/img-fn", "");
+    let post: Value =
+        serde_json::from_slice(svc.handle(req).await.unwrap().body.expect_bytes()).unwrap();
     assert_eq!(
         post["Code"]["ImageUri"].as_str().unwrap(),
         "new.example.com/image:2"
@@ -1147,7 +1152,7 @@ async fn delete_event_source_mapping_unknown_errors() {
 #[tokio::test]
 async fn list_functions_empty_ok() {
     let svc = LambdaService::new(make_state());
-    let resp = svc.list_functions("123456789012").unwrap();
+    let resp = svc.list_functions("123456789012", None).unwrap();
     assert_eq!(resp.status, http::StatusCode::OK);
 }
 
@@ -1502,23 +1507,25 @@ async fn update_function_code_replaces_image_uri_and_persists() {
         "/2015-03-31/functions/img-update/code",
         &body.to_string(),
     );
-    let resp = svc.handle(req).await.unwrap();
-    let post: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    svc.handle(req).await.unwrap();
+    // UpdateFunctionCode returns a `FunctionConfiguration` shape with no
+    // `Code` member — confirm the new URI via the `GetFunction` wrapper.
+    let req = make_request(Method::GET, "/2015-03-31/functions/img-update", "");
+    let wrap: Value =
+        serde_json::from_slice(svc.handle(req).await.unwrap().body.expect_bytes()).unwrap();
     assert_eq!(
-        post["Code"]["ImageUri"].as_str().unwrap(),
+        wrap["Code"]["ImageUri"].as_str().unwrap(),
         "new.example.com/image:2"
     );
 
-    // GetFunctionConfiguration round-trip confirms the change persisted.
-    let req = make_request(
-        Method::GET,
-        "/2015-03-31/functions/img-update/configuration",
-        "",
-    );
-    let resp = svc.handle(req).await.unwrap();
-    let cfg: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    // `GetFunctionConfiguration` returns only the `FunctionConfiguration`
+    // shape (no `Code` wrapper) — confirm the underlying image URI
+    // persists via `GetFunction`.
+    let req = make_request(Method::GET, "/2015-03-31/functions/img-update", "");
+    let wrap: Value =
+        serde_json::from_slice(svc.handle(req).await.unwrap().body.expect_bytes()).unwrap();
     assert_eq!(
-        cfg["Code"]["ImageUri"].as_str().unwrap(),
+        wrap["Code"]["ImageUri"].as_str().unwrap(),
         "new.example.com/image:2"
     );
 }
