@@ -107,8 +107,24 @@ pub(crate) fn validate_lb_name(name: &str) -> Result<(), AwsServiceError> {
     Ok(())
 }
 
+/// Generic "bad input" error for ELBv2 control-plane ops. ELBv2 doesn't
+/// model a top-level `ValidationException`; the closest declared shape on
+/// most create/modify ops is `InvalidConfigurationRequestException`
+/// (wire code `InvalidConfigurationRequest`). Strict-Smithy probes reject
+/// the legacy awsQuery `ValidationError` because no op declares it.
 pub(crate) fn invalid_param(msg: impl Into<String>) -> AwsServiceError {
-    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", msg.into())
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidConfigurationRequest",
+        msg.into(),
+    )
+}
+
+/// Variant of `invalid_param` for target register/deregister paths. Both
+/// ops declare `InvalidTargetException` (wire `InvalidTarget`); use that
+/// when the supplied target list is malformed.
+pub(crate) fn invalid_target(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidTarget", msg.into())
 }
 
 /// Listener protocols accepted by ELBv2: HTTP/HTTPS for ALB, TCP/UDP/
@@ -1158,9 +1174,36 @@ pub(crate) fn resolve_taggable<'a>(
     if st.trust_stores.contains_key(arn) {
         return Ok(&mut st.trust_stores.get_mut(arn).unwrap().tags);
     }
-    Err(AwsServiceError::aws_error(
+    Err(taggable_not_found(arn))
+}
+
+/// Map an unresolved tag-target ARN to the specific *NotFound error declared
+/// on the tag operations (AddTags / RemoveTags / DescribeTags all share the
+/// same Listener/LoadBalancer/Rule/TargetGroup/TrustStore NotFound set).
+/// awsQuery probes reject a generic "ResourceNotFound" because it isn't in
+/// any op's Smithy errors list; the closest declared shape comes from the
+/// ARN resource type.
+pub(crate) fn taggable_not_found(arn: &str) -> AwsServiceError {
+    let (code, label) = if arn.contains(":loadbalancer/") {
+        ("LoadBalancerNotFound", "Load balancer")
+    } else if arn.contains(":targetgroup/") {
+        ("TargetGroupNotFound", "Target group")
+    } else if arn.contains(":listener-rule/") {
+        ("RuleNotFound", "Rule")
+    } else if arn.contains(":listener/") {
+        ("ListenerNotFound", "Listener")
+    } else if arn.contains(":truststore/") {
+        ("TrustStoreNotFound", "Trust store")
+    } else {
+        // ARN didn't match any known ELBv2 resource type. The tag ops only
+        // declare specific *NotFound shapes — pick LoadBalancerNotFound as
+        // the catch-all since it's declared on every tag op and matches
+        // what AWS returns for unparseable ARNs.
+        ("LoadBalancerNotFound", "Resource")
+    };
+    AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
-        "ResourceNotFound",
-        format!("Resource '{arn}' not found"),
-    ))
+        code,
+        format!("{label} '{arn}' not found"),
+    )
 }
