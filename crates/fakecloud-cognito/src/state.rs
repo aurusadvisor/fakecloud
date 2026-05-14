@@ -111,6 +111,13 @@ pub struct CognitoState {
     /// `EventAction = BLOCK`.
     #[serde(default)]
     pub compromised_password_hashes: std::collections::BTreeSet<String>,
+    /// `<identity_pool_id>:<identity_provider_name>` -> principal-tag
+    /// attribute map. Set by `SetPrincipalTagAttributeMap`, read by
+    /// `GetPrincipalTagAttributeMap`. Real Cognito Identity persists
+    /// these per-(pool, provider) so federated callers can mint role
+    /// session tags from the JWT they authenticated with.
+    #[serde(default)]
+    pub principal_tag_attribute_maps: BTreeMap<String, PrincipalTagAttributeMap>,
     /// PreTokenGeneration Lambda trigger invocation log.
     /// Captured every time `InitiateAuth` fires the
     /// `TokenGeneration_Authentication` trigger and the Lambda returns,
@@ -229,6 +236,7 @@ impl CognitoState {
             identity_pool_role_attachments: BTreeMap::new(),
             federated_identities: BTreeMap::new(),
             compromised_password_hashes: std::collections::BTreeSet::new(),
+            principal_tag_attribute_maps: BTreeMap::new(),
             pre_token_gen_invocations: Vec::new(),
         }
     }
@@ -258,6 +266,7 @@ impl CognitoState {
         self.identity_pools.clear();
         self.identity_pool_role_attachments.clear();
         self.federated_identities.clear();
+        self.principal_tag_attribute_maps.clear();
         self.pre_token_gen_invocations.clear();
     }
 }
@@ -700,6 +709,19 @@ pub struct FederatedIdentity {
     pub developer_logins: BTreeMap<String, String>,
     pub creation_date: DateTime<Utc>,
     pub last_modified_date: DateTime<Utc>,
+}
+
+/// Principal-tag attribute map for an (identity_pool_id,
+/// identity_provider_name) pair. Real Cognito Identity uses these to
+/// translate IdP JWT claims into role session tags when
+/// `GetCredentialsForIdentity` mints credentials.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct PrincipalTagAttributeMap {
+    pub identity_pool_id: String,
+    pub identity_provider_name: String,
+    pub use_defaults: bool,
+    #[serde(default)]
+    pub principal_tags: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -30,7 +30,7 @@ use fakecloud_iam::{CredentialIdentity, SharedIamState, StsTempCredential};
 
 use crate::state::{
     CognitoIdentityProvider, CognitoState, FederatedIdentity, IdentityPool,
-    IdentityPoolRoleAttachment, SharedCognitoState,
+    IdentityPoolRoleAttachment, PrincipalTagAttributeMap, SharedCognitoState,
 };
 
 /// Service handler for `cognito-identity` (Federated Identity Pools).
@@ -83,6 +83,9 @@ impl AwsService for CognitoIdentityService {
             "TagResource" => self.tag_resource(&req),
             "UntagResource" => self.untag_resource(&req),
             "ListTagsForResource" => self.list_tags_for_resource(&req),
+            "DeleteIdentities" => self.delete_identities(&req),
+            "GetPrincipalTagAttributeMap" => self.get_principal_tag_attribute_map(&req),
+            "SetPrincipalTagAttributeMap" => self.set_principal_tag_attribute_map(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "cognito-identity",
                 &req.action,
@@ -112,11 +115,37 @@ impl AwsService for CognitoIdentityService {
             "TagResource",
             "UntagResource",
             "ListTagsForResource",
+            "DeleteIdentities",
+            "GetPrincipalTagAttributeMap",
+            "SetPrincipalTagAttributeMap",
         ]
     }
 }
 
 // --- helpers ----------------------------------------------------------------
+
+/// Return `InvalidParameterException` — the one error every cognito-identity
+/// op in the Smithy model declares for input validation.
+fn invalid_parameter(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidParameterException",
+        msg.into(),
+    )
+}
+
+/// Enforce a Smithy `@length(min, max)` trait. Returns
+/// `InvalidParameterException` (the declared error shape for every op
+/// that uses it).
+fn validate_length(field: &str, val: &str, min: usize, max: usize) -> Result<(), AwsServiceError> {
+    let len = val.chars().count();
+    if len < min || len > max {
+        return Err(invalid_parameter(format!(
+            "{field} length must be between {min} and {max} characters; got {len}"
+        )));
+    }
+    Ok(())
+}
 
 fn require_str<'a>(body: &'a Value, field: &str) -> Result<&'a str, AwsServiceError> {
     body[field]
@@ -255,13 +284,23 @@ impl CognitoIdentityService {
     fn create_identity_pool(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let identity_pool_name = require_str(&body, "IdentityPoolName")?.to_string();
+        // Smithy: `IdentityPoolName` is `@length(min: 1, max: 128)`.
+        validate_length("IdentityPoolName", &identity_pool_name, 1, 128)?;
+        // Smithy: `AllowUnauthenticatedIdentities` is `@required`. Real
+        // Cognito Identity rejects requests without it as
+        // `InvalidParameterException`. We previously defaulted silently
+        // to `false`, masking real callers' bugs.
         let allow_unauth = body["AllowUnauthenticatedIdentities"]
             .as_bool()
-            .unwrap_or(false);
+            .ok_or_else(|| invalid_parameter("AllowUnauthenticatedIdentities is required"))?;
         let allow_classic = body["AllowClassicFlow"].as_bool().unwrap_or(false);
         let developer_provider_name = body["DeveloperProviderName"]
             .as_str()
             .map(|s| s.to_string());
+        if let Some(ref dpn) = developer_provider_name {
+            // Smithy: `DeveloperProviderName` is `@length(min: 1, max: 128)`.
+            validate_length("DeveloperProviderName", dpn, 1, 128)?;
+        }
 
         let cognito_providers = parse_cognito_providers(&body["CognitoIdentityProviders"]);
         let oidc_provider_arns = parse_string_array(&body["OpenIdConnectProviderARNs"]);
@@ -385,8 +424,21 @@ impl CognitoIdentityService {
 
     fn list_identity_pools(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let max_results = body["MaxResults"].as_i64().unwrap_or(60).clamp(1, 60) as usize;
+        // Smithy: `MaxResults` is `@required`, `@range(min: 1, max: 60)`.
+        let max_results_raw = body["MaxResults"]
+            .as_i64()
+            .ok_or_else(|| invalid_parameter("MaxResults is required"))?;
+        if !(1..=60).contains(&max_results_raw) {
+            return Err(invalid_parameter(format!(
+                "MaxResults must be between 1 and 60; got {max_results_raw}"
+            )));
+        }
+        let max_results = max_results_raw as usize;
         let next_token = body["NextToken"].as_str();
+        if let Some(token) = next_token {
+            // Smithy: `PaginationKey` is `@length(min: 1, max: 65535)`.
+            validate_length("NextToken", token, 1, 65535)?;
+        }
 
         let accounts = self.state.read();
         let empty = CognitoState::new(&req.account_id, &req.region);
@@ -1039,6 +1091,13 @@ impl CognitoIdentityService {
     fn tag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let resource_arn = require_str(&body, "ResourceArn")?;
+        // Smithy: `ARNString` is `@length(min: 20, max: 2048)`.
+        validate_length("ResourceArn", resource_arn, 20, 2048)?;
+        // Smithy: `Tags` is `@required` on `TagResourceInput`. Real
+        // Cognito Identity rejects callers that omit the field.
+        if !body["Tags"].is_object() {
+            return Err(invalid_parameter("Tags is required"));
+        }
         let tags = parse_string_map(&body["Tags"]);
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -1052,6 +1111,12 @@ impl CognitoIdentityService {
     fn untag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let resource_arn = require_str(&body, "ResourceArn")?;
+        // Smithy: `ARNString` is `@length(min: 20, max: 2048)`.
+        validate_length("ResourceArn", resource_arn, 20, 2048)?;
+        // Smithy: `TagKeys` is `@required` on `UntagResourceInput`.
+        if !body["TagKeys"].is_array() {
+            return Err(invalid_parameter("TagKeys is required"));
+        }
         let keys = parse_string_array(&body["TagKeys"]);
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -1066,12 +1131,118 @@ impl CognitoIdentityService {
     fn list_tags_for_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let resource_arn = require_str(&body, "ResourceArn")?;
+        // Smithy: `ARNString` is `@length(min: 20, max: 2048)`.
+        validate_length("ResourceArn", resource_arn, 20, 2048)?;
         let accounts = self.state.read();
         let empty = CognitoState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let tags = state.tags.get(resource_arn).cloned().unwrap_or_default();
         Ok(AwsResponse::ok_json(json!({
             "Tags": tags,
+        })))
+    }
+
+    // --- identity bulk delete --------------------------------------------
+
+    /// `DeleteIdentities`: bulk-delete federated identities by id.
+    /// Returns an `UnprocessedIdentityIds` list for entries that didn't
+    /// exist — matching real Cognito Identity's contract.
+    fn delete_identities(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let ids_value = &body["IdentityIdsToDelete"];
+        let ids = ids_value
+            .as_array()
+            .ok_or_else(|| invalid_parameter("IdentityIdsToDelete is required"))?;
+        // Smithy: `IdentityIdList` is `@length(min: 1, max: 60)`.
+        if ids.is_empty() || ids.len() > 60 {
+            return Err(invalid_parameter(format!(
+                "IdentityIdsToDelete must contain between 1 and 60 entries; got {}",
+                ids.len()
+            )));
+        }
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+
+        let mut unprocessed: Vec<Value> = Vec::new();
+        for id_val in ids {
+            let Some(id) = id_val.as_str() else { continue };
+            if state.federated_identities.remove(id).is_none() {
+                unprocessed.push(json!({
+                    "IdentityId": id,
+                    "ErrorCode": "ResourceNotFoundException",
+                }));
+            }
+        }
+
+        Ok(AwsResponse::ok_json(json!({
+            "UnprocessedIdentityIds": unprocessed,
+        })))
+    }
+
+    // --- principal-tag attribute maps ------------------------------------
+
+    fn get_principal_tag_attribute_map(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "IdentityPoolId")?.to_string();
+        validate_length("IdentityPoolId", &pool_id, 1, 55)?;
+        let provider_name = require_str(&body, "IdentityProviderName")?.to_string();
+        validate_length("IdentityProviderName", &provider_name, 1, 128)?;
+
+        let accounts = self.state.read();
+        let empty = CognitoState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let key = format!("{pool_id}\x1f{provider_name}");
+        let map = state
+            .principal_tag_attribute_maps
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| PrincipalTagAttributeMap {
+                identity_pool_id: pool_id.clone(),
+                identity_provider_name: provider_name.clone(),
+                use_defaults: true,
+                principal_tags: BTreeMap::new(),
+            });
+
+        Ok(AwsResponse::ok_json(json!({
+            "IdentityPoolId": map.identity_pool_id,
+            "IdentityProviderName": map.identity_provider_name,
+            "UseDefaults": map.use_defaults,
+            "PrincipalTags": map.principal_tags,
+        })))
+    }
+
+    fn set_principal_tag_attribute_map(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "IdentityPoolId")?.to_string();
+        validate_length("IdentityPoolId", &pool_id, 1, 55)?;
+        let provider_name = require_str(&body, "IdentityProviderName")?.to_string();
+        validate_length("IdentityProviderName", &provider_name, 1, 128)?;
+        let use_defaults = body["UseDefaults"].as_bool().unwrap_or(true);
+        let principal_tags = parse_string_map(&body["PrincipalTags"]);
+
+        let map = PrincipalTagAttributeMap {
+            identity_pool_id: pool_id.clone(),
+            identity_provider_name: provider_name.clone(),
+            use_defaults,
+            principal_tags: principal_tags.clone(),
+        };
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let key = format!("{pool_id}\x1f{provider_name}");
+        state.principal_tag_attribute_maps.insert(key, map);
+
+        Ok(AwsResponse::ok_json(json!({
+            "IdentityPoolId": pool_id,
+            "IdentityProviderName": provider_name,
+            "UseDefaults": use_defaults,
+            "PrincipalTags": principal_tags,
         })))
     }
 }
