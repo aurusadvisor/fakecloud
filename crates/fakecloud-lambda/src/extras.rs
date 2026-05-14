@@ -2708,13 +2708,15 @@ fn event_invoke_json(c: &EventInvokeConfig) -> Value {
         "MaximumEventAgeInSeconds": c.maximum_event_age,
         "MaximumRetryAttempts": c.maximum_retry_attempts,
         "DestinationConfig": destination,
-        // AWS encodes `LastModified` as an ISO-8601 timestamp string,
-        // matching `@examples` and the Smithy `String` shape. Returning
-        // a unix timestamp number trips strict shape validators.
+        // `LastModified` is bound to Smithy's `Date` shape
+        // (`type: timestamp`). The default REST-JSON serialization
+        // for `timestamp` is an epoch-seconds float, which is what
+        // `aws-sdk-lambda` deserializes; emitting an ISO string here
+        // makes the SDK panic on `f64::from_str("2026-...")`.
         "LastModified": c
             .last_modified
-            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-            .to_string(),
+            .timestamp_millis() as f64
+            / 1000.0,
     })
 }
 
