@@ -1686,15 +1686,15 @@ impl SecretsManagerService {
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let secret = self.find_secret_ref(state, &secret_id)?;
 
-        // `ResourcePolicy` is documented to be present on every
-        // GetResourcePolicyResponse — real AWS returns an empty string
-        // when no policy has been attached. The documented `@examples`
-        // also expects the key, so we always emit it.
-        let response = json!({
+        // Real AWS omits ResourcePolicy when none is attached; terraform
+        // provider and the SDK choke on an empty-string policy.
+        let mut response = json!({
             "ARN": secret.arn,
             "Name": secret.name,
-            "ResourcePolicy": secret.resource_policy.clone().unwrap_or_default(),
         });
+        if let Some(ref policy) = secret.resource_policy {
+            response["ResourcePolicy"] = json!(policy);
+        }
 
         Ok(AwsResponse::ok_json(response))
     }

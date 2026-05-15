@@ -854,9 +854,7 @@ async fn test_put_get_delete_resource_policy() {
     let resp = svc.handle(req).await.unwrap();
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_eq!(body["Name"], "policy-secret");
-    // Real AWS always emits ResourcePolicy on the response; empty string
-    // when no policy is attached.
-    assert_eq!(body["ResourcePolicy"], "");
+    assert!(body.get("ResourcePolicy").is_none());
 
     // Put policy
     let policy = r#"{"Version":"2012-10-17","Statement":[]}"#;
@@ -883,7 +881,7 @@ async fn test_put_get_delete_resource_policy() {
     let req = make_request("GetResourcePolicy", r#"{"SecretId": "policy-secret"}"#);
     let resp = svc.handle(req).await.unwrap();
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert_eq!(body["ResourcePolicy"], "");
+    assert!(body.get("ResourcePolicy").is_none());
 }
 
 #[tokio::test]
