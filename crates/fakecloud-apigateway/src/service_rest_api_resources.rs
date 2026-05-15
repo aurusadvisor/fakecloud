@@ -15,6 +15,12 @@ impl ApiGatewayService {
         req: &AwsRequest,
         ResolvedAction { action, params }: ResolvedAction,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // Centralized Smithy-aligned prevalidation. Surfaces the
+        // declared `BadRequestException` shape for missing required
+        // body fields, missing/placeholder path labels, missing
+        // required query parameters, and invalid enum values before
+        // any per-handler logic runs.
+        crate::validation::prevalidate(action, req, &params)?;
         match action {
             "GetAccount" => self.get_account(req),
             "UpdateAccount" => self.update_account(req),

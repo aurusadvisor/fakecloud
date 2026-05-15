@@ -676,7 +676,14 @@ pub fn find_round_trip_pairs(model: &ServiceModel) -> Vec<RoundTripPair> {
             }
             candidates.push((reader, reader_suffix));
         }
-        candidates.sort_by_key(|(_, suf)| suf.len());
+        // Prefer an exact-suffix match (writer_suffix == reader_suffix) over
+        // a partial one. Without this, `PutIntegrationResponse` (writer
+        // suffix `IntegrationResponse`) pairs with `GetIntegration` (reader
+        // suffix `Integration`) because the latter has a shorter suffix
+        // and `IntegrationResponse.starts_with("Integration")` is true.
+        // Sort exact-matches first, then ascending suffix length, so the
+        // most specific reader wins.
+        candidates.sort_by_key(|(_, suf)| (*suf != writer_suffix, suf.len()));
 
         for (reader, _) in candidates {
             let reader_input_members =

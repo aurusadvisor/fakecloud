@@ -47,6 +47,12 @@ pub struct RoundTripFollowup {
     /// input. The probe pulls the identifier value out of the variant's
     /// own input by this name and re-uses it for the reader's input.
     pub id_field: String,
+    /// All shared identifier members. Services with multi-segment URIs
+    /// (e.g. API Gateway v1's
+    /// `/restapis/{r}/resources/{x}/methods/{m}`) need the entire
+    /// composite key in the follow-up Get — sending only `id_field`
+    /// leaves the Get with a half-specified path and a guaranteed 404.
+    pub id_fields: Vec<String>,
     /// (input_field, output_field) pairs that must echo verbatim from the
     /// Create input into the Get output.
     pub echo_fields: Vec<(String, String)>,
