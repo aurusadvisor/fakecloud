@@ -234,6 +234,19 @@ impl SesV2Service {
         })
     }
 
+    /// Reject empty URL-bound parameters with a Smithy-shaped BadRequestException.
+    fn require_nonempty(field: &str, value: &str) -> Result<(), AwsServiceError> {
+        if value.is_empty() {
+            Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                format!("{field} is required"),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     fn json_error(status: StatusCode, code: &str, message: &str) -> AwsResponse {
         let body = json!({
             "__type": code,

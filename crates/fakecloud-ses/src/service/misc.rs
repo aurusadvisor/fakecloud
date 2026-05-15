@@ -1582,18 +1582,13 @@ impl SesV2Service {
         let entity = match state.reputation_entities.get(&key) {
             Some(e) => e,
             None => {
-                // Return a default entity for any reference
                 let response = json!({
                     "ReputationEntity": {
                         "ReputationEntityReference": entity_ref,
                         "ReputationEntityType": entity_type,
                         "SendingStatusAggregate": "ENABLED",
-                        "CustomerManagedStatus": {
-                            "SendingStatus": "ENABLED",
-                        },
-                        "AwsSesManagedStatus": {
-                            "SendingStatus": "ENABLED",
-                        },
+                        "CustomerManagedStatus": {"Status": "ENABLED"},
+                        "AwsSesManagedStatus": {"Status": "ENABLED"},
                     }
                 });
                 return Ok(AwsResponse::json(StatusCode::OK, response.to_string()));
@@ -1606,12 +1601,8 @@ impl SesV2Service {
                 "ReputationEntityType": entity.reputation_entity_type,
                 "ReputationManagementPolicy": entity.reputation_management_policy,
                 "SendingStatusAggregate": entity.sending_status_aggregate,
-                "CustomerManagedStatus": {
-                    "SendingStatus": entity.customer_managed_status,
-                },
-                "AwsSesManagedStatus": {
-                    "SendingStatus": "ENABLED",
-                },
+                "CustomerManagedStatus": {"Status": entity.customer_managed_status},
+                "AwsSesManagedStatus": {"Status": "ENABLED"},
             }
         });
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
@@ -1646,10 +1637,18 @@ impl SesV2Service {
         entity_ref: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        Self::require_nonempty("ReputationEntityType", entity_type)?;
+        Self::require_nonempty("ReputationEntityReference", entity_ref)?;
         let body: Value = Self::parse_body(req)?;
         let sending_status = body["SendingStatus"]
             .as_str()
-            .unwrap_or("ENABLED")
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "SendingStatus is required",
+                )
+            })?
             .to_string();
 
         let key = format!("{}/{}", entity_type, entity_ref);
@@ -1679,10 +1678,20 @@ impl SesV2Service {
         entity_ref: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        Self::require_nonempty("ReputationEntityType", entity_type)?;
+        Self::require_nonempty("ReputationEntityReference", entity_ref)?;
         let body: Value = Self::parse_body(req)?;
         let policy = body["ReputationEntityPolicy"]
             .as_str()
-            .map(|s| s.to_string());
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "ReputationEntityPolicy is required",
+                )
+            })?
+            .to_string();
+        let policy = Some(policy);
 
         let key = format!("{}/{}", entity_type, entity_ref);
         let mut accounts = self.state.write();
@@ -2032,17 +2041,10 @@ impl SesV2Service {
         let accounts = self.state.read();
         let empty = SesState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let suppressed = state.suppressed_destinations.get(&email);
-        // MailboxValidation is the wire-shape field SDKs decode; emit an
-        // empty struct since fakecloud doesn't actually probe mailboxes.
+        // Smithy GetEmailAddressInsightsResponse only declares MailboxValidation.
+        let _ = (email, state);
         let body = json!({
-            "EmailAddress": email,
-            "Insights": [],
             "MailboxValidation": {},
-            "Suppression": suppressed.map(|s| json!({
-                "Status": s.reason,
-                "LastUpdateTime": s.last_update_time.timestamp(),
-            })),
         });
         Ok(AwsResponse::json(StatusCode::OK, body.to_string()))
     }
