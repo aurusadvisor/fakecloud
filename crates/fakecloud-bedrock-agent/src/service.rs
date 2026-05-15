@@ -925,7 +925,11 @@ fn now() -> DateTime<Utc> {
 }
 
 fn short_id() -> String {
-    uuid::Uuid::new_v4().to_string()[..8].to_string()
+    // Smithy ResourceIdentifier shape is @pattern("^[0-9a-zA-Z]{10}$").
+    // Use the first 10 hex chars of a v4 UUID (alphanumeric, deterministic
+    // length, no dashes).
+    let s = uuid::Uuid::new_v4().simple().to_string();
+    s[..10].to_string()
 }
 
 fn agent_json(a: &Agent) -> Value {

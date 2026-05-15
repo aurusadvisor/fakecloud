@@ -111,6 +111,21 @@ async fn bedrock_agent_knowledge_base_crud() {
     let create_resp = client
         .create_knowledge_base()
         .name("test-kb")
+        .role_arn("arn:aws:iam::123456789012:role/bedrock-kb-role")
+        .knowledge_base_configuration(
+            aws_sdk_bedrockagent::types::KnowledgeBaseConfiguration::builder()
+                .r#type(aws_sdk_bedrockagent::types::KnowledgeBaseType::Vector)
+                .vector_knowledge_base_configuration(
+                    aws_sdk_bedrockagent::types::VectorKnowledgeBaseConfiguration::builder()
+                        .embedding_model_arn(
+                            "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v1",
+                        )
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
         .send()
         .await
         .unwrap();
