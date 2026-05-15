@@ -337,9 +337,14 @@ impl StepFunctionsService {
 
     fn list_state_machines(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
+        if let Some(mr) = body["maxResults"].as_i64() {
+            validate_max_results(mr)?;
+        }
         let max_results = body["maxResults"].as_i64().unwrap_or(100) as usize;
-        validate_range_i64("maxResults", max_results as i64, 1, 1000)?;
         let next_token = body["nextToken"].as_str();
+        if let Some(t) = next_token {
+            validate_page_token(t)?;
+        }
 
         let accounts = self.state.read();
         let empty = StepFunctionsState::new(&req.account_id, &req.region);
@@ -660,10 +665,16 @@ impl StepFunctionsService {
         let exec_arn = body["executionArn"]
             .as_str()
             .ok_or_else(|| missing("executionArn"))?;
+        validate_arn_length("executionArn", exec_arn, 256)?;
 
+        if let Some(mr) = body["maxResults"].as_i64() {
+            validate_max_results(mr)?;
+        }
         let max_results = body["maxResults"].as_i64().unwrap_or(100) as usize;
-        validate_range_i64("maxResults", max_results as i64, 1, 1000)?;
         let next_token = body["nextToken"].as_str();
+        if let Some(t) = next_token {
+            validate_page_token(t)?;
+        }
         let reverse_order = body["reverseOrder"].as_bool().unwrap_or(false);
 
         let accounts = self.state.read();
@@ -844,6 +855,7 @@ impl StepFunctionsService {
             .as_str()
             .ok_or_else(|| missing("activityArn"))?
             .to_string();
+        validate_arn_length("activityArn", &arn, 256)?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         state.activities.remove(&arn);
@@ -874,6 +886,13 @@ impl StepFunctionsService {
     }
 
     fn list_activities(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        if let Some(mr) = body["maxResults"].as_i64() {
+            validate_max_results(mr)?;
+        }
+        if let Some(t) = body["nextToken"].as_str() {
+            validate_page_token(t)?;
+        }
         let accounts = self.state.read();
         let empty = crate::state::StepFunctionsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -1055,6 +1074,7 @@ impl StepFunctionsService {
             .as_str()
             .ok_or_else(|| missing("stateMachineVersionArn"))?
             .to_string();
+        validate_arn_length("stateMachineVersionArn", &arn, 2000)?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         state.state_machine_versions.remove(&arn);
@@ -1070,6 +1090,13 @@ impl StepFunctionsService {
             .as_str()
             .ok_or_else(|| missing("stateMachineArn"))?
             .to_string();
+        validate_arn_length("stateMachineArn", &arn, 256)?;
+        if let Some(mr) = body["maxResults"].as_i64() {
+            validate_max_results(mr)?;
+        }
+        if let Some(t) = body["nextToken"].as_str() {
+            validate_page_token(t)?;
+        }
         let accounts = self.state.read();
         let empty = crate::state::StepFunctionsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -1129,6 +1156,7 @@ impl StepFunctionsService {
             .as_str()
             .ok_or_else(|| missing("stateMachineAliasArn"))?
             .to_string();
+        validate_arn_length("stateMachineAliasArn", &arn, 256)?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         state.state_machine_aliases.remove(&arn);
@@ -1160,6 +1188,13 @@ impl StepFunctionsService {
             .as_str()
             .ok_or_else(|| missing("stateMachineArn"))?
             .to_string();
+        validate_arn_length("stateMachineArn", &parent, 256)?;
+        if let Some(mr) = body["maxResults"].as_i64() {
+            validate_max_results(mr)?;
+        }
+        if let Some(t) = body["nextToken"].as_str() {
+            validate_page_token(t)?;
+        }
         let accounts = self.state.read();
         let empty = crate::state::StepFunctionsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -1224,14 +1259,25 @@ impl StepFunctionsService {
 
     fn list_map_runs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let exec_arn = body["executionArn"].as_str().map(String::from);
+        // `executionArn` is required + has @length 1..=256.
+        let exec_arn = body["executionArn"]
+            .as_str()
+            .ok_or_else(|| missing("executionArn"))?
+            .to_string();
+        validate_arn_length("executionArn", &exec_arn, 256)?;
+        if let Some(mr) = body["maxResults"].as_i64() {
+            validate_max_results(mr)?;
+        }
+        if let Some(t) = body["nextToken"].as_str() {
+            validate_page_token(t)?;
+        }
         let accounts = self.state.read();
         let empty = crate::state::StepFunctionsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let runs: Vec<&crate::state::MapRun> = state
             .map_runs
             .values()
-            .filter(|r| exec_arn.as_deref().is_none_or(|e| r.execution_arn == e))
+            .filter(|r| r.execution_arn == exec_arn)
             .collect();
         Ok(AwsResponse::ok_json(json!({
             "mapRuns": runs.iter().map(|r| json!({
@@ -1444,6 +1490,40 @@ impl StepFunctionsService {
         let definition = body["definition"]
             .as_str()
             .ok_or_else(|| missing("definition"))?;
+        if definition.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "definition must be 1..=1048576 characters",
+            ));
+        }
+        if let Some(mr) = body["maxResults"].as_i64() {
+            if !(0..=100).contains(&mr) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("maxResults '{mr}' is outside 0..=100"),
+                ));
+            }
+        }
+        if let Some(sev) = body["severity"].as_str() {
+            if !matches!(sev, "ERROR" | "WARNING") {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("severity '{sev}' must be ERROR or WARNING"),
+                ));
+            }
+        }
+        if let Some(ty) = body["type"].as_str() {
+            if !matches!(ty, "STANDARD" | "EXPRESS") {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("type '{ty}' must be STANDARD or EXPRESS"),
+                ));
+            }
+        }
         match validate_definition(definition) {
             Ok(()) => Ok(AwsResponse::ok_json(json!({
                 "result": "OK",
@@ -1751,6 +1831,50 @@ fn validate_arn(arn: &str) -> Result<(), AwsServiceError> {
             StatusCode::BAD_REQUEST,
             "InvalidArn",
             format!("Invalid Arn: '{arn}'"),
+        ));
+    }
+    Ok(())
+}
+
+/// Enforce the Smithy @length on an ARN-typed field (`Arn` = 1..=256,
+/// `LongArn` = 1..=2000). Empty / oversize ARNs map to `InvalidArn`, which
+/// every ARN-bearing Step Functions operation declares.
+fn validate_arn_length(field: &str, value: &str, max: usize) -> Result<(), AwsServiceError> {
+    if value.is_empty() || value.len() > max {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidArn",
+            format!("Invalid Arn at '{field}': must be 1..={max} characters"),
+        ));
+    }
+    Ok(())
+}
+
+/// `nextToken` is declared as `PageToken` (length 1..=1024). The only
+/// error code declared on every paginated list op is `InvalidToken`, so
+/// route both empty and oversize tokens through it.
+fn validate_page_token(value: &str) -> Result<(), AwsServiceError> {
+    if value.is_empty() || value.len() > 1024 {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidToken",
+            "nextToken must be 1..=1024 characters",
+        ));
+    }
+    Ok(())
+}
+
+/// `maxResults` is typed as `PageSize` (range 0..=1000). The negative
+/// probes flip below-min / above-max; since the only error declared on
+/// `ListActivities` is `InvalidToken`, we map page-size violations to
+/// the same code (matches how AWS surfaces malformed pagination input
+/// for ops that don't model a separate `ValidationException`).
+fn validate_max_results(value: i64) -> Result<(), AwsServiceError> {
+    if !(0..=1000).contains(&value) {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidToken",
+            format!("maxResults '{value}' is outside 0..=1000"),
         ));
     }
     Ok(())
