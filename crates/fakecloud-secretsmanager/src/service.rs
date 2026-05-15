@@ -992,27 +992,23 @@ impl SecretsManagerService {
             .skip(start_idx)
             .take(max_results)
             .map(|s| {
+                // AWS always echoes `Description` and `SecretVersionsToStages`
+                // on every SecretListEntry. The documented `@examples` for
+                // ListSecrets relies on the fields being present even when
+                // empty, and SDK consumers index into them unconditionally.
+                let mut version_ids_to_stages: serde_json::Map<String, Value> =
+                    serde_json::Map::new();
+                for (vid, version) in &s.versions {
+                    version_ids_to_stages.insert(vid.clone(), json!(version.stages));
+                }
                 let mut entry = json!({
                     "ARN": s.arn,
                     "Name": s.name,
                     "CreatedDate": s.created_at.timestamp_millis() as f64 / 1000.0,
                     "LastChangedDate": s.last_changed_at.timestamp_millis() as f64 / 1000.0,
+                    "Description": s.description.clone().unwrap_or_default(),
+                    "SecretVersionsToStages": Value::Object(version_ids_to_stages),
                 });
-
-                if !s.versions.is_empty() {
-                    let mut version_ids_to_stages: serde_json::Map<String, Value> =
-                        serde_json::Map::new();
-                    for (vid, version) in &s.versions {
-                        version_ids_to_stages.insert(vid.clone(), json!(version.stages));
-                    }
-                    entry["SecretVersionsToStages"] = Value::Object(version_ids_to_stages);
-                }
-
-                if let Some(ref desc) = s.description {
-                    if !desc.is_empty() {
-                        entry["Description"] = json!(desc);
-                    }
-                }
 
                 if s.tags_ever_set || !s.tags.is_empty() {
                     entry["Tags"] = json!(tags_to_json(&s.tags));
@@ -1690,11 +1686,12 @@ impl SecretsManagerService {
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let secret = self.find_secret_ref(state, &secret_id)?;
 
+        // Real AWS omits ResourcePolicy when none is attached; terraform
+        // provider and the SDK choke on an empty-string policy.
         let mut response = json!({
             "ARN": secret.arn,
             "Name": secret.name,
         });
-
         if let Some(ref policy) = secret.resource_policy {
             response["ResourcePolicy"] = json!(policy);
         }
@@ -2028,7 +2025,7 @@ impl AwsService for SecretsManagerService {
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
             self.save_snapshot().await;
         }
-        result
+        result.map_err(remap_validation_error)
     }
 
     fn supported_actions(&self) -> &[&str] {
@@ -2063,6 +2060,31 @@ impl AwsService for SecretsManagerService {
 #[path = "service_helpers.rs"]
 mod service_helpers;
 pub(crate) use service_helpers::*;
+
+/// The shared `fakecloud_core::validation` helpers raise
+/// `ValidationException`, but the Secrets Manager Smithy model does not
+/// declare `ValidationException` on any operation — its declared input
+/// error is `InvalidParameterException`. Translate at the dispatcher
+/// boundary so the wire-level error code matches real AWS without
+/// duplicating every validator.
+fn remap_validation_error(err: AwsServiceError) -> AwsServiceError {
+    match err {
+        AwsServiceError::AwsError {
+            status,
+            code,
+            message,
+            extra_fields,
+            headers,
+        } if code == "ValidationException" => AwsServiceError::AwsError {
+            status,
+            code: "InvalidParameterException".to_string(),
+            message,
+            extra_fields,
+            headers,
+        },
+        other => other,
+    }
+}
 
 /// Extract the owning account-id from an `arn:aws:secretsmanager:...:ACCOUNT:secret:...`
 /// secret id. Returns `caller_account` when the input is a bare name
