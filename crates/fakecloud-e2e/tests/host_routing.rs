@@ -67,8 +67,11 @@ async fn unsigned_lambda_list_functions_via_host_header() {
     let server = TestServer::start().await;
     let http = reqwest::Client::new();
 
+    // Use the bare `/functions` path (no trailing slash) — the trailing-
+    // slash variant now intentionally routes to `GetFunction` with an
+    // elided `FunctionName` and returns 400 (matches AWS), per #1406.
     let resp = http
-        .get(format!("{}/2015-03-31/functions/", server.endpoint()))
+        .get(format!("{}/2015-03-31/functions", server.endpoint()))
         .header("Host", localstack_host("lambda.us-east-1", server.port()))
         .send()
         .await
