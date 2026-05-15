@@ -435,15 +435,10 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
-        let refs: Vec<String> = body
-            .get("tasks")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let refs: Vec<String> = req_array(&body, "tasks")?
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
         let include_tags = body
             .get("include")
             .and_then(|v| v.as_array())
@@ -488,6 +483,12 @@ impl EcsService {
 
     pub(super) fn list_tasks(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
+        validate_enum_opt(&body, "desiredStatus", &["RUNNING", "PENDING", "STOPPED"])?;
+        validate_enum_opt(
+            &body,
+            "launchType",
+            &["EC2", "FARGATE", "EXTERNAL", "MANAGED_INSTANCES"],
+        )?;
         let cluster_ref = opt_str(&body, "cluster");
         let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
         let family = opt_str(&body, "family");
@@ -656,11 +657,14 @@ mod multi_container_tests {
         let resp = svc.run_task(&run).unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         let containers = body["tasks"][0]["containers"].as_array().unwrap();
+        // The `essential` flag is a TaskDefinition.ContainerDefinition
+        // field, not part of the runtime `Container` response shape.
+        // Real ECS doesn't echo it back on RunTask, and the conformance
+        // probe rejects responses that do.
         for c in containers {
-            assert_eq!(
-                c.get("essential").and_then(|v| v.as_bool()),
-                Some(true),
-                "container {:?} should default essential=true",
+            assert!(
+                c.get("essential").is_none(),
+                "container {:?} must not carry `essential` on the runtime shape",
                 c.get("name")
             );
         }
@@ -753,7 +757,7 @@ mod multi_container_tests {
             assert!(c.get("name").is_some());
             assert!(c.get("lastStatus").is_some());
             assert!(c.get("runtimeId").is_some());
-            assert_eq!(c.get("essential").and_then(|v| v.as_bool()), Some(true));
+            assert!(c.get("essential").is_none());
         }
     }
 }

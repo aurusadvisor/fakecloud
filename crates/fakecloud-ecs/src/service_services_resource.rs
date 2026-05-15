@@ -844,15 +844,10 @@ impl EcsService {
         let body = request.json_body();
         let cluster_ref = opt_str(&body, "cluster");
         let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
-        let refs: Vec<String> = body
-            .get("services")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let refs: Vec<String> = req_array(&body, "services")?
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
 
         let account = request.account_id.clone();
         let accounts = self.state.read();
@@ -891,6 +886,13 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
+        validate_enum_opt(
+            &body,
+            "launchType",
+            &["EC2", "FARGATE", "EXTERNAL", "MANAGED_INSTANCES"],
+        )?;
+        validate_enum_opt(&body, "schedulingStrategy", &["REPLICA", "DAEMON"])?;
+        validate_enum_opt(&body, "resourceManagementType", &["CUSTOMER", "ECS"])?;
         let cluster_ref = opt_str(&body, "cluster");
         let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
         let launch_type = opt_str(&body, "launchType");

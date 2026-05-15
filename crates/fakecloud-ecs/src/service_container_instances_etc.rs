@@ -134,15 +134,10 @@ impl EcsService {
         let body = request.json_body();
         let cluster_ref = opt_str(&body, "cluster");
         let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
-        let refs: Vec<String> = body
-            .get("containerInstances")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let refs: Vec<String> = req_array(&body, "containerInstances")?
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
 
         let accounts = self.state.read();
         let mut found = Vec::new();
@@ -172,6 +167,17 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
+        validate_enum_opt(
+            &body,
+            "status",
+            &[
+                "ACTIVE",
+                "DRAINING",
+                "REGISTERING",
+                "DEREGISTERING",
+                "REGISTRATION_FAILED",
+            ],
+        )?;
         let cluster_ref = opt_str(&body, "cluster");
         let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
         let status_filter = opt_str(&body, "status");
@@ -236,18 +242,24 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
+        validate_enum_opt(
+            &body,
+            "status",
+            &[
+                "ACTIVE",
+                "DRAINING",
+                "REGISTERING",
+                "DEREGISTERING",
+                "REGISTRATION_FAILED",
+            ],
+        )?;
         let status = req_str(&body, "status")?.to_string();
         let cluster_ref = opt_str(&body, "cluster");
         let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
-        let refs: Vec<String> = body
-            .get("containerInstances")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let refs: Vec<String> = req_array(&body, "containerInstances")?
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
         let mut accounts = self.state.write();
         let state = accounts
             .get_mut(&request.account_id)
@@ -278,11 +290,7 @@ impl EcsService {
         let body = request.json_body();
         let cluster_ref = opt_str(&body, "cluster");
         let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
-        let attrs = body
-            .get("attributes")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let attrs = req_array(&body, "attributes")?.clone();
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -328,11 +336,7 @@ impl EcsService {
         let body = request.json_body();
         let cluster_ref = opt_str(&body, "cluster");
         let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
-        let attrs = body
-            .get("attributes")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let attrs = req_array(&body, "attributes")?.clone();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
         let mut deleted = Vec::new();
@@ -361,6 +365,7 @@ impl EcsService {
         let body = request.json_body();
         let cluster_ref = opt_str(&body, "cluster");
         let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
+        validate_enum_opt(&body, "targetType", &["container-instance"])?;
         let target_type = req_str(&body, "targetType")?.to_string();
         let attr_name = opt_str(&body, "attributeName");
         let attr_value = opt_str(&body, "attributeValue");
@@ -517,6 +522,7 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
+        let _cluster = req_str(&body, "cluster")?;
         let refs: Vec<String> = body
             .get("tasks")
             .and_then(|v| v.as_array())
@@ -549,19 +555,12 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
-        let refs: Vec<String> = body
-            .get("tasks")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let protect = body
-            .get("protectionEnabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let _cluster = req_str(&body, "cluster")?;
+        let refs: Vec<String> = req_array(&body, "tasks")?
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        let protect = req_bool(&body, "protectionEnabled")?;
         let expires_in_minutes = body
             .get("expiresInMinutes")
             .and_then(|v| v.as_i64())
@@ -746,8 +745,8 @@ impl EcsService {
         let body = request.json_body();
         let service_ref = req_str(&body, "service")?;
         let service_name = service_name_from_ref(service_ref);
-        let cluster_ref = opt_str(&body, "cluster");
-        let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
+        let cluster_ref = req_str(&body, "cluster")?;
+        let cluster_name = EcsState::resolve_cluster_name(Some(cluster_ref));
         let filter_refs: Vec<String> = body
             .get("taskSets")
             .and_then(|v| v.as_array())
@@ -957,8 +956,10 @@ impl EcsService {
 
     pub(super) fn submit_attachment_state_changes(
         &self,
-        _request: &AwsRequest,
+        request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let _attachments = req_array(&body, "attachments")?;
         // Attachments (ENIs) are beyond what fakecloud models today.
         // Ack the report so agents don't retry in a tight loop.
         Ok(AwsResponse::ok_json(json!({"acknowledgment": "OK"})))
@@ -1045,15 +1046,10 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
-        let refs: Vec<String> = body
-            .get("serviceDeploymentArns")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let refs: Vec<String> = req_array(&body, "serviceDeploymentArns")?
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
         let accounts = self.state.read();
         let mut found = Vec::new();
         let mut failures = Vec::new();
@@ -1101,15 +1097,10 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
-        let refs: Vec<String> = body
-            .get("serviceRevisionArns")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let refs: Vec<String> = req_array(&body, "serviceRevisionArns")?
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
         Ok(AwsResponse::ok_json(json!({
             "serviceRevisions": [],
             "failures": refs.iter().map(|r| json!({"arn": r, "reason": "MISSING"})).collect::<Vec<_>>(),

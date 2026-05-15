@@ -114,7 +114,7 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
-        let cluster_ref = opt_str(&body, "cluster");
+        let cluster_ref = Some(req_str(&body, "cluster")?);
         let name = EcsState::resolve_cluster_name(cluster_ref);
         let account = target_account_for_cluster(request, cluster_ref);
 
