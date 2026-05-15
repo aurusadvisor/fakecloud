@@ -170,14 +170,23 @@ fn diff_at(actual: &Value, documented: &Value, path: &str, out: &mut Vec<ShapeVi
                     return;
                 }
             };
+            // If the documented output advertises a pagination token but the
+            // live response holds no items to paginate, accept the absence:
+            // AWS only emits the token when truncating a non-empty page.
+            let live_pagination_empty = actual_pagination_empty(actual_map);
             for (key, doc_val) in doc_map {
                 let child_path = format!("{}.{}", path, key);
                 match actual_map.get(key) {
                     Some(act_val) => diff_at(act_val, doc_val, &child_path, out),
-                    None => out.push(ShapeViolation::ExamplesOutputDivergence {
-                        path: child_path,
-                        reason: ExamplesDivergenceReason::MissingField,
-                    }),
+                    None => {
+                        if live_pagination_empty && is_pagination_token_name(key) {
+                            continue;
+                        }
+                        out.push(ShapeViolation::ExamplesOutputDivergence {
+                            path: child_path,
+                            reason: ExamplesDivergenceReason::MissingField,
+                        })
+                    }
                 }
             }
         }
@@ -634,6 +643,41 @@ fn validate_map(
 
 /// Heuristic: does the trailing member name look like a Smithy timestamp?
 /// Used to scope the string-vs-number tolerance in `diff_against_example`.
+/// AWS pagination tokens use a small set of conventional member names.
+/// Recognise them so we can skip "documented but missing" checks when the
+/// live response has nothing to paginate.
+fn is_pagination_token_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    matches!(
+        n.as_str(),
+        "nexttoken"
+            | "nextmarker"
+            | "marker"
+            | "continuationtoken"
+            | "nextcontinuationtoken"
+            | "nextpagetoken"
+            | "pagetoken"
+            | "nextforwardtoken"
+            | "nextbackwardtoken"
+    )
+}
+
+/// True when every value in the live response that looks like a paginated
+/// collection (array or list-typed map) is empty. Used to relax the
+/// pagination-token presence check.
+fn actual_pagination_empty(actual_map: &serde_json::Map<String, Value>) -> bool {
+    let mut saw_collection = false;
+    for value in actual_map.values() {
+        if let Value::Array(arr) = value {
+            saw_collection = true;
+            if !arr.is_empty() {
+                return false;
+            }
+        }
+    }
+    saw_collection
+}
+
 fn looks_like_timestamp_name(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     n.ends_with("time")
