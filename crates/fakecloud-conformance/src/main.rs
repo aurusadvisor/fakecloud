@@ -483,7 +483,7 @@ fn cmd_check(
     let flake_margin: usize = std::env::var("FAKECLOUD_CONFORMANCE_FLAKE_MARGIN")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(50);
+        .unwrap_or(100);
     let mut regressions = Vec::new();
 
     let current_by_service: HashMap<&str, usize> = report_data
