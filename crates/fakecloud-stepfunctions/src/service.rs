@@ -337,10 +337,15 @@ impl StepFunctionsService {
 
     fn list_state_machines(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        if let Some(mr) = body["maxResults"].as_i64() {
+        let raw_max_results = body["maxResults"].as_i64();
+        if let Some(mr) = raw_max_results {
             validate_max_results(mr)?;
         }
-        let max_results = body["maxResults"].as_i64().unwrap_or(100) as usize;
+        // Smithy default: maxResults=0 means "use the service default" (100).
+        let max_results = match raw_max_results.unwrap_or(0) {
+            0 => 100,
+            n => n as usize,
+        };
         let next_token = body["nextToken"].as_str();
         if let Some(t) = next_token {
             validate_page_token(t)?;
@@ -887,25 +892,42 @@ impl StepFunctionsService {
 
     fn list_activities(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        if let Some(mr) = body["maxResults"].as_i64() {
+        let raw_max_results = body["maxResults"].as_i64();
+        if let Some(mr) = raw_max_results {
             validate_max_results(mr)?;
         }
-        if let Some(t) = body["nextToken"].as_str() {
+        let next_token = body["nextToken"].as_str();
+        if let Some(t) = next_token {
             validate_page_token(t)?;
         }
+        // Smithy default: maxResults=0 means "use the service default"
+        // (100 for Step Functions), which we honour by treating both
+        // `None` and `0` as 100.
+        let max_results = match raw_max_results.unwrap_or(0) {
+            0 => 100,
+            n => n as usize,
+        };
         let accounts = self.state.read();
         let empty = crate::state::StepFunctionsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let mut activities: Vec<&crate::state::Activity> = state.activities.values().collect();
         activities.sort_by(|a, b| a.name.cmp(&b.name));
-        let body = json!({
-            "activities": activities.iter().map(|a| json!({
-                "activityArn": a.arn,
-                "name": a.name,
-                "creationDate": a.creation_date.timestamp(),
-            })).collect::<Vec<_>>(),
-        });
-        Ok(AwsResponse::ok_json(body))
+        let items: Vec<Value> = activities
+            .iter()
+            .map(|a| {
+                json!({
+                    "activityArn": a.arn,
+                    "name": a.name,
+                    "creationDate": a.creation_date.timestamp(),
+                })
+            })
+            .collect();
+        let (page, token) = paginate(&items, next_token, max_results);
+        let mut resp = json!({ "activities": page });
+        if let Some(t) = token {
+            resp["nextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     async fn get_activity_task(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1091,12 +1113,18 @@ impl StepFunctionsService {
             .ok_or_else(|| missing("stateMachineArn"))?
             .to_string();
         validate_arn_length("stateMachineArn", &arn, 256)?;
-        if let Some(mr) = body["maxResults"].as_i64() {
+        let raw_max_results = body["maxResults"].as_i64();
+        if let Some(mr) = raw_max_results {
             validate_max_results(mr)?;
         }
-        if let Some(t) = body["nextToken"].as_str() {
+        let next_token = body["nextToken"].as_str();
+        if let Some(t) = next_token {
             validate_page_token(t)?;
         }
+        let max_results = match raw_max_results.unwrap_or(0) {
+            0 => 100,
+            n => n as usize,
+        };
         let accounts = self.state.read();
         let empty = crate::state::StepFunctionsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -1106,12 +1134,20 @@ impl StepFunctionsService {
             .filter(|v| v.state_machine_arn == arn)
             .collect();
         versions.sort_by_key(|v| std::cmp::Reverse(v.version));
-        let resp = json!({
-            "stateMachineVersions": versions.iter().map(|v| json!({
-                "stateMachineVersionArn": format!("{}:{}", v.state_machine_arn, v.version),
-                "creationDate": v.creation_date.timestamp(),
-            })).collect::<Vec<_>>(),
-        });
+        let items: Vec<Value> = versions
+            .iter()
+            .map(|v| {
+                json!({
+                    "stateMachineVersionArn": format!("{}:{}", v.state_machine_arn, v.version),
+                    "creationDate": v.creation_date.timestamp(),
+                })
+            })
+            .collect();
+        let (page, token) = paginate(&items, next_token, max_results);
+        let mut resp = json!({ "stateMachineVersions": page });
+        if let Some(t) = token {
+            resp["nextToken"] = json!(t);
+        }
         Ok(AwsResponse::ok_json(resp))
     }
 
@@ -1189,12 +1225,18 @@ impl StepFunctionsService {
             .ok_or_else(|| missing("stateMachineArn"))?
             .to_string();
         validate_arn_length("stateMachineArn", &parent, 256)?;
-        if let Some(mr) = body["maxResults"].as_i64() {
+        let raw_max_results = body["maxResults"].as_i64();
+        if let Some(mr) = raw_max_results {
             validate_max_results(mr)?;
         }
-        if let Some(t) = body["nextToken"].as_str() {
+        let next_token = body["nextToken"].as_str();
+        if let Some(t) = next_token {
             validate_page_token(t)?;
         }
+        let max_results = match raw_max_results.unwrap_or(0) {
+            0 => 100,
+            n => n as usize,
+        };
         let accounts = self.state.read();
         let empty = crate::state::StepFunctionsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -1207,12 +1249,21 @@ impl StepFunctionsService {
             .filter(|a| a.arn.starts_with(&parent_prefix))
             .collect();
         aliases.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(AwsResponse::ok_json(json!({
-            "stateMachineAliases": aliases.iter().map(|a| json!({
-                "stateMachineAliasArn": a.arn,
-                "creationDate": a.creation_date.timestamp(),
-            })).collect::<Vec<_>>(),
-        })))
+        let items: Vec<Value> = aliases
+            .iter()
+            .map(|a| {
+                json!({
+                    "stateMachineAliasArn": a.arn,
+                    "creationDate": a.creation_date.timestamp(),
+                })
+            })
+            .collect();
+        let (page, token) = paginate(&items, next_token, max_results);
+        let mut resp = json!({ "stateMachineAliases": page });
+        if let Some(t) = token {
+            resp["nextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     fn update_state_machine_alias(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1265,29 +1316,46 @@ impl StepFunctionsService {
             .ok_or_else(|| missing("executionArn"))?
             .to_string();
         validate_arn_length("executionArn", &exec_arn, 256)?;
-        if let Some(mr) = body["maxResults"].as_i64() {
+        let raw_max_results = body["maxResults"].as_i64();
+        if let Some(mr) = raw_max_results {
             validate_max_results(mr)?;
         }
-        if let Some(t) = body["nextToken"].as_str() {
+        let next_token = body["nextToken"].as_str();
+        if let Some(t) = next_token {
             validate_page_token(t)?;
         }
+        let max_results = match raw_max_results.unwrap_or(0) {
+            0 => 100,
+            n => n as usize,
+        };
         let accounts = self.state.read();
         let empty = crate::state::StepFunctionsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let runs: Vec<&crate::state::MapRun> = state
+        let mut runs: Vec<&crate::state::MapRun> = state
             .map_runs
             .values()
             .filter(|r| r.execution_arn == exec_arn)
             .collect();
-        Ok(AwsResponse::ok_json(json!({
-            "mapRuns": runs.iter().map(|r| json!({
-                "mapRunArn": r.map_run_arn,
-                "executionArn": r.execution_arn,
-                "stateMachineArn": "",
-                "startDate": r.start_date.timestamp(),
-                "stopDate": r.stop_date.map(|d| d.timestamp()),
-            })).collect::<Vec<_>>(),
-        })))
+        // Stable order so pagination is deterministic.
+        runs.sort_by_key(|r| r.start_date);
+        let items: Vec<Value> = runs
+            .iter()
+            .map(|r| {
+                json!({
+                    "mapRunArn": r.map_run_arn,
+                    "executionArn": r.execution_arn,
+                    "stateMachineArn": "",
+                    "startDate": r.start_date.timestamp(),
+                    "stopDate": r.stop_date.map(|d| d.timestamp()),
+                })
+            })
+            .collect();
+        let (page, token) = paginate(&items, next_token, max_results);
+        let mut resp = json!({ "mapRuns": page });
+        if let Some(t) = token {
+            resp["nextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     fn update_map_run(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
