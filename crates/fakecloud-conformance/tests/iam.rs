@@ -2116,3 +2116,95 @@ async fn iam_misc_account_ops() {
         .unwrap()
         .contains("<GlobalEndpointTokenVersion>v2Token</GlobalEndpointTokenVersion>"));
 }
+
+#[test_action("iam", "CreateDelegationRequest", checksum = "84b7a617")]
+#[test_action("iam", "AcceptDelegationRequest", checksum = "d512c062")]
+#[test_action("iam", "RejectDelegationRequest", checksum = "4120b198")]
+#[test_action("iam", "GetDelegationRequest", checksum = "c7b7aff8")]
+#[test_action("iam", "ListDelegationRequests", checksum = "a06e2be5")]
+#[test_action("iam", "UpdateDelegationRequest", checksum = "0675f35d")]
+#[test_action("iam", "SendDelegationToken", checksum = "6d253750")]
+#[test_action("iam", "AssociateDelegationRequest", checksum = "05f74036")]
+#[test_action("iam", "EnableOutboundWebIdentityFederation", checksum = "ed54ae5f")]
+#[test_action("iam", "DisableOutboundWebIdentityFederation", checksum = "2f6d24b9")]
+#[test_action("iam", "GetOutboundWebIdentityFederationInfo", checksum = "947612c4")]
+#[test_action("iam", "GetHumanReadableSummary", checksum = "b37cb675")]
+#[tokio::test]
+async fn iam_delegation_and_outbound_federation_lifecycle() {
+    let server = TestServer::start().await;
+
+    // CreateDelegationRequest produces a DelegationRequestId we can drive
+    // the rest of the lifecycle ops with. Minimal inputs only — the probe
+    // covers all variants in `run`.
+    let r = iam_post_raw(
+        &server,
+        &[
+            ("Action", "CreateDelegationRequest"),
+            ("Description", "conformance test"),
+            ("RequestorWorkflowId", "conf-wf-001"),
+            ("NotificationChannel", "email"),
+            ("SessionDuration", "3600"),
+            (
+                "Permissions.PolicyTemplateArn",
+                "arn:aws:iam::aws:policy/template/Conformance",
+            ),
+        ],
+    )
+    .await;
+    assert!(
+        r.status().is_success(),
+        "CreateDelegationRequest status {}",
+        r.status()
+    );
+    let body = r.text().await.unwrap();
+    let req_id = body
+        .split("<DelegationRequestId>")
+        .nth(1)
+        .and_then(|s| s.split("</").next())
+        .unwrap_or("delegation-0001")
+        .to_string();
+
+    for action in [
+        "AcceptDelegationRequest",
+        "RejectDelegationRequest",
+        "UpdateDelegationRequest",
+        "SendDelegationToken",
+        "AssociateDelegationRequest",
+        "GetDelegationRequest",
+    ] {
+        let r = iam_post_raw(
+            &server,
+            &[("Action", action), ("DelegationRequestId", &req_id)],
+        )
+        .await;
+        assert!(r.status().is_success(), "{action} status {}", r.status());
+    }
+
+    let r = iam_post_raw(&server, &[("Action", "ListDelegationRequests")]).await;
+    assert!(r.status().is_success());
+
+    for action in [
+        "EnableOutboundWebIdentityFederation",
+        "GetOutboundWebIdentityFederationInfo",
+        "DisableOutboundWebIdentityFederation",
+    ] {
+        let r = iam_post_raw(&server, &[("Action", action)]).await;
+        assert!(r.status().is_success(), "{action} status {}", r.status());
+    }
+    let r = iam_post_raw(
+        &server,
+        &[
+            ("Action", "GetHumanReadableSummary"),
+            (
+                "EntityArn",
+                "arn:aws:iam::123456789012:role/ConformanceSummary",
+            ),
+        ],
+    )
+    .await;
+    assert!(
+        r.status().is_success(),
+        "GetHumanReadableSummary status {}",
+        r.status()
+    );
+}
