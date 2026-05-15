@@ -241,8 +241,8 @@ async fn test_secret_id_length_validation() {
     let long_id = "x".repeat(2049);
     let req = make_request("GetSecretValue", &format!(r#"{{"SecretId": "{long_id}"}}"#));
     match svc.handle(req).await {
-        Err(e) => assert!(e.to_string().contains("ValidationException")),
-        Ok(_) => panic!("expected ValidationException"),
+        Err(e) => assert!(e.to_string().contains("InvalidParameterException")),
+        Ok(_) => panic!("expected InvalidParameterException"),
     }
 }
 
@@ -258,8 +258,8 @@ async fn test_name_length_validation() {
         &format!(r#"{{"Name": "{long_name}", "SecretString": "val"}}"#),
     );
     match svc.handle(req).await {
-        Err(e) => assert!(e.to_string().contains("ValidationException")),
-        Ok(_) => panic!("expected ValidationException"),
+        Err(e) => assert!(e.to_string().contains("InvalidParameterException")),
+        Ok(_) => panic!("expected InvalidParameterException"),
     }
 }
 
@@ -275,8 +275,8 @@ async fn test_next_token_length_validation() {
         &format!(r#"{{"NextToken": "{long_token}"}}"#),
     );
     match svc.handle(req).await {
-        Err(e) => assert!(e.to_string().contains("ValidationException")),
-        Ok(_) => panic!("expected ValidationException"),
+        Err(e) => assert!(e.to_string().contains("InvalidParameterException")),
+        Ok(_) => panic!("expected InvalidParameterException"),
     }
 }
 
@@ -291,8 +291,8 @@ async fn test_client_request_token_length_validation() {
         r#"{"Name": "test", "SecretString": "val", "ClientRequestToken": "short"}"#,
     );
     match svc.handle(req).await {
-        Err(e) => assert!(e.to_string().contains("ValidationException")),
-        Ok(_) => panic!("expected ValidationException"),
+        Err(e) => assert!(e.to_string().contains("InvalidParameterException")),
+        Ok(_) => panic!("expected InvalidParameterException"),
     }
 }
 
@@ -854,7 +854,9 @@ async fn test_put_get_delete_resource_policy() {
     let resp = svc.handle(req).await.unwrap();
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_eq!(body["Name"], "policy-secret");
-    assert!(body.get("ResourcePolicy").is_none());
+    // Real AWS always emits ResourcePolicy on the response; empty string
+    // when no policy is attached.
+    assert_eq!(body["ResourcePolicy"], "");
 
     // Put policy
     let policy = r#"{"Version":"2012-10-17","Statement":[]}"#;
@@ -881,7 +883,7 @@ async fn test_put_get_delete_resource_policy() {
     let req = make_request("GetResourcePolicy", r#"{"SecretId": "policy-secret"}"#);
     let resp = svc.handle(req).await.unwrap();
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert!(body.get("ResourcePolicy").is_none());
+    assert_eq!(body["ResourcePolicy"], "");
 }
 
 #[tokio::test]
@@ -1579,7 +1581,7 @@ async fn list_secrets_invalid_filter_key() {
     });
     let req = make_request("ListSecrets", &body.to_string());
     let err = expect_err(svc.handle(req).await);
-    assert!(err.to_string().contains("ValidationException"));
+    assert!(err.to_string().contains("InvalidParameterException"));
 }
 
 #[tokio::test]
