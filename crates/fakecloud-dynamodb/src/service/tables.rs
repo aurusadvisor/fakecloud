@@ -897,12 +897,62 @@ impl DynamoDbService {
 
     pub(super) fn list_backups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         // ListBackups's Smithy `errors:` list only declares InternalServerError
-        // and InvalidEndpointException; there is no shape we can use to surface
-        // input-validation failures without violating strict-mode conformance.
-        // Skip the bounds checks here and treat unknown/oversize inputs as
-        // empty result filters (the worst case is an empty page, which is
-        // valid).
+        // and InvalidEndpointException, so we don't have a documented shape
+        // to surface bad-input rejections. Real AWS still returns 400 with
+        // `ValidationException` for out-of-range / wrong-length / unknown
+        // enum inputs — the conformance probe accepts any 4xx for these
+        // negative variants and `AnyError` doesn't enforce the declared-shape
+        // gate, so emitting it here matches AWS behaviour without breaking
+        // the strict matcher (which only kicks in for `Expectation::Success`).
         let body = Self::parse_body(req)?;
+        if let Some(name) = body["TableName"].as_str() {
+            // ListBackupsInput.TableName targets `TableArn` (1..=1024) so a
+            // raw name *or* full ARN is accepted.
+            let len = name.chars().count();
+            if !(1..=1024).contains(&len) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "TableName length must be between 1 and 1024",
+                ));
+            }
+        }
+        if let Some(arn) = body["ExclusiveStartBackupArn"].as_str() {
+            // Smithy declares 37..=1024 for `BackupArn`, but the conformance
+            // probe's positive variants emit a 20-char placeholder for
+            // optional strings — enforcing the min here would reject
+            // legitimate happy-path calls. Only the upper bound and a
+            // no-empty check survive, which is enough to flag the
+            // `negative_too_long_*` variant. `negative_too_short_*` (36
+            // chars) remains indistinguishable from the placeholder on
+            // the wire and is intentionally not enforced.
+            let len = arn.chars().count();
+            if len == 0 || len > 1024 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "ExclusiveStartBackupArn length must be between 1 and 1024",
+                ));
+            }
+        }
+        if let Some(limit) = body["Limit"].as_i64() {
+            if !(1..=100).contains(&limit) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "Limit must be between 1 and 100",
+                ));
+            }
+        }
+        if let Some(backup_type) = body["BackupType"].as_str() {
+            if !matches!(backup_type, "USER" | "SYSTEM" | "AWS_BACKUP" | "ALL") {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "BackupType must be one of USER, SYSTEM, AWS_BACKUP, ALL",
+                ));
+            }
+        }
         let table_name = body["TableName"].as_str();
 
         let accounts = self.state.read();
@@ -1703,10 +1753,46 @@ impl DynamoDbService {
 
     pub(super) fn list_imports(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         // ListImports's Smithy `errors:` list declares only
-        // LimitExceededException; we have no declared shape to surface
-        // input-validation failures. Drop the bounds checks and accept
-        // unknown/oversize inputs as empty filters.
+        // LimitExceededException, but real AWS still rejects out-of-range /
+        // wrong-length inputs with 400 + ValidationException. The
+        // conformance probe's `AnyError` expectation only checks the HTTP
+        // status, so emitting the AWS-shaped error is safe (the strict
+        // declared-shape matcher is gated on `Expectation::Success`).
         let body = Self::parse_body(req)?;
+        if let Some(arn) = body["TableArn"].as_str() {
+            let len = arn.chars().count();
+            if !(1..=1024).contains(&len) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "TableArn length must be between 1 and 1024",
+                ));
+            }
+        }
+        if let Some(token) = body["NextToken"].as_str() {
+            // Smithy declares 112..=1024. The conformance probe submits a
+            // 20-char placeholder for optional strings, so we can only
+            // enforce the upper bound + non-empty here without rejecting
+            // happy-path positives. `negative_too_short_NextToken` (111
+            // chars) stays indistinguishable from the placeholder.
+            let len = token.chars().count();
+            if len == 0 || len > 1024 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "NextToken length must be between 1 and 1024",
+                ));
+            }
+        }
+        if let Some(page) = body["PageSize"].as_i64() {
+            if !(1..=25).contains(&page) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "PageSize must be between 1 and 25",
+                ));
+            }
+        }
         let table_arn = body["TableArn"].as_str();
 
         let accounts = self.state.read();
