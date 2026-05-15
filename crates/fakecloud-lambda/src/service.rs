@@ -907,10 +907,28 @@ impl LambdaService {
             return match (&req.method, segs.len(), third, version.is_some()) {
                 (&Method::GET, 2, _, _) => Some(("ListLayers", None)),
                 (&Method::POST, 4, Some("versions"), false) => Some(("PublishLayerVersion", layer)),
-                (&Method::GET, 4, Some("versions"), false) => Some(("ListLayerVersions", layer)),
+                (&Method::GET, 4, Some("versions"), false) => {
+                    // `GET .../versions` is `ListLayerVersions`; the same
+                    // path with a trailing slash is a malformed
+                    // `GetLayerVersion` call whose `VersionNumber` httpLabel
+                    // was elided. Route there so the handler can reject.
+                    if req.raw_path.ends_with("/versions/") {
+                        Some(("GetLayerVersion", layer))
+                    } else {
+                        Some(("ListLayerVersions", layer))
+                    }
+                }
                 (&Method::GET, 5, Some("versions"), true) => Some(("GetLayerVersion", version)),
                 (&Method::DELETE, 5, Some("versions"), true) => {
                     Some(("DeleteLayerVersion", version))
+                }
+                // `DELETE .../versions/` (trailing slash, no VersionNumber
+                // segment) is a malformed `DeleteLayerVersion` call — route
+                // there so the handler can reject the missing path label.
+                (&Method::DELETE, 4, Some("versions"), false)
+                    if req.raw_path.ends_with("/versions/") =>
+                {
+                    Some(("DeleteLayerVersion", layer))
                 }
                 (&Method::GET, 6, Some("versions"), true)
                     if segs.get(5).map(|s| s.as_str()) == Some("policy") =>
@@ -964,7 +982,17 @@ impl LambdaService {
 
         let action = match (&req.method, segs.len(), collection, third) {
             (&Method::POST, 2, Some("functions"), _) => "CreateFunction",
-            (&Method::GET, 2, Some("functions"), _) => "ListFunctions",
+            (&Method::GET, 2, Some("functions"), _) => {
+                // `GET .../functions` is `ListFunctions`. `GET .../functions/`
+                // (trailing slash) signals a `GetFunction` call whose
+                // `FunctionName` httpLabel was elided — route there so it
+                // can reject the missing identifier.
+                if req.raw_path.ends_with("/functions/") {
+                    "GetFunction"
+                } else {
+                    "ListFunctions"
+                }
+            }
             (&Method::GET, 3, Some("functions"), _) => "GetFunction",
             (&Method::DELETE, 3, Some("functions"), _) => "DeleteFunction",
             (&Method::POST, 4, Some("functions"), Some("invocations")) => "Invoke",
@@ -978,7 +1006,17 @@ impl LambdaService {
             (&Method::GET, 4, Some("functions"), Some("policy")) => "GetPolicy",
             (&Method::DELETE, 5, Some("functions"), Some("policy")) => "RemovePermission",
             (&Method::POST, 4, Some("functions"), Some("aliases")) => "CreateAlias",
-            (&Method::GET, 4, Some("functions"), Some("aliases")) => "ListAliases",
+            (&Method::GET, 4, Some("functions"), Some("aliases")) => {
+                // `GET .../aliases` (no trailing slash) is `ListAliases`.
+                // `GET .../aliases/` (trailing slash) is `GetAlias` with an
+                // empty `Name` — route there so it can reject the missing
+                // path label rather than silently degrading to a list.
+                if req.raw_path.ends_with("/aliases/") {
+                    "GetAlias"
+                } else {
+                    "ListAliases"
+                }
+            }
             (&Method::GET, 5, Some("functions"), Some("aliases")) => "GetAlias",
             (&Method::PUT, 5, Some("functions"), Some("aliases")) => "UpdateAlias",
             (&Method::DELETE, 5, Some("functions"), Some("aliases")) => "DeleteAlias",
@@ -1189,6 +1227,13 @@ impl LambdaService {
         region: &str,
         qualifier: Option<&str>,
     ) -> Result<AwsResponse, AwsServiceError> {
+        if function_name.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                "FunctionName is required",
+            ));
+        }
         let accounts = self.state.read();
         let empty = LambdaState::new(account_id, region);
         let state = accounts.get(account_id).unwrap_or(&empty);

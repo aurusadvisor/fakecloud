@@ -1331,11 +1331,17 @@ impl LambdaService {
                 "LayerName exceeds the 140-character maximum",
             ));
         }
-        let version: i64 = req
-            .path_segments
-            .get(4)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        let version_raw = req.path_segments.get(4).map(|s| s.as_str()).unwrap_or("");
+        if version_raw.is_empty() {
+            return Err(missing("VersionNumber"));
+        }
+        let version: i64 = version_raw.parse().map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                "VersionNumber must be an integer",
+            )
+        })?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         if let Some(layer) = state.layers.get_mut(&layer_name) {

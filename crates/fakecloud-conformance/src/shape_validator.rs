@@ -685,6 +685,7 @@ fn looks_like_timestamp_name(name: &str) -> bool {
         || n.ends_with("timestamp")
         || n.ends_with("at")
         || n.ends_with("expires")
+        || n.ends_with("modified")
         || n == "createdat"
         || n == "modifiedat"
 }
