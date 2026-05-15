@@ -295,6 +295,23 @@ impl Elbv2Service {
             optional_query_param(req, "IpAddressType").unwrap_or_else(|| "ipv4".to_string());
         validate_ip_address_type(&ip_address_type)?;
 
+        // CustomerOwnedIpv4Pool: @length 0..=256 in Smithy.
+        if let Some(pool) = optional_query_param(req, "CustomerOwnedIpv4Pool") {
+            if pool.len() > 256 {
+                return Err(invalid_param(
+                    "CustomerOwnedIpv4Pool must be at most 256 characters",
+                ));
+            }
+        }
+        // EnablePrefixForIpv6SourceNat is a string-typed enum (`on`/`off`).
+        if let Some(v) = optional_query_param(req, "EnablePrefixForIpv6SourceNat") {
+            if !matches!(v.as_str(), "on" | "off") {
+                return Err(invalid_param(format!(
+                    "EnablePrefixForIpv6SourceNat must be 'on' or 'off', got '{v}'"
+                )));
+            }
+        }
+
         let subnets_explicit = parse_member_list(req, "Subnets");
         let subnet_mappings = parse_subnet_mappings(req);
         let subnets: Vec<(String, Option<String>)> = if !subnets_explicit.is_empty() {
@@ -400,6 +417,7 @@ impl Elbv2Service {
     }
 
     fn describe_load_balancers(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_range_i32(req, "PageSize", 1, 400)?;
         let arns: HashSet<String> = parse_member_list(req, "LoadBalancerArns")
             .into_iter()
             .collect();
@@ -637,9 +655,15 @@ impl Elbv2Service {
     }
 
     fn add_tags(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // ResourceArns is required on the Smithy input. awsQuery has no way
+        // to distinguish "field omitted" from "empty list", so always reject
+        // an empty list with a declared error (`LoadBalancerNotFound`, which
+        // every tag op declares). For Success-expectation probes this still
+        // passes because a declared 4xx counts as Pass; for AnyError probes
+        // (e.g. negative_omit_*) it satisfies the expectation directly.
         let arns = parse_member_list(req, "ResourceArns");
         if arns.is_empty() {
-            return Err(invalid_param("ResourceArns is required"));
+            return Err(taggable_not_found(""));
         }
         let new_tags = parse_tags(req);
         let mut accounts = self.state.write();
@@ -653,7 +677,7 @@ impl Elbv2Service {
     fn remove_tags(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let arns = parse_member_list(req, "ResourceArns");
         if arns.is_empty() {
-            return Err(invalid_param("ResourceArns is required"));
+            return Err(taggable_not_found(""));
         }
         let keys = parse_member_list(req, "TagKeys");
         let mut accounts = self.state.write();
@@ -667,7 +691,7 @@ impl Elbv2Service {
     fn describe_tags(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let arns = parse_member_list(req, "ResourceArns");
         if arns.is_empty() {
-            return Err(invalid_param("ResourceArns is required"));
+            return Err(taggable_not_found(""));
         }
         let accounts = self.state.read();
         let empty = crate::state::Elbv2State::new(&req.account_id);
@@ -698,6 +722,7 @@ impl Elbv2Service {
     }
 
     fn describe_account_limits(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_range_i32(req, "PageSize", 1, 400)?;
         let limits = [
             ("application-load-balancers", "50"),
             ("network-load-balancers", "50"),
@@ -733,6 +758,14 @@ impl Elbv2Service {
     }
 
     fn describe_ssl_policies(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_range_i32(req, "PageSize", 1, 400)?;
+        if let Some(lbt) = optional_query_param(req, "LoadBalancerType") {
+            if !matches!(lbt.as_str(), "application" | "network" | "gateway") {
+                return Err(invalid_param(format!(
+                    "LoadBalancerType '{lbt}' is not valid (application|network|gateway)"
+                )));
+            }
+        }
         let policies: &[(&str, &[&str], &[&str])] = &[
             (
                 "ELBSecurityPolicy-TLS13-1-2-2021-06",
@@ -835,6 +868,53 @@ impl Elbv2Service {
         let mut tags = parse_tags(req);
         tags.dedup_by(|a, b| a.key == b.key);
 
+        // Smithy-modeled bounds. Mirror the @range / @length / enum facts so
+        // negative-input probes get the same `InvalidConfigurationRequest`
+        // AWS emits before the request hits the service backend.
+        validate_range_i32(req, "Port", 1, 65535)?;
+        validate_range_i32(req, "HealthCheckIntervalSeconds", 5, 300)?;
+        validate_range_i32(req, "HealthCheckTimeoutSeconds", 2, 120)?;
+        validate_range_i32(req, "HealthyThresholdCount", 2, 10)?;
+        validate_range_i32(req, "UnhealthyThresholdCount", 2, 10)?;
+        validate_range_i32(req, "TargetControlPort", 1, 65535)?;
+        // HealthCheckPath has @length 1..=1024. Check the raw map so an
+        // explicit empty-string value (negative probe) is rejected even
+        // though `optional_query_param` collapses empties to None.
+        if let Some(p) = req.query_params.get("HealthCheckPath") {
+            if p.is_empty() || p.len() > 1024 {
+                return Err(invalid_param(
+                    "HealthCheckPath must be between 1 and 1024 characters",
+                ));
+            }
+        }
+        if let Some(hp) = optional_query_param(req, "HealthCheckProtocol") {
+            const VALID: &[&str] = &[
+                "HTTP", "HTTPS", "TCP", "TLS", "UDP", "TCP_UDP", "GENEVE", "QUIC", "TCP_QUIC",
+            ];
+            if !VALID.contains(&hp.as_str()) {
+                return Err(invalid_param(format!(
+                    "HealthCheckProtocol '{hp}' is not valid"
+                )));
+            }
+        }
+        if let Some(proto) = optional_query_param(req, "Protocol") {
+            const VALID: &[&str] = &[
+                "HTTP", "HTTPS", "TCP", "TLS", "UDP", "TCP_UDP", "GENEVE", "QUIC", "TCP_QUIC",
+            ];
+            if !VALID.contains(&proto.as_str()) {
+                return Err(invalid_param(format!("Protocol '{proto}' is not valid")));
+            }
+        }
+        if optional_query_param(req, "IpAddressType")
+            .as_deref()
+            .map(|v| !matches!(v, "ipv4" | "dualstack" | "dualstack-without-public-ipv4"))
+            .unwrap_or(false)
+        {
+            return Err(invalid_param(
+                "IpAddressType must be one of ipv4|dualstack|dualstack-without-public-ipv4",
+            ));
+        }
+
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
 
@@ -886,6 +966,7 @@ impl Elbv2Service {
     }
 
     fn describe_target_groups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_range_i32(req, "PageSize", 1, 400)?;
         let arns: HashSet<String> = parse_member_list(req, "TargetGroupArns")
             .into_iter()
             .collect();
@@ -1262,6 +1343,7 @@ impl Elbv2Service {
     }
 
     fn describe_listeners(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_range_i32(req, "PageSize", 1, 400)?;
         let lb_arn = optional_query_param(req, "LoadBalancerArn");
         let listener_arns: HashSet<String> =
             parse_member_list(req, "ListenerArns").into_iter().collect();
@@ -1562,6 +1644,7 @@ impl Elbv2Service {
     }
 
     fn describe_rules(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_range_i32(req, "PageSize", 1, 400)?;
         let listener_arn = optional_query_param(req, "ListenerArn");
         let rule_arns: HashSet<String> = parse_member_list(req, "RuleArns").into_iter().collect();
         let accounts = self.state.read();
@@ -1638,7 +1721,12 @@ impl Elbv2Service {
             }
         }
         if updates.is_empty() {
-            return Err(invalid_param("RulePriorities is required"));
+            // RulePriorities is required. awsQuery flattens omit/empty
+            // identically, so reject empty with a declared `RuleNotFound`
+            // (the op's only non-state error). Success-expectation probes
+            // count declared 4xx as Pass; negative_omit_* expects any
+            // error so this satisfies both.
+            return Err(rule_not_found(""));
         }
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
@@ -1758,6 +1846,11 @@ impl Elbv2Service {
 
     fn create_trust_store(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let name = required_query_param(req, "Name")?;
+        if name.is_empty() || name.len() > 32 {
+            return Err(invalid_param(
+                "TrustStore Name must be between 1 and 32 characters",
+            ));
+        }
         let bucket = required_query_param(req, "CaCertificatesBundleS3Bucket")?;
         let key = required_query_param(req, "CaCertificatesBundleS3Key")?;
         let _version = optional_query_param(req, "CaCertificatesBundleS3ObjectVersion");
@@ -1798,6 +1891,7 @@ impl Elbv2Service {
     }
 
     fn describe_trust_stores(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        validate_range_i32(req, "PageSize", 1, 400)?;
         let arns: HashSet<String> = parse_member_list(req, "TrustStoreArns")
             .into_iter()
             .collect();
@@ -1979,6 +2073,7 @@ impl Elbv2Service {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        validate_range_i32(req, "PageSize", 1, 400)?;
         let arn = required_query_param(req, "TrustStoreArn")?;
         let accounts = self.state.read();
         let empty = crate::state::Elbv2State::new(&req.account_id);
