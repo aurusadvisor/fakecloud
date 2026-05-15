@@ -291,7 +291,7 @@ impl AthenaService {
 
     fn list_work_groups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let max_results = validate_max_results(&body, 1, 50)?;
         let next_token = body
             .get("NextToken")
             .and_then(Value::as_str)
@@ -436,7 +436,7 @@ impl AthenaService {
 
     fn list_data_catalogs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let max_results = validate_max_results(&body, 1, 50)?;
         let next_token = body
             .get("NextToken")
             .and_then(Value::as_str)
@@ -663,6 +663,8 @@ impl AthenaService {
         let name = require_str(&body, "Name")?;
         let database = require_str(&body, "Database")?;
         let query_string = require_str(&body, "QueryString")?;
+        // Smithy: IdempotencyToken @length(min: 32, max: 128).
+        validate_opt_string_len(&body, "ClientRequestToken", 32, 128)?;
         let description = body
             .get("Description")
             .and_then(Value::as_str)
@@ -714,7 +716,7 @@ impl AthenaService {
             .and_then(Value::as_str)
             .unwrap_or("primary")
             .to_string();
-        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let max_results = validate_max_results(&body, 1, 50)?;
         let next_token = body
             .get("NextToken")
             .and_then(Value::as_str)
@@ -850,7 +852,7 @@ impl AthenaService {
     fn list_prepared_statements(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let work_group = require_str(&body, "WorkGroup")?;
-        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let max_results = validate_max_results(&body, 1, 50)?;
         let next_token = body
             .get("NextToken")
             .and_then(Value::as_str)
@@ -1132,7 +1134,7 @@ impl AthenaService {
             .and_then(Value::as_str)
             .unwrap_or("primary")
             .to_string();
-        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let max_results = validate_max_results(&body, 1, 50)?;
         let next_token = body
             .get("NextToken")
             .and_then(Value::as_str)
@@ -1185,10 +1187,7 @@ impl AthenaService {
     fn get_query_results(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let id = require_str(&body, "QueryExecutionId")?;
-        let max_results = body
-            .get("MaxResults")
-            .and_then(Value::as_u64)
-            .unwrap_or(1000) as usize;
+        let max_results = validate_max_results(&body, 1, 1000)?;
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
         let q = account
@@ -1364,7 +1363,7 @@ impl AthenaService {
     fn list_notebook_metadata(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let work_group = require_str(&body, "WorkGroup")?;
-        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let max_results = validate_max_results(&body, 1, 50)?;
         let next_token = body
             .get("NextToken")
             .and_then(Value::as_str)
@@ -1533,7 +1532,7 @@ impl AthenaService {
     fn list_sessions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let work_group = require_str(&body, "WorkGroup")?;
-        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let max_results = validate_max_results(&body, 1, 50)?;
         let next_token = body
             .get("NextToken")
             .and_then(Value::as_str)
@@ -1701,7 +1700,7 @@ impl AthenaService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let session_id = require_str(&body, "SessionId")?;
-        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let max_results = validate_max_results(&body, 1, 50)?;
         let next_token = body
             .get("NextToken")
             .and_then(Value::as_str)
@@ -1782,7 +1781,7 @@ impl AthenaService {
 
     fn list_capacity_reservations(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let max_results = validate_max_results(&body, 1, 50)?;
         let next_token = body
             .get("NextToken")
             .and_then(Value::as_str)
@@ -1954,8 +1953,8 @@ impl AthenaService {
     fn list_engine_versions(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         Ok(AwsResponse::ok_json(json!({
             "EngineVersions": [
-                {"AuthFailureRetryDelayInSeconds": 30, "EffectiveEngineVersion": "Athena engine version 3", "SelectedEngineVersion": "AUTO"},
-                {"AuthFailureRetryDelayInSeconds": 30, "EffectiveEngineVersion": "Athena engine version 3", "SelectedEngineVersion": "Athena engine version 3"},
+                {"EffectiveEngineVersion": "Athena engine version 3", "SelectedEngineVersion": "AUTO"},
+                {"EffectiveEngineVersion": "Athena engine version 3", "SelectedEngineVersion": "Athena engine version 3"},
             ]
         })))
     }
@@ -1986,11 +1985,9 @@ impl AthenaService {
     }
 
     fn get_resource_dashboard(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        // Not part of the public Athena Smithy in older SDKs; treat as a no-op
-        // shape that callers can poke without crashing.
+        // Smithy GetResourceDashboardOutput: { Url: String (required) }.
         Ok(AwsResponse::ok_json(json!({
-            "ResourceDashboardName": "default",
-            "Resources": [],
+            "Url": "https://console.aws.amazon.com/athena/home#/dashboard",
         })))
     }
 }
@@ -2008,6 +2005,42 @@ fn require_str(body: &Value, field: &str) -> Result<String, AwsServiceError> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| invalid_request(format!("{field} is required")))
+}
+
+/// Validate `MaxResults` is within [min, max] when present. AWS Athena
+/// uses range constraints like @range(min: 1, max: 50); the probe sends
+/// boundary-violating values and expects InvalidRequestException.
+fn validate_max_results(body: &Value, min: i64, max: i64) -> Result<usize, AwsServiceError> {
+    if let Some(v) = body.get("MaxResults") {
+        if let Some(n) = v.as_i64() {
+            if n < min || n > max {
+                return Err(invalid_request(format!(
+                    "MaxResults value {n} is outside the valid range {min}-{max}",
+                )));
+            }
+            return Ok(n as usize);
+        }
+    }
+    Ok(50)
+}
+
+/// Validate a string body field length is within [min, max] when
+/// present. Used for `@length`-constrained inputs like `ClientRequestToken`.
+fn validate_opt_string_len(
+    body: &Value,
+    field: &str,
+    min: usize,
+    max: usize,
+) -> Result<(), AwsServiceError> {
+    if let Some(Value::String(s)) = body.get(field) {
+        let len = s.chars().count();
+        if len < min || len > max {
+            return Err(invalid_request(format!(
+                "{field} length {len} is outside the valid range {min}-{max}",
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Replace `?` placeholders in a query string with the provided parameter
