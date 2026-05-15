@@ -191,9 +191,10 @@ async fn elbv2_dataplane_emits_access_log_to_s3_after_flush() {
         .target_type(TargetTypeEnum::Ip)
         .health_check_protocol(ProtocolEnum::Http)
         .health_check_path("/")
-        .health_check_interval_seconds(1)
+        // AWS @range bounds: interval 5..=300, threshold 2..=10.
+        .health_check_interval_seconds(5)
         .health_check_timeout_seconds(2)
-        .healthy_threshold_count(1)
+        .healthy_threshold_count(2)
         .unhealthy_threshold_count(2)
         .send()
         .await
@@ -238,7 +239,7 @@ async fn elbv2_dataplane_emits_access_log_to_s3_after_flush() {
         .await
         .expect("data plane should bind a port for the active LB");
     assert!(
-        wait_for_target_healthy(&elbv2, &tg_arn, Duration::from_secs(10)).await,
+        wait_for_target_healthy(&elbv2, &tg_arn, Duration::from_secs(45)).await,
         "target should reach healthy state"
     );
 
