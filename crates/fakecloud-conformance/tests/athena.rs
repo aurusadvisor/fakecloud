@@ -1268,11 +1268,15 @@ async fn athena_list_executors() {
 #[test_action("athena", "GetResourceDashboard", checksum = "ee4e80ec")]
 #[tokio::test]
 async fn athena_get_resource_dashboard() {
+    // Smithy GetResourceDashboardRequest declares ResourceARN @required, so a
+    // realistic call provides an ARN. The handler currently returns the
+    // canonical console URL regardless of which resource was specified.
     let server = TestServer::start().await;
     server
         .athena_client()
         .await
         .get_resource_dashboard()
+        .resource_arn("arn:aws:athena:us-east-1:000000000000:workgroup/primary")
         .send()
         .await
         .unwrap();
