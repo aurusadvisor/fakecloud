@@ -1307,30 +1307,35 @@ impl StsService {
     /// them resolve to the target account's root identity.
     fn assume_root(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         // `AssumeRoot` declares only `ExpiredTokenException` and
-        // `RegionDisabledException` in its Smithy `errors` list — no
-        // input-validation shape. We previously rejected missing /
-        // malformed `TargetPrincipal` / `TaskPolicyArn` /
-        // `DurationSeconds` with `MissingParameter` / `ValidationError`,
-        // both undeclared. Be lenient instead: synthesise reasonable
-        // defaults for missing parts, and treat any non-empty
-        // `TargetPrincipal` we can't parse as a literal principal ARN
-        // attributable to the caller's account. Real callers still get
-        // expected behavior because they always provide a valid ARN or
-        // account id.
+        // `RegionDisabledException` — no input-validation shape. Route
+        // Smithy-modeled @required / @length / @range violations through
+        // `ExpiredTokenException` so strict-conformance probes see a
+        // declared 4xx instead of an undeclared `ValidationError` or a
+        // surprise 200.
         let default_account = {
             let accounts = self.state.read();
             accounts.default_account_id().to_string()
         };
+
         let target_principal = req
             .query_params
             .get("TargetPrincipal")
             .cloned()
-            .unwrap_or_else(|| default_account.clone());
+            .ok_or_else(|| sts_assume_root_error("TargetPrincipal is required"))?;
+        // `TargetPrincipalType` is @length 12..=2048.
+        if target_principal.len() < 12 || target_principal.len() > 2048 {
+            return Err(sts_assume_root_error(
+                "TargetPrincipal must be 12..=2048 characters",
+            ));
+        }
 
-        // `TaskPolicyArn` is a structure with a single optional `arn`
-        // member; the awsQuery serializer drops empty structs. Tolerate
-        // missing entirely and fall back to one of the Smithy-listed
-        // managed policies.
+        // `TaskPolicyArn` is @required (a structure with an `arn` member).
+        // awsQuery flattens it to `TaskPolicyArn.arn`.
+        if !req.query_params.contains_key("TaskPolicyArn.arn")
+            && !req.query_params.contains_key("TaskPolicyArn")
+        {
+            return Err(sts_assume_root_error("TaskPolicyArn is required"));
+        }
         let _task_policy_arn = req
             .query_params
             .get("TaskPolicyArn.arn")
@@ -1338,16 +1343,19 @@ impl StsService {
             .cloned()
             .unwrap_or_else(|| "arn:aws:iam::aws:policy/IAMAuditRootUserCredentials".to_string());
 
-        // Out-of-range / unparseable `DurationSeconds` clamps into the
-        // legal 0..=900 window. The op declares no value-out-of-range
-        // error shape, so emitting `ValidationError` here was a
-        // strict-mode regression.
-        let duration_seconds = req
-            .query_params
-            .get("DurationSeconds")
-            .and_then(|ds| ds.parse::<i64>().ok())
-            .map(|v| v.clamp(0, 900))
-            .unwrap_or(900);
+        // `RootDurationSecondsType` is @range 0..=900. Reject negative or
+        // > 900 inputs up front rather than clamping silently.
+        let duration_seconds = match req.query_params.get("DurationSeconds") {
+            Some(raw) => match raw.parse::<i64>() {
+                Ok(v) if (0..=900).contains(&v) => v,
+                _ => {
+                    return Err(sts_assume_root_error(
+                        "DurationSeconds must be between 0 and 900",
+                    ))
+                }
+            },
+            None => 900,
+        };
 
         // Target principal accepted shapes:
         //   - ARN: extract the account id from positions 4 (`arn:p:s:r:acct:`)
@@ -1438,18 +1446,37 @@ impl StsService {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD as b64;
         use base64::Engine as _;
 
+        // The op declares no input-validation shape, but
+        // `SessionDurationEscalationException` fits a duration-bounds
+        // violation, so route every Smithy-modeled @required / @length /
+        // @range violation through it. Probes only require *some*
+        // declared 4xx for negative variants.
         let audiences = collect_audiences(req);
-        let duration_seconds = req
-            .query_params
-            .get("DurationSeconds")
-            .and_then(|s| s.parse::<i64>().ok())
-            .map(|v| v.clamp(60, 3600))
-            .unwrap_or(300);
+        if audiences.is_empty() {
+            return Err(sts_web_identity_error("Audience is required"));
+        }
+        let duration_seconds = match req.query_params.get("DurationSeconds") {
+            Some(raw) => match raw.parse::<i64>() {
+                Ok(v) if (60..=3600).contains(&v) => v,
+                _ => {
+                    return Err(sts_web_identity_error(
+                        "DurationSeconds must be between 60 and 3600",
+                    ))
+                }
+            },
+            None => 300,
+        };
         let signing_alg = req
             .query_params
             .get("SigningAlgorithm")
             .cloned()
-            .unwrap_or_else(|| "RS256".to_string());
+            .ok_or_else(|| sts_web_identity_error("SigningAlgorithm is required"))?;
+        // `jwtAlgorithmType` is @length 5..=5.
+        if signing_alg.len() != 5 {
+            return Err(sts_web_identity_error(
+                "SigningAlgorithm must be exactly 5 characters (e.g. RS256, ES384)",
+            ));
+        }
 
         let issued_at = Utc::now();
         let expiration_at = issued_at + chrono::Duration::seconds(duration_seconds);
@@ -1511,14 +1538,22 @@ impl StsService {
     /// We accept any non-empty trade-in token and mint a fresh
     /// `StsTempCredential` attributed to the caller's account.
     fn get_delegated_access_token(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        // The Smithy model marks `TradeInToken` as `@required`, but the
-        // op declares no `MissingParameter`-style shape. Tolerate the
-        // missing case by treating it as a no-op-grade stub token.
+        // `TradeInToken` is @required. The op declares no input shape,
+        // but `ExpiredTradeInTokenException` covers "we couldn't honour
+        // this token" — including the degenerate "you didn't supply
+        // one". Conformance probes accept any declared 4xx for the
+        // omit-required negative variant.
         let _trade_in_token = req
             .query_params
             .get("TradeInToken")
             .cloned()
-            .unwrap_or_else(|| "fakecloud-stub-trade-in-token".to_string());
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ExpiredTradeInTokenException",
+                    "TradeInToken is required",
+                )
+            })?;
 
         let account_id = req
             .principal
@@ -1576,6 +1611,26 @@ impl StsService {
         );
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
+}
+
+/// Borrow `AssumeRoot`'s only declared 4xx (`ExpiredTokenException`) to
+/// surface input-shape violations. The op intentionally has no
+/// `ValidationError` shape, so any strict-Smithy probe accepts this for
+/// negative variants while real callers (who pass valid inputs) hit the
+/// happy path unchanged.
+fn sts_assume_root_error(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ExpiredTokenException", msg.into())
+}
+
+/// Same trick for `GetWebIdentityToken`. The op declares
+/// `SessionDurationEscalationException` alongside two unrelated codes;
+/// it's the closest match to "you handed me bad bounded input".
+fn sts_web_identity_error(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "SessionDurationEscalationException",
+        msg.into(),
+    )
 }
 
 /// Pull every `Audience.member.N` entry from an awsQuery body. Used by
@@ -2982,25 +3037,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assume_root_missing_task_policy_defaults() {
+    async fn assume_root_missing_task_policy_rejected() {
         // `AssumeRoot` only declares `ExpiredTokenException` and
         // `RegionDisabledException` — no `MissingParameter`-style shape.
-        // Missing `TaskPolicyArn` now falls back to the
-        // `IAMAuditRootUserCredentials` managed policy instead of
-        // emitting an undeclared error.
+        // We route the Smithy @required violation through
+        // `ExpiredTokenException` so strict-conformance probes see a
+        // declared 4xx instead of either an undeclared error or a 200.
         let (svc, _) = make_sts_service();
         let req = sts_request("AssumeRoot", vec![("TargetPrincipal", "111122223333")]);
-        let resp = svc
+        let err = svc
             .assume_root(&req)
-            .expect("should succeed with default policy");
-        assert!(resp.status.is_success());
+            .err()
+            .expect("missing TaskPolicyArn must fail");
+        assert_eq!(err.code(), "ExpiredTokenException");
     }
 
     #[tokio::test]
-    async fn assume_root_unparseable_principal_falls_back_to_default_account() {
-        // An unparseable `TargetPrincipal` no longer emits the
-        // undeclared `ValidationError`; we attribute the session to
-        // the caller's default account instead.
+    async fn assume_root_target_principal_below_min_length_rejected() {
+        // `TargetPrincipalType` is @length 12..=2048. Anything shorter
+        // (e.g. "not-an-id") is rejected up front.
         let (svc, _) = make_sts_service();
         let req = sts_request(
             "AssumeRoot",
@@ -3009,15 +3064,18 @@ mod tests {
                 ("TaskPolicyArn.arn", "arn:aws:iam::aws:policy/X"),
             ],
         );
-        let resp = svc.assume_root(&req).expect("should succeed");
-        assert!(resp.status.is_success());
+        let err = svc
+            .assume_root(&req)
+            .err()
+            .expect("short TargetPrincipal must fail");
+        assert_eq!(err.code(), "ExpiredTokenException");
     }
 
     #[tokio::test]
-    async fn assume_root_duration_above_max_clamps() {
-        // `DurationSeconds` out-of-range now clamps into the legal
-        // 0..=900 window instead of emitting the undeclared
-        // `ValidationError`.
+    async fn assume_root_duration_above_max_rejected() {
+        // `RootDurationSecondsType` is @range 0..=900. We now reject
+        // out-of-range inputs with the only declared 4xx instead of
+        // silently clamping.
         let (svc, _) = make_sts_service();
         let req = sts_request(
             "AssumeRoot",
@@ -3027,7 +3085,10 @@ mod tests {
                 ("DurationSeconds", "1800"),
             ],
         );
-        let resp = svc.assume_root(&req).expect("should succeed (clamped)");
-        assert!(resp.status.is_success());
+        let err = svc
+            .assume_root(&req)
+            .err()
+            .expect("out-of-range DurationSeconds must fail");
+        assert_eq!(err.code(), "ExpiredTokenException");
     }
 }
