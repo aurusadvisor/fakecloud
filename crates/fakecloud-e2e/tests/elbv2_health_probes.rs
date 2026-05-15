@@ -77,9 +77,12 @@ async fn elbv2_prober_marks_target_healthy_then_unhealthy() {
         .target_type(TargetTypeEnum::Ip)
         .health_check_protocol(aws_sdk_elasticloadbalancingv2::types::ProtocolEnum::Http)
         .health_check_path("/")
-        .health_check_interval_seconds(1)
+        // AWS @range bounds: interval 5..=300, timeout 2..=120,
+        // threshold 2..=10. Stick to the minimum so the test still
+        // converges fast (~10-20s per state transition).
+        .health_check_interval_seconds(5)
         .health_check_timeout_seconds(2)
-        .healthy_threshold_count(1)
+        .healthy_threshold_count(2)
         .unhealthy_threshold_count(2)
         .matcher(
             aws_sdk_elasticloadbalancingv2::types::Matcher::builder()
@@ -110,7 +113,7 @@ async fn elbv2_prober_marks_target_healthy_then_unhealthy() {
         .await
         .unwrap();
 
-    let healthy = wait_for_state(&elbv2, &tg_arn, "healthy", Duration::from_secs(10)).await;
+    let healthy = wait_for_state(&elbv2, &tg_arn, "healthy", Duration::from_secs(45)).await;
     assert!(
         healthy,
         "target should reach healthy state with 200 responses"
@@ -118,7 +121,7 @@ async fn elbv2_prober_marks_target_healthy_then_unhealthy() {
 
     target.set_code(503);
 
-    let unhealthy = wait_for_state(&elbv2, &tg_arn, "unhealthy", Duration::from_secs(10)).await;
+    let unhealthy = wait_for_state(&elbv2, &tg_arn, "unhealthy", Duration::from_secs(45)).await;
     assert!(
         unhealthy,
         "target should reach unhealthy state with 503 responses"

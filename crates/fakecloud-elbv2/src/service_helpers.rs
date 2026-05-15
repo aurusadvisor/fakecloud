@@ -120,6 +120,27 @@ pub(crate) fn invalid_param(msg: impl Into<String>) -> AwsServiceError {
     )
 }
 
+/// Reject when an integer query param falls outside `[min, max]`. Mirrors
+/// Smithy `@range` constraints — used by ops whose negative probes flip
+/// boundary fields and expect the same rejection AWS does up front.
+pub(crate) fn validate_range_i32(
+    req: &AwsRequest,
+    field: &str,
+    min: i32,
+    max: i32,
+) -> Result<(), AwsServiceError> {
+    if let Some(raw) = req.query_params.get(field) {
+        match raw.parse::<i64>() {
+            Ok(v) if v >= min as i64 && v <= max as i64 => Ok(()),
+            _ => Err(invalid_param(format!(
+                "{field} must be between {min} and {max}, got '{raw}'"
+            ))),
+        }
+    } else {
+        Ok(())
+    }
+}
+
 /// Variant of `invalid_param` for target register/deregister paths. Both
 /// ops declare `InvalidTargetException` (wire `InvalidTarget`); use that
 /// when the supplied target list is malformed.
