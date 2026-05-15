@@ -1183,13 +1183,14 @@ async fn describe_tasks_emits_per_container_aws_shape_fields() {
         .unwrap();
     assert_eq!(containers.len(), 2);
     for c in containers {
+        // Smithy `Container` runtime shape does NOT include `essential` —
+        // that field lives on the task-definition `ContainerDefinition`.
         for field in [
             "containerArn",
             "taskArn",
             "name",
             "image",
             "lastStatus",
-            "essential",
             "networkBindings",
             "networkInterfaces",
         ] {
