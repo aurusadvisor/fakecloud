@@ -4896,26 +4896,59 @@ fn export_table_unknown_arn_emits_table_not_found() {
 }
 
 #[test]
-fn list_backups_accepts_invalid_optional_params() {
+fn list_backups_rejects_out_of_range_optional_params() {
     let svc = make_service();
-    // Previously these inputs tripped validate_optional_string_length and
-    // leaked ValidationException; ListBackups doesn't declare it, so the op
-    // now accepts any input and returns an empty list.
-    svc.list_backups(&make_request(
-        "ListBackups",
-        json!({"ExclusiveStartBackupArn": "x", "Limit": 0}),
-    ))
-    .expect("list_backups must not error on out-of-range optional inputs");
+    // Limit must be 1..=100, BackupType must be one of the documented enum
+    // values, and ExclusiveStartBackupArn must be non-empty / <= 1024 chars.
+    // Real AWS surfaces ValidationException for any of these; we match.
+    let err = svc
+        .list_backups(&make_request("ListBackups", json!({"Limit": 0})))
+        .err()
+        .expect("Limit=0 must be rejected");
+    assert_error_code(err, "ValidationException");
+
+    let err = svc
+        .list_backups(&make_request("ListBackups", json!({"Limit": 101})))
+        .err()
+        .expect("Limit=101 must be rejected");
+    assert_error_code(err, "ValidationException");
+
+    let err = svc
+        .list_backups(&make_request("ListBackups", json!({"BackupType": "BOGUS"})))
+        .err()
+        .expect("BackupType=BOGUS must be rejected");
+    assert_error_code(err, "ValidationException");
+
+    let err = svc
+        .list_backups(&make_request(
+            "ListBackups",
+            json!({"ExclusiveStartBackupArn": ""}),
+        ))
+        .err()
+        .expect("empty BackupArn must be rejected");
+    assert_error_code(err, "ValidationException");
 }
 
 #[test]
-fn list_imports_accepts_invalid_optional_params() {
+fn list_imports_rejects_out_of_range_optional_params() {
     let svc = make_service();
-    svc.list_imports(&make_request(
-        "ListImports",
-        json!({"NextToken": "x", "PageSize": 0}),
-    ))
-    .expect("list_imports must not error on out-of-range optional inputs");
+    let err = svc
+        .list_imports(&make_request("ListImports", json!({"PageSize": 0})))
+        .err()
+        .expect("PageSize=0 must be rejected");
+    assert_error_code(err, "ValidationException");
+
+    let err = svc
+        .list_imports(&make_request("ListImports", json!({"PageSize": 26})))
+        .err()
+        .expect("PageSize=26 must be rejected");
+    assert_error_code(err, "ValidationException");
+
+    let err = svc
+        .list_imports(&make_request("ListImports", json!({"NextToken": ""})))
+        .err()
+        .expect("empty NextToken must be rejected");
+    assert_error_code(err, "ValidationException");
 }
 
 #[test]

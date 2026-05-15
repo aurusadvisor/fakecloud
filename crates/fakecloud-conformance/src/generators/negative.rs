@@ -76,9 +76,16 @@ pub fn generate(
 
         let traits = &shape.traits;
 
-        // String too short (below min length)
+        // String too short (below min length).
+        //
+        // `default_value_for_shape` caps positive-variant string fillers at
+        // 20 chars. When `length_min` exceeds 20 the positive default is
+        // already shorter than `min - 1`, so the server can't validate the
+        // negative case without also rejecting every legitimate positive
+        // call. Skip the variant rather than emit one that's unreachable
+        // by construction.
         if let Some(min) = traits.length_min {
-            if min > 0 {
+            if min > 0 && (min as usize) <= 20 {
                 if let ShapeType::String { .. } = &shape.shape_type {
                     let mut input = build_required_input(model, input_shape_id, overrides);
                     if let Value::Object(ref mut obj) = input {
