@@ -93,9 +93,9 @@ async fn elbv2_dataplane_forwards_to_target() {
         .target_type(TargetTypeEnum::Ip)
         .health_check_protocol(ProtocolEnum::Http)
         .health_check_path("/")
-        .health_check_interval_seconds(1)
+        .health_check_interval_seconds(5)
         .health_check_timeout_seconds(2)
-        .healthy_threshold_count(1)
+        .healthy_threshold_count(2)
         .unhealthy_threshold_count(2)
         .send()
         .await
