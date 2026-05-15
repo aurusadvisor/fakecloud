@@ -104,8 +104,26 @@ impl BedrockAgentService {
     }
 
     fn resolve_action(req: &AwsRequest) -> Option<(&'static str, Vec<(String, String)>)> {
-        let segs = &req.path_segments;
-        if segs.is_empty() {
+        // Preserve empty path segments so synthetic probes that drop a
+        // required `@httpLabel` (e.g. an empty `agentVersion` -> `//`) still
+        // reach the right action and surface as a ValidationException rather
+        // than a routing miss.
+        let raw_segs: Vec<String> = req
+            .raw_path
+            .trim_start_matches('/')
+            .split('/')
+            .map(|s| s.to_string())
+            .collect();
+        let raw_segs: Vec<String> =
+            if raw_segs.last().map(|s| s.is_empty()).unwrap_or(false) && raw_segs.len() > 1 {
+                // Drop a trailing empty caused by a trailing slash on the URL,
+                // which is purely cosmetic. Keep interior empties.
+                raw_segs[..raw_segs.len() - 1].to_vec()
+            } else {
+                raw_segs
+            };
+        let segs = &raw_segs;
+        if segs.is_empty() || segs.iter().all(|s| s.is_empty()) {
             return None;
         }
 
@@ -557,6 +575,8 @@ impl AwsService for BedrockAgentService {
             req.body = serde_json::to_vec(&body).unwrap_or_default().into();
         }
 
+        validate_inputs(action, &req)?;
+
         match action {
             "CreateAgent" => self.create_agent(&req),
             "CreateAgentActionGroup" => self.create_agent_action_group(&req),
@@ -644,6 +664,226 @@ fn missing(field: &str) -> AwsServiceError {
         "ValidationException",
         format!("Missing required field: {field}"),
     )
+}
+
+fn validation(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", msg.into())
+}
+
+/// Smithy `Id` shape: `^[0-9a-zA-Z]{10}$`.
+fn is_valid_id(s: &str) -> bool {
+    s.len() == 10 && s.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// Smithy `Version` shape: length 1..=5, pattern `^(DRAFT|[0-9]{0,4}[1-9][0-9]{0,4})$`.
+fn is_valid_version(s: &str) -> bool {
+    if s.is_empty() || s.len() > 5 {
+        return false;
+    }
+    if s == "DRAFT" {
+        return true;
+    }
+    if !s.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    // Must contain at least one non-zero digit (i.e. not "0", "00", etc.) and
+    // the first digit must not be zero unless the whole value is a single zero
+    // (which is disallowed by the pattern's `[1-9]` requirement).
+    if s.starts_with('0') {
+        return false;
+    }
+    s.bytes().any(|b| b != b'0')
+}
+
+/// Validate path-bound `Id`-shape field. Empty/missing also rejected.
+fn check_id(body: &Value, field: &str) -> Result<(), AwsServiceError> {
+    let v = body
+        .get(field)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing(field))?;
+    if !is_valid_id(v) {
+        return Err(validation(format!(
+            "Value at '{field}' failed to satisfy constraint: Member must satisfy regular expression pattern: ^[0-9a-zA-Z]{{10}}$"
+        )));
+    }
+    Ok(())
+}
+
+fn check_version(body: &Value, field: &str) -> Result<(), AwsServiceError> {
+    let v = body
+        .get(field)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing(field))?;
+    if !is_valid_version(v) {
+        return Err(validation(format!(
+            "Value at '{field}' failed to satisfy constraint: Member must satisfy regular expression pattern: ^(DRAFT|[0-9]{{0,4}}[1-9][0-9]{{0,4}})$"
+        )));
+    }
+    Ok(())
+}
+
+fn check_resource_arn(body: &Value, field: &str) -> Result<(), AwsServiceError> {
+    let v = body
+        .get(field)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| missing(field))?;
+    let len = v.len();
+    if !(20..=1011).contains(&len) {
+        return Err(validation(format!(
+            "Value at '{field}' failed to satisfy constraint: Member must have length between 20 and 1011, inclusive"
+        )));
+    }
+    Ok(())
+}
+
+fn check_max_results(req: &AwsRequest, body: &Value) -> Result<(), AwsServiceError> {
+    // `maxResults` lives in the query string for REST list ops, but the body
+    // for body-only list ops (e.g. ListAgents, ListKnowledgeBases).
+    let from_query = req.query_params.get("maxResults").map(|s| s.as_str());
+    let from_body = body.get("maxResults");
+    let parsed: Option<i64> = match (from_query, from_body) {
+        (Some(s), _) => s.parse().ok(),
+        (None, Some(v)) => v.as_i64(),
+        _ => None,
+    };
+    if from_query.is_some() || from_body.is_some() {
+        match parsed {
+            Some(n) if (1..=1000).contains(&n) => Ok(()),
+            _ => Err(validation(
+                "Value at 'maxResults' failed to satisfy constraint: Member must be between 1 and 1000, inclusive",
+            )),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+fn check_next_token(req: &AwsRequest, body: &Value) -> Result<(), AwsServiceError> {
+    let from_query = req.query_params.get("nextToken").map(|s| s.as_str());
+    let from_body = body.get("nextToken").and_then(|v| v.as_str());
+    let token = from_query.or(from_body);
+    if let Some(raw) = token {
+        let len = raw.len();
+        if !(1..=2048).contains(&len) || raw.chars().any(|c| c.is_whitespace()) {
+            return Err(validation(
+                "Value at 'nextToken' failed to satisfy constraint: Member must have length between 1 and 2048, inclusive and match pattern ^\\S*$",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_tag_keys_required(req: &AwsRequest) -> Result<(), AwsServiceError> {
+    // `tagKeys` is `@httpQuery("tagKeys")` and `@required` on UntagResource.
+    // It can arrive as repeated `tagKeys=a&tagKeys=b` (only the last is in
+    // `query_params`) — anything is fine, but the absence is a validation error.
+    if !req.raw_query.split('&').any(|kv| {
+        let k = kv.split_once('=').map(|(k, _)| k).unwrap_or(kv);
+        k == "tagKeys"
+    }) {
+        return Err(missing("tagKeys"));
+    }
+    Ok(())
+}
+
+fn check_string_length(
+    body: &Value,
+    field: &str,
+    min: usize,
+    max: usize,
+    required: bool,
+) -> Result<(), AwsServiceError> {
+    match body.get(field).and_then(|v| v.as_str()) {
+        Some(v) => {
+            let len = v.len();
+            if !(min..=max).contains(&len) {
+                return Err(validation(format!(
+                    "Value at '{field}' failed to satisfy constraint: Member must have length between {min} and {max}, inclusive"
+                )));
+            }
+            Ok(())
+        }
+        None => {
+            if required {
+                Err(missing(field))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+fn check_required_present(body: &Value, field: &str) -> Result<(), AwsServiceError> {
+    if body.get(field).is_none() || body.get(field).map(|v| v.is_null()).unwrap_or(false) {
+        return Err(missing(field));
+    }
+    Ok(())
+}
+
+fn validate_inputs(action: &str, req: &AwsRequest) -> Result<(), AwsServiceError> {
+    let body = req.json_body();
+
+    // Common pagination guards on every list/scan operation.
+    let is_list = action.starts_with("List");
+    if is_list {
+        check_max_results(req, &body)?;
+        check_next_token(req, &body)?;
+    }
+
+    match action {
+        // Path-bound agentId only.
+        "ListAgentAliases" | "ListAgentVersions" => {
+            check_id(&body, "agentId")?;
+        }
+        // Path-bound agentId + agentVersion.
+        "ListAgentActionGroups"
+        | "ListAgentCollaborators"
+        | "ListAgentKnowledgeBases"
+        | "GetAgentActionGroup"
+        | "GetAgentCollaborator"
+        | "GetAgentKnowledgeBase" => {
+            check_id(&body, "agentId")?;
+            check_version(&body, "agentVersion")?;
+        }
+        // Path-bound knowledgeBaseId.
+        "ListDataSources" => {
+            check_id(&body, "knowledgeBaseId")?;
+        }
+        // Path-bound knowledgeBaseId + dataSourceId.
+        "ListIngestionJobs" => {
+            check_id(&body, "knowledgeBaseId")?;
+            check_id(&body, "dataSourceId")?;
+        }
+        // Tag-resource family: validate ARN length/presence and (for Untag)
+        // the required `tagKeys` query parameter.
+        "TagResource" | "ListTagsForResource" => {
+            check_resource_arn(&body, "resourceArn")?;
+        }
+        "UntagResource" => {
+            check_resource_arn(&body, "resourceArn")?;
+            check_tag_keys_required(req)?;
+        }
+        "CreateFlow" => {
+            check_string_length(&body, "executionRoleArn", 1, 2048, true)?;
+            check_string_length(&body, "clientToken", 33, 256, false)?;
+            check_string_length(&body, "customerEncryptionKeyArn", 1, 2048, false)?;
+            check_string_length(&body, "description", 1, 200, false)?;
+        }
+        "CreateKnowledgeBase" => {
+            check_required_present(&body, "knowledgeBaseConfiguration")?;
+            check_string_length(&body, "roleArn", 1, 2048, true)?;
+            check_string_length(&body, "clientToken", 33, 256, false)?;
+            check_string_length(&body, "description", 1, 200, false)?;
+        }
+        "CreatePrompt" => {
+            check_string_length(&body, "clientToken", 33, 256, false)?;
+            check_string_length(&body, "customerEncryptionKeyArn", 1, 2048, false)?;
+            check_string_length(&body, "description", 1, 200, false)?;
+        }
+        _ => {}
+    }
+
+    Ok(())
 }
 
 fn not_found(msg: impl Into<String>) -> AwsServiceError {
