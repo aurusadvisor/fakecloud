@@ -3446,7 +3446,7 @@ async fn test_reputation_entity() {
     let resp = svc.handle(req).await.unwrap();
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_eq!(
-        body["ReputationEntity"]["CustomerManagedStatus"]["SendingStatus"],
+        body["ReputationEntity"]["CustomerManagedStatus"]["Status"],
         "DISABLED"
     );
 
