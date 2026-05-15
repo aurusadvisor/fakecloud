@@ -50,6 +50,11 @@ pub(crate) struct OpConstraints {
     /// `(path_param, allowed_values)` checks for enum-typed `@httpLabel`
     /// path parameters. Values are URL-decoded before comparison.
     path_enums: &'static [(&'static str, &'static [&'static str])],
+    /// `true` when the operation declares a `@httpPayload` member that must
+    /// be non-empty raw bytes. Treats an absent or wire-empty body as the
+    /// omitted-required case (the conformance probe substitutes an empty
+    /// JSON object `{}` when the payload member is omitted).
+    required_payload: bool,
 }
 
 const EMPTY: OpConstraints = OpConstraints {
@@ -59,6 +64,7 @@ const EMPTY: OpConstraints = OpConstraints {
     query_enums: &[],
     required_query: &[],
     path_enums: &[],
+    required_payload: false,
 };
 
 pub(crate) fn prevalidate(
@@ -88,33 +94,32 @@ pub(crate) fn prevalidate(
         }
     }
 
-    // Required body fields.
+    // Required raw HTTP payload (@httpPayload). The probe omits the payload
+    // member by serialising the input as `{}` — treat that and an absent
+    // body as the required-missing case.
+    if spec.required_payload {
+        let raw = req.body.as_ref();
+        let trimmed = std::str::from_utf8(raw).map(|s| s.trim()).unwrap_or("");
+        if raw.is_empty() || trimmed == "{}" || trimmed == "null" {
+            return Err(bad_request("body is required"));
+        }
+    }
+
+    // Required body fields. Smithy `@required` only mandates presence/non-null;
+    // empty strings/lists/maps are valid unless a separate length constraint applies.
     for field in spec.required {
         match body.get(*field) {
             None | Some(Value::Null) => {
                 return Err(bad_request(&format!("{field} is required")));
             }
-            Some(Value::String(s)) if s.is_empty() => {
-                return Err(bad_request(&format!("{field} must not be empty")));
-            }
-            Some(Value::Array(a)) if a.is_empty() => {
-                return Err(bad_request(&format!("{field} must not be empty")));
-            }
-            Some(Value::Object(o)) if o.is_empty() => {
-                return Err(bad_request(&format!("{field} must not be empty")));
-            }
             _ => {}
         }
     }
 
-    // Required query parameters.
+    // Required query parameters: Smithy `@required` only mandates presence.
     for name in spec.required_query {
-        match req.query_params.get(*name) {
-            None => return Err(bad_request(&format!("{name} is required"))),
-            Some(s) if s.is_empty() => {
-                return Err(bad_request(&format!("{name} must not be empty")));
-            }
-            _ => {}
+        if !req.query_params.contains_key(*name) {
+            return Err(bad_request(&format!("{name} is required")));
         }
     }
 
@@ -259,8 +264,12 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             body_enums: &[("type", ENUM_AUTHORIZER_TYPE)],
             ..EMPTY
         },
-        "GetAuthorizers" | "GetAuthorizer" => OpConstraints {
+        "GetAuthorizers" => OpConstraints {
             required_path: &["restApiId"],
+            ..EMPTY
+        },
+        "GetAuthorizer" | "DeleteAuthorizer" | "UpdateAuthorizer" => OpConstraints {
+            required_path: &["restApiId", "authorizerId"],
             ..EMPTY
         },
         // ── Base path mappings ──────────────────────────────────────
@@ -291,10 +300,16 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             required_path: &["restApiId"],
             ..EMPTY
         },
-        "GetDocumentationVersions" | "DeleteDocumentationVersion" => OpConstraints {
+        "GetDocumentationVersions" => OpConstraints {
             required_path: &["restApiId"],
             ..EMPTY
         },
+        "GetDocumentationVersion" | "DeleteDocumentationVersion" | "UpdateDocumentationVersion" => {
+            OpConstraints {
+                required_path: &["restApiId", "documentationVersion"],
+                ..EMPTY
+            }
+        }
         "ImportDocumentationParts" => OpConstraints {
             required: &["body"],
             required_path: &["restApiId"],
@@ -323,7 +338,9 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             ..EMPTY
         },
         "RejectDomainNameAccessAssociation" => OpConstraints {
-            required_query: &["domainNameArn"],
+            // Smithy declares both `domainNameAccessAssociationArn` and
+            // `domainNameArn` as `@required` httpQuery members.
+            required_query: &["domainNameAccessAssociationArn", "domainNameArn"],
             ..EMPTY
         },
         "GetDomainNames" | "GetDomainNameAccessAssociations" => OpConstraints {
@@ -336,8 +353,12 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             required_path: &["restApiId"],
             ..EMPTY
         },
-        "GetModels" | "DeleteModel" => OpConstraints {
+        "GetModels" => OpConstraints {
             required_path: &["restApiId"],
+            ..EMPTY
+        },
+        "GetModel" | "DeleteModel" | "UpdateModel" => OpConstraints {
+            required_path: &["restApiId", "modelName"],
             ..EMPTY
         },
         "GetModelTemplate" => OpConstraints {
@@ -355,7 +376,14 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             ..EMPTY
         },
         // ── Stages ──────────────────────────────────────────────────
-        "GetStages" | "FlushStageCache" | "FlushStageAuthorizersCache" => OpConstraints {
+        // GetStages takes only restApiId from the path (`stageName` is not
+        // part of its input). FlushStageCache / FlushStageAuthorizersCache
+        // both require stageName.
+        "GetStages" => OpConstraints {
+            required_path: &["restApiId"],
+            ..EMPTY
+        },
+        "FlushStageCache" | "FlushStageAuthorizersCache" => OpConstraints {
             required_path: &["restApiId", "stageName"],
             ..EMPTY
         },
@@ -414,14 +442,20 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             ..EMPTY
         },
         // ── Import APIs ─────────────────────────────────────────────
+        // The `body` member is `@httpPayload` (raw HTTP body), not a JSON
+        // field. Validate raw-body presence via `required_payload`.
         "ImportApiKeys" => OpConstraints {
-            required: &["body"],
             required_query: &["format"],
             query_enums: &[("format", ENUM_API_KEYS_FORMAT)],
+            required_payload: true,
             ..EMPTY
         },
         "ImportRestApi" => OpConstraints {
-            required: &["body"],
+            required_payload: true,
+            ..EMPTY
+        },
+        "PutRestApi" => OpConstraints {
+            required_path: &["restApiId"],
             ..EMPTY
         },
         // ── Integrations ────────────────────────────────────────────

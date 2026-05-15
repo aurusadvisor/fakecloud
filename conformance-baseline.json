@@ -1,6 +1,6 @@
 {
-  "variants_passed": 85041,
-  "total_variants": 86314,
+  "variants_passed": 85159,
+  "total_variants": 86315,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -99,8 +99,8 @@
       "total": 1292
     },
     "apigatewayv1": {
-      "passed": 3255,
-      "total": 3372
+      "passed": 3373,
+      "total": 3373
     },
     "s3": {
       "passed": 3143,
