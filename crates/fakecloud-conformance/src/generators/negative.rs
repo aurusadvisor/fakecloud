@@ -9,7 +9,26 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use super::{build_required_input, default_value_for_shape, Expectation, Strategy, TestVariant};
-use crate::smithy::{ServiceModel, ShapeType};
+use crate::smithy::{is_prelude_shape, ServiceModel, ShapeType};
+
+/// `negative_omit_<field>` for required list/map members is wire-equivalent
+/// to submitting the field with an empty collection: AWS query and REST
+/// protocols serialise empty arrays/maps as zero wire params. The server
+/// can't tell the difference, so the negative case can't observably fail.
+/// Skip emitting the variant rather than asking the server to do something
+/// impossible.
+fn omission_is_wire_observable(model: &ServiceModel, member_target: &str) -> bool {
+    if is_prelude_shape(member_target) {
+        return true;
+    }
+    match model.shapes.get(member_target) {
+        Some(shape) => !matches!(
+            shape.shape_type,
+            ShapeType::List { .. } | ShapeType::Map { .. }
+        ),
+        None => true,
+    }
+}
 
 pub fn generate(
     model: &ServiceModel,
@@ -23,6 +42,9 @@ pub fn generate(
     // Omit each required field one at a time
     let required_members: Vec<_> = members.iter().filter(|m| m.required).collect();
     for omit_member in &required_members {
+        if !omission_is_wire_observable(model, &omit_member.target) {
+            continue;
+        }
         let mut obj = serde_json::Map::new();
         for member in &required_members {
             if member.name == omit_member.name {

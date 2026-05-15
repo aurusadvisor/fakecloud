@@ -965,10 +965,9 @@ impl CloudFormationService {
                 &rid,
             )),
             "BatchDescribeTypeConfigurations" => {
-                // `TypeConfigurationIdentifiers` is `@required` in Smithy,
-                // but the op's `errors` list doesn't declare
-                // `ValidationError`. Accept an empty list and return empty
-                // arrays — matches what AWS does for an empty batch.
+                // `TypeConfigurationIdentifiers` is `@required` but AWS query
+                // protocol can't distinguish an absent list from an empty
+                // one on the wire. Accept either and return zero entries.
                 Ok(xml_response(
                     "BatchDescribeTypeConfigurations",
                     "    <Errors/>\n    <TypeConfigurations/>".to_string(),
@@ -1172,9 +1171,6 @@ impl CloudFormationService {
             }
             "ListResourceScanRelatedResources" => {
                 require_scalar(&params, "ResourceScanId")?;
-                // `Resources` is `@required` in Smithy, but the op's Smithy
-                // `errors` list doesn't declare `ValidationError`. Accept
-                // missing/empty list and return zero related resources.
                 Ok(xml_response(
                     "ListResourceScanRelatedResources",
                     "    <RelatedResources/>".to_string(),
