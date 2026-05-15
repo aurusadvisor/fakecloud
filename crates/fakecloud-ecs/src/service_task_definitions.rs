@@ -303,6 +303,12 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
+        validate_enum_opt(
+            &body,
+            "status",
+            &["ACTIVE", "INACTIVE", "DELETE_IN_PROGRESS"],
+        )?;
+        validate_enum_opt(&body, "sort", &["ASC", "DESC"])?;
         let family_prefix = opt_str(&body, "familyPrefix");
         let status = opt_str(&body, "status").unwrap_or("ACTIVE");
         let sort = opt_str(&body, "sort").unwrap_or("ASC");
@@ -354,6 +360,7 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
+        validate_enum_opt(&body, "status", &["ACTIVE", "INACTIVE", "ALL"])?;
         let family_prefix = opt_str(&body, "familyPrefix");
         let status = opt_str(&body, "status").unwrap_or("ACTIVE");
         let max_results = body

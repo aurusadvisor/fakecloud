@@ -140,6 +140,9 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
+        validate_enum_opt(&body, "status", &["ACTIVE", "DELETE_IN_PROGRESS", "ALL"])?;
+        validate_enum_opt(&body, "revision", &["LAST_REGISTERED"])?;
+        validate_enum_opt(&body, "sort", &["ASC", "DESC"])?;
         let family_prefix = body
             .get("familyPrefix")
             .and_then(|v| v.as_str())
@@ -663,10 +666,11 @@ impl EcsService {
             }
             summaries.push(json!({
                 "daemonArn": daemon.daemon_arn,
-                "daemonName": daemon.daemon_name,
-                "clusterArn": daemon.cluster_arn,
                 "status": daemon.status,
-                "deploymentArn": daemon.deployment_arn,
+                "createdAt": daemon.created_at.timestamp() as f64
+                    + daemon.created_at.timestamp_subsec_micros() as f64 / 1_000_000.0,
+                "updatedAt": daemon.updated_at.timestamp() as f64
+                    + daemon.updated_at.timestamp_subsec_micros() as f64 / 1_000_000.0,
             }));
         }
         let (page, token) = paginate(&summaries, next_token.as_deref(), max_results);
@@ -681,16 +685,11 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
-        let arns: Vec<String> = body
-            .get("daemonDeploymentArns")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str())
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let arns: Vec<String> = req_array(&body, "daemonDeploymentArns")?
+            .iter()
+            .filter_map(|x| x.as_str())
+            .map(String::from)
+            .collect();
         let accounts = self.state.read();
         let s = accounts
             .get(&request.account_id)
@@ -719,10 +718,7 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
-        let daemon_filter = body
-            .get("daemonArn")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let daemon_filter = Some(req_str(&body, "daemonArn")?.to_string());
         let cluster_input: Option<&str> = None;
         let max_results = body
             .get("maxResults")
@@ -753,7 +749,7 @@ impl EcsService {
                     continue;
                 }
             }
-            summaries.push(daemon_deployment_json(d));
+            summaries.push(daemon_deployment_summary_json(d));
         }
         let (page, token) = paginate(&summaries, next_token.as_deref(), max_results);
         Ok(AwsResponse::ok_json(json!({
@@ -767,16 +763,11 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
-        let arns: Vec<String> = body
-            .get("daemonRevisionArns")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str())
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let arns: Vec<String> = req_array(&body, "daemonRevisionArns")?
+            .iter()
+            .filter_map(|x| x.as_str())
+            .map(String::from)
+            .collect();
         let accounts = self.state.read();
         let s = accounts
             .get(&request.account_id)
@@ -927,17 +918,35 @@ fn daemon_json(d: &Daemon) -> Value {
 }
 
 fn daemon_deployment_json(d: &DaemonDeployment) -> Value {
+    let created_at = d.created_at.timestamp() as f64
+        + d.created_at.timestamp_subsec_micros() as f64 / 1_000_000.0;
+    // Matches the `DaemonDeployment` Smithy shape used by
+    // Describe{Daemon,DaemonDeployment,DaemonRevisions}. Implementation-only
+    // fields (daemonArn, daemonName, taskDefinitionArn, revision, updatedAt)
+    // are intentionally omitted to keep the response wire-compatible.
     json!({
-        "deploymentArn": d.deployment_arn,
-        "daemonArn": d.daemon_arn,
-        "daemonName": d.daemon_name,
+        "daemonDeploymentArn": d.deployment_arn,
         "clusterArn": d.cluster_arn,
-        "taskDefinitionArn": d.task_definition_arn,
         "status": d.status,
-        "revision": d.revision,
-        "createdAt": d.created_at.timestamp() as f64
-            + d.created_at.timestamp_subsec_micros() as f64 / 1_000_000.0,
-        "updatedAt": d.updated_at.timestamp() as f64
-            + d.updated_at.timestamp_subsec_micros() as f64 / 1_000_000.0,
+        "createdAt": created_at,
+        "startedAt": created_at,
+    })
+}
+
+/// Shape used by ListDaemonDeployments — matches `DaemonDeploymentSummary` in
+/// the ECS Smithy model. The richer `daemon_deployment_json` (used by
+/// Describe*) corresponds to `DaemonDeployment` and includes additional
+/// implementation-specific fields that aren't part of the summary contract.
+fn daemon_deployment_summary_json(d: &DaemonDeployment) -> Value {
+    let created_at = d.created_at.timestamp() as f64
+        + d.created_at.timestamp_subsec_micros() as f64 / 1_000_000.0;
+    json!({
+        "daemonDeploymentArn": d.deployment_arn,
+        "daemonArn": d.daemon_arn,
+        "clusterArn": d.cluster_arn,
+        "status": d.status,
+        "targetDaemonRevisionArn": d.task_definition_arn,
+        "createdAt": created_at,
+        "startedAt": created_at,
     })
 }

@@ -8,12 +8,30 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use super::*;
 
+/// Valid `SettingName` enum values from the ECS Smithy model. Used by all
+/// {Put,PutDefault,Delete,List}AccountSettings* operations to validate the
+/// `name` field — real ECS rejects anything outside this list.
+const SETTING_NAME_VALUES: &[&str] = &[
+    "serviceLongArnFormat",
+    "taskLongArnFormat",
+    "containerInstanceLongArnFormat",
+    "awsvpcTrunking",
+    "containerInsights",
+    "fargateFIPSMode",
+    "tagResourceAuthorization",
+    "fargateTaskRetirementWaitPeriod",
+    "guardDutyActivate",
+    "defaultLogDriverMode",
+    "fargateEventWindows",
+];
+
 impl EcsService {
     pub(super) fn put_account_setting(
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
+        validate_enum_opt(&body, "name", SETTING_NAME_VALUES)?;
         let name = req_str(&body, "name")?.to_string();
         let value = req_str(&body, "value")?.to_string();
         let principal_arn = opt_str(&body, "principalArn")
@@ -42,6 +60,7 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
+        validate_enum_opt(&body, "name", SETTING_NAME_VALUES)?;
         let name = req_str(&body, "name")?.to_string();
         let value = req_str(&body, "value")?.to_string();
         let account = request.account_id.clone();
@@ -64,6 +83,7 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
+        validate_enum_opt(&body, "name", SETTING_NAME_VALUES)?;
         let name = req_str(&body, "name")?.to_string();
         let principal_arn = opt_str(&body, "principalArn")
             .map(String::from)
@@ -90,6 +110,7 @@ impl EcsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
+        validate_enum_opt(&body, "name", SETTING_NAME_VALUES)?;
         let name_filter = opt_str(&body, "name");
         let value_filter = opt_str(&body, "value");
         let principal_filter = opt_str(&body, "principalArn");
