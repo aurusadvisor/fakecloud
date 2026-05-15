@@ -169,11 +169,17 @@ impl ApiGatewayService {
     pub(super) fn update_account(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request_account(req));
+        // UpdateAccount input is { patchOperations: [...] }; the Account
+        // output shape does not include patchOperations. Apply the ops
+        // (best-effort) and never echo input-only fields.
         if let Ok(patch) = serde_json::from_slice::<Value>(&req.body) {
             if let (Some(target), Some(extras)) =
                 (state.account_settings.as_object_mut(), patch.as_object())
             {
                 for (k, v) in extras {
+                    if k == "patchOperations" {
+                        continue;
+                    }
                     target.insert(k.clone(), v.clone());
                 }
             }

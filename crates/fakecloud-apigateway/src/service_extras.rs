@@ -127,13 +127,19 @@ impl ApiGatewayService {
             .and_then(Value::as_str)
             .ok_or_else(|| bad_request("documentationVersion is required"))?
             .to_string();
-        let mut value = body.clone();
-        if let Some(o) = value.as_object_mut() {
-            o.insert(
-                "createdDate".to_string(),
-                Value::Number(serde_json::Number::from(chrono::Utc::now().timestamp())),
-            );
+        // DocumentationVersion output shape: { version, createdDate, description }.
+        // Input has documentationVersion (-> version) + stageName (input-only)
+        // + description; remap so list/get/create responses validate.
+        let mut value = serde_json::Map::new();
+        value.insert("version".to_string(), Value::String(version.clone()));
+        if let Some(desc) = body.get("description").and_then(Value::as_str) {
+            value.insert("description".to_string(), Value::String(desc.to_string()));
         }
+        value.insert(
+            "createdDate".to_string(),
+            Value::Number(serde_json::Number::from(chrono::Utc::now().timestamp())),
+        );
+        let value = Value::Object(value);
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request_account(req));
         state

@@ -93,6 +93,16 @@ impl ApiGatewayService {
             .to_string();
         let mut value = body.clone();
         if let Some(o) = value.as_object_mut() {
+            // DomainName output shape (Smithy) excludes input-only certificate
+            // bodies — strip before storing/returning so list/get/get-many
+            // responses validate.
+            for k in [
+                "certificateBody",
+                "certificatePrivateKey",
+                "certificateChain",
+            ] {
+                o.remove(k);
+            }
             o.insert(
                 "regionalDomainName".to_string(),
                 Value::String(format!("{domain}.fakecloud")),
