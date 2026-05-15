@@ -686,12 +686,9 @@ fn is_valid_version(s: &str) -> bool {
     if !s.bytes().all(|b| b.is_ascii_digit()) {
         return false;
     }
-    // Must contain at least one non-zero digit (i.e. not "0", "00", etc.) and
-    // the first digit must not be zero unless the whole value is a single zero
-    // (which is disallowed by the pattern's `[1-9]` requirement).
-    if s.starts_with('0') {
-        return false;
-    }
+    // The pattern `[0-9]{0,4}[1-9][0-9]{0,4}` requires at least one non-zero
+    // digit anywhere in the string. Leading zeros are explicitly allowed
+    // (e.g. `"00001"` parses as the same five-character form AWS accepts).
     s.bytes().any(|b| b != b'0')
 }
 
