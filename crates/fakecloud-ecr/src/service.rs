@@ -420,8 +420,8 @@ impl EcrService {
             Some(raw) => raw.parse::<usize>().map_err(|_| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "InvalidContinuationTokenException",
-                    "The specified continuation token is not valid.",
+                    "InvalidParameterException",
+                    "The specified parameter is invalid: nextToken",
                 )
             })?,
             None => 0,
@@ -1203,8 +1203,8 @@ impl EcrService {
             Some(raw) => raw.parse::<usize>().map_err(|_| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "InvalidContinuationTokenException",
-                    "The specified continuation token is not valid.",
+                    "InvalidParameterException",
+                    "The specified parameter is invalid: nextToken",
                 )
             })?,
             None => 0,
@@ -1271,8 +1271,8 @@ impl EcrService {
             Some(raw) => raw.parse::<usize>().map_err(|_| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "InvalidContinuationTokenException",
-                    "The specified continuation token is not valid.",
+                    "InvalidParameterException",
+                    "The specified parameter is invalid: nextToken",
                 )
             })?,
             None => 0,
@@ -3005,10 +3005,24 @@ impl EcrService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
         validate_max_results(&body)?;
+        let max_results = body
+            .get("maxResults")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
+        let offset = match body.get("nextToken").and_then(|v| v.as_str()) {
+            Some(raw) => raw.parse::<usize>().map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "The specified parameter is invalid: nextToken",
+                )
+            })?,
+            None => 0,
+        };
         let account = target_account_id(request, &body);
         let accounts = self.state.read();
         let state = accounts.get(&account);
-        let exclusions: Vec<Value> = state
+        let mut all: Vec<Value> = state
             .map(|s| {
                 s.pull_time_exclusions
                     .values()
@@ -3021,9 +3035,21 @@ impl EcrService {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({
-            "pullTimeUpdateExclusions": exclusions,
-        })))
+        let total = all.len();
+        let start = offset.min(total);
+        all.drain(..start);
+        let next_token = match max_results {
+            Some(n) if all.len() > n => {
+                all.truncate(n);
+                Some((start + n).to_string())
+            }
+            _ => None,
+        };
+        let mut out = json!({ "pullTimeUpdateExclusions": all });
+        if let Some(tok) = next_token {
+            out["nextToken"] = json!(tok);
+        }
+        Ok(AwsResponse::ok_json(out))
     }
 
     fn list_image_referrers(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
