@@ -565,12 +565,12 @@ fn rest_request_config(
             ),
             "GetLayerVersion" => (
                 reqwest::Method::GET,
-                "/2018-10-31/layers/test-layer/versions/1".to_string(),
+                "/2018-10-31/layers/test-layer/versions/__VERSION__".to_string(),
                 None,
             ),
             "DeleteLayerVersion" => (
                 reqwest::Method::DELETE,
-                "/2018-10-31/layers/test-layer/versions/1".to_string(),
+                "/2018-10-31/layers/test-layer/versions/__VERSION__".to_string(),
                 None,
             ),
             // Concurrency
@@ -1175,6 +1175,7 @@ fn legacy_substitute_identifiers(
             // numeric `VersionNumber`). Substitute from the variant
             // so negative/boundary variants reach those routes too.
             ("test-layer", "LayerName"),
+            ("__VERSION__", "VersionNumber"),
             // Alias ops use `LATEST` as the path placeholder. Drive
             // negative variants through the same slot.
             ("LATEST", "Name"),
@@ -1189,6 +1190,11 @@ fn legacy_substitute_identifiers(
                 // ARN or already URL-encoded. Trust the variant — the
                 // id_forms strategy decides whether to URL-encode.
                 out = out.replace(placeholder, value);
+            }
+            Some(serde_json::Value::Number(value)) => {
+                // Numeric httpLabel members (e.g. Lambda `VersionNumber`)
+                // need to be stringified before the path substitution.
+                out = out.replace(placeholder, &value.to_string());
             }
             None => {
                 // The variant omitted this httpLabel member entirely
