@@ -159,6 +159,41 @@ impl SesV2Service {
     ///   GET    /v2/email/reputation/entities/{type}/{ref}                 -> GetReputationEntity
     ///   POST   /v2/email/metrics/batch                                   -> BatchGetMetricData
     fn resolve_action(req: &AwsRequest) -> Option<(&'static str, Option<String>, Option<String>)> {
+        // The shared dispatcher filters empty path segments, so
+        // `/v2/email/identities/` and `/v2/email/identities` both yield
+        // `["v2","email","identities"]`. Treat an empty inner or trailing
+        // segment as "unroutable" so an empty path label
+        // (e.g. EmailIdentity="") doesn't accidentally collapse to the
+        // collection root and resolve to a list/create operation.
+        let raw = req
+            .raw_path
+            .split_once('?')
+            .map(|(p, _)| p)
+            .unwrap_or(&req.raw_path);
+        let trimmed = raw.trim_start_matches('/');
+        if trimmed.is_empty() {
+            return None;
+        }
+        let raw_segs: Vec<&str> = trimmed.split('/').collect();
+        // Bail on any empty segment (other than the unavoidable trailing
+        // empty produced by a single trailing slash on an otherwise valid
+        // collection path — that still indicates a missing label).
+        if raw_segs.iter().any(|s| s.is_empty()) {
+            return None;
+        }
+        // Reject unsubstituted URI-template placeholders left behind
+        // when the SDK (or conformance probe) failed to bind a path
+        // label. Such requests would never reach a real AWS endpoint.
+        let has_placeholder = raw_segs.iter().any(|seg| {
+            let decoded = percent_encoding::percent_decode_str(seg)
+                .decode_utf8_lossy()
+                .into_owned();
+            decoded.starts_with('{') && decoded.ends_with('}')
+        });
+        if has_placeholder {
+            return None;
+        }
+
         let segs = &req.path_segments;
 
         if segs.len() < 3 || segs[0] != "v2" || segs[1] != "email" {
@@ -277,11 +312,52 @@ impl fakecloud_core::service::AwsService for SesV2Service {
 
         let (action, resource_name, sub_resource) =
             Self::resolve_action(&req).ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "UnknownOperationException",
-                    format!("Unknown operation: {} {}", req.method, req.raw_path),
-                )
+                // SES v2 is a REST-style API. An unresolved path under
+                // /v2/email/ typically means a required path label (e.g.
+                // {EmailIdentity}, {TemplateName}) was supplied as the
+                // empty string. Real SES rejects this with 400
+                // BadRequestException. A path that doesn't start with
+                // /v2/email/ at all is a genuinely unknown operation
+                // (404).
+                // 400 only when the failure is structurally a missing/empty path
+                // label or an unsubstituted `{Placeholder}` — otherwise it's a
+                // genuinely unknown operation and must surface as 404.
+                let raw = req
+                    .raw_path
+                    .split_once('?')
+                    .map(|(p, _)| p)
+                    .unwrap_or(&req.raw_path);
+                let trimmed = raw.trim_start_matches('/');
+                let raw_segs: Vec<&str> = if trimmed.is_empty() {
+                    Vec::new()
+                } else {
+                    trimmed.split('/').collect()
+                };
+                // Only treat path-label issues as 400 inside /v2/email/; outside
+                // SES, any unresolved path is a genuinely unknown operation.
+                let inside_ses = raw_segs.first().map(|s| *s == "v2").unwrap_or(false)
+                    && raw_segs.get(1).map(|s| *s == "email").unwrap_or(false);
+                let label_problem = inside_ses
+                    && (raw_segs.iter().any(|s| s.is_empty())
+                        || raw_segs.iter().any(|seg| {
+                            let decoded = percent_encoding::percent_decode_str(seg)
+                                .decode_utf8_lossy()
+                                .into_owned();
+                            decoded.starts_with('{') && decoded.ends_with('}')
+                        }));
+                if label_problem {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "BadRequestException",
+                        format!("Invalid request: {} {}", req.method, req.raw_path),
+                    )
+                } else {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "UnknownOperationException",
+                        format!("Unknown operation: {} {}", req.method, req.raw_path),
+                    )
+                }
             })?;
 
         let res = resource_name.as_deref().unwrap_or("");

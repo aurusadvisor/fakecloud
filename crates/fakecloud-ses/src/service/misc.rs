@@ -182,6 +182,13 @@ impl SesV2Service {
                 ));
             }
         };
+        if template_name.is_empty() {
+            return Ok(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "TemplateName must not be empty",
+            ));
+        }
 
         let from_email = body["FromEmailAddress"].as_str().unwrap_or("").to_string();
         let subject = body["TemplateSubject"].as_str().unwrap_or("").to_string();
@@ -783,6 +790,13 @@ impl SesV2Service {
                 ));
             }
         };
+        if endpoint_name.is_empty() || endpoint_name.len() > 64 {
+            return Ok(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "EndpointName length must be between 1 and 64",
+            ));
+        }
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -841,6 +855,14 @@ impl SesV2Service {
         name: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        Self::require_nonempty("EndpointName", name)?;
+        if name.len() > 64 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "EndpointName must be 64 characters or fewer",
+            ));
+        }
         let accounts = self.state.read();
         let empty = SesState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -872,6 +894,45 @@ impl SesV2Service {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // Validate paging query params against the Smithy constraints
+        // (NextTokenV2: 1..=5000 chars; PageSizeV2: 1..=1000).
+        for kv in req.raw_query.split('&') {
+            let (k, v) = match kv.split_once('=') {
+                Some(p) => p,
+                None => (kv, ""),
+            };
+            if k.is_empty() {
+                continue;
+            }
+            match k {
+                "NextToken" => {
+                    let decoded = percent_encoding::percent_decode_str(v)
+                        .decode_utf8_lossy()
+                        .into_owned();
+                    if decoded.is_empty() || decoded.len() > 5000 {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "BadRequestException",
+                            "NextToken length must be between 1 and 5000",
+                        ));
+                    }
+                }
+                "PageSize" => {
+                    let parsed = v.parse::<i64>().ok();
+                    match parsed {
+                        Some(n) if (1..=1000).contains(&n) => {}
+                        _ => {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "BadRequestException",
+                                "PageSize must be between 1 and 1000",
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         let accounts = self.state.read();
         let empty = SesState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -898,6 +959,14 @@ impl SesV2Service {
         name: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        Self::require_nonempty("EndpointName", name)?;
+        if name.len() > 64 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "EndpointName must be 64 characters or fewer",
+            ));
+        }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         if state.multi_region_endpoints.remove(name).is_none() {
@@ -1006,6 +1075,15 @@ impl SesV2Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
         let filter_type = body["ImportDestinationType"].as_str();
+        if let Some(ft) = filter_type {
+            if !matches!(ft, "SUPPRESSION_LIST" | "CONTACT_LIST") {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "ImportDestinationType must be SUPPRESSION_LIST or CONTACT_LIST",
+                ));
+            }
+        }
 
         let accounts = self.state.read();
         let empty = SesState::new(&req.account_id, &req.region);
@@ -1158,6 +1236,27 @@ impl SesV2Service {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
         let filter_status = body["JobStatus"].as_str();
         let filter_type = body["ExportSourceType"].as_str();
+        if let Some(s) = filter_status {
+            if !matches!(
+                s,
+                "CREATED" | "PROCESSING" | "COMPLETED" | "FAILED" | "CANCELLED"
+            ) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "JobStatus must be CREATED, PROCESSING, COMPLETED, FAILED, or CANCELLED",
+                ));
+            }
+        }
+        if let Some(t) = filter_type {
+            if !matches!(t, "METRICS_DATA" | "MESSAGE_INSIGHTS") {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "ExportSourceType must be METRICS_DATA or MESSAGE_INSIGHTS",
+                ));
+            }
+        }
 
         let accounts = self.state.read();
         let empty = SesState::new(&req.account_id, &req.region);
@@ -1240,6 +1339,13 @@ impl SesV2Service {
                 ));
             }
         };
+        if tenant_name.is_empty() {
+            return Ok(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "TenantName must not be empty",
+            ));
+        }
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -1360,6 +1466,13 @@ impl SesV2Service {
                 ));
             }
         };
+        if tenant_name.is_empty() {
+            return Ok(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "TenantName must not be empty",
+            ));
+        }
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -1392,6 +1505,13 @@ impl SesV2Service {
                 ));
             }
         };
+        if tenant_name.is_empty() {
+            return Ok(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "TenantName must not be empty",
+            ));
+        }
         let resource_arn = match body["ResourceArn"].as_str() {
             Some(a) => a.to_string(),
             None => {
@@ -1402,6 +1522,13 @@ impl SesV2Service {
                 ));
             }
         };
+        if resource_arn.is_empty() {
+            return Ok(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "ResourceArn must not be empty",
+            ));
+        }
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -1541,6 +1668,13 @@ impl SesV2Service {
                 ));
             }
         };
+        if resource_arn.is_empty() {
+            return Ok(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "ResourceArn must not be empty",
+            ));
+        }
 
         let accounts = self.state.read();
         let empty = SesState::new(&req.account_id, &req.region);
@@ -1574,6 +1708,15 @@ impl SesV2Service {
         entity_ref: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        Self::require_nonempty("ReputationEntityType", entity_type)?;
+        Self::require_nonempty("ReputationEntityReference", entity_ref)?;
+        if entity_type != "RESOURCE" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "ReputationEntityType must be RESOURCE",
+            ));
+        }
         let key = format!("{}/{}", entity_type, entity_ref);
         let accounts = self.state.read();
         let empty = SesState::new(&req.account_id, &req.region);
@@ -1639,6 +1782,13 @@ impl SesV2Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         Self::require_nonempty("ReputationEntityType", entity_type)?;
         Self::require_nonempty("ReputationEntityReference", entity_ref)?;
+        if entity_type != "RESOURCE" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "ReputationEntityType must be RESOURCE",
+            ));
+        }
         let body: Value = Self::parse_body(req)?;
         let sending_status = body["SendingStatus"]
             .as_str()
@@ -1650,6 +1800,16 @@ impl SesV2Service {
                 )
             })?
             .to_string();
+        if !matches!(
+            sending_status.as_str(),
+            "ENABLED" | "DISABLED" | "REINSTATED"
+        ) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "SendingStatus must be ENABLED, DISABLED, or REINSTATED",
+            ));
+        }
 
         let key = format!("{}/{}", entity_type, entity_ref);
         let mut accounts = self.state.write();
@@ -1680,6 +1840,13 @@ impl SesV2Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         Self::require_nonempty("ReputationEntityType", entity_type)?;
         Self::require_nonempty("ReputationEntityReference", entity_ref)?;
+        if entity_type != "RESOURCE" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "ReputationEntityType must be RESOURCE",
+            ));
+        }
         let body: Value = Self::parse_body(req)?;
         let policy = body["ReputationEntityPolicy"]
             .as_str()
@@ -1691,6 +1858,15 @@ impl SesV2Service {
                 )
             })?
             .to_string();
+        // ReputationEntityPolicy is required and cannot be empty (it's an
+        // AWS-managed policy ARN).
+        if policy.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "ReputationEntityPolicy must not be empty",
+            ));
+        }
         let policy = Some(policy);
 
         let key = format!("{}/{}", entity_type, entity_ref);
@@ -1721,7 +1897,16 @@ impl SesV2Service {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body: Value = Self::parse_body(req)?;
-        let queries = body["Queries"].as_array().cloned().unwrap_or_default();
+        let queries = match body.get("Queries").and_then(|v| v.as_array()) {
+            Some(arr) => arr.clone(),
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "Queries is required",
+                ));
+            }
+        };
 
         let results: Vec<Value> = queries
             .iter()
@@ -1853,6 +2038,16 @@ impl SesV2Service {
                 )
             })?
             .to_string();
+        match body.get("Content") {
+            None | Some(Value::Null) => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "Content is required",
+                ));
+            }
+            _ => {}
+        }
         let subject = body
             .get("Content")
             .and_then(|v| v.get("Simple"))
@@ -1953,8 +2148,21 @@ impl SesV2Service {
 
     pub(super) fn get_blacklist_reports(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // `BlacklistItemNames` is a required @httpQuery list. Reject
+        // requests that omit it entirely; an empty list is still a list.
+        let has_blacklist_items = req
+            .raw_query
+            .split('&')
+            .any(|kv| kv.starts_with("BlacklistItemNames=") || kv == "BlacklistItemNames");
+        if !has_blacklist_items {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "BlacklistItemNames is required",
+            ));
+        }
         // Emulator has no blacklist data; return an empty map per the
         // documented response shape.
         let body = json!({ "BlacklistReport": {} });
@@ -1991,9 +2199,30 @@ impl SesV2Service {
 
     pub(super) fn get_domain_statistics_report(
         &self,
-        _domain: &str,
-        _req: &AwsRequest,
+        domain: &str,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        Self::require_nonempty("Domain", domain)?;
+        let has = |k: &str| {
+            let prefix = format!("{k}=");
+            req.raw_query
+                .split('&')
+                .any(|kv| kv.starts_with(&prefix) || kv == k)
+        };
+        if !has("StartDate") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "StartDate is required",
+            ));
+        }
+        if !has("EndDate") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "EndDate is required",
+            ));
+        }
         let body = json!({
             "OverallVolume": {
                 "VolumeStatistics": {
@@ -2012,9 +2241,30 @@ impl SesV2Service {
 
     pub(super) fn list_domain_deliverability_campaigns(
         &self,
-        _domain: &str,
-        _req: &AwsRequest,
+        domain: &str,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        Self::require_nonempty("SubscribedDomain", domain)?;
+        let has = |k: &str| {
+            let prefix = format!("{k}=");
+            req.raw_query
+                .split('&')
+                .any(|kv| kv.starts_with(&prefix) || kv == k)
+        };
+        if !has("StartDate") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "StartDate is required",
+            ));
+        }
+        if !has("EndDate") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "EndDate is required",
+            ));
+        }
         let body = json!({
             "DomainDeliverabilityCampaigns": [],
             "NextToken": null,
@@ -2041,10 +2291,21 @@ impl SesV2Service {
         let accounts = self.state.read();
         let empty = SesState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        // Smithy GetEmailAddressInsightsResponse only declares MailboxValidation.
+        // No external validation service is wired up; emit a stable
+        // synthetic verdict so SDKs round-trip the documented shape.
         let _ = (email, state);
         let body = json!({
-            "MailboxValidation": {},
+            "MailboxValidation": {
+                "IsValid": { "ConfidenceVerdict": "HIGH" },
+                "Evaluations": {
+                    "HasValidSyntax": { "ConfidenceVerdict": "HIGH" },
+                    "HasValidDnsRecords": { "ConfidenceVerdict": "MEDIUM" },
+                    "MailboxExists": { "ConfidenceVerdict": "MEDIUM" },
+                    "IsRoleAddress": { "ConfidenceVerdict": "LOW" },
+                    "IsDisposable": { "ConfidenceVerdict": "LOW" },
+                    "IsRandomInput": { "ConfidenceVerdict": "LOW" },
+                },
+            },
         });
         Ok(AwsResponse::json(StatusCode::OK, body.to_string()))
     }

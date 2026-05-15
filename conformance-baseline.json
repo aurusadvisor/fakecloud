@@ -1,5 +1,5 @@
 {
-  "variants_passed": 84967,
+  "variants_passed": 85041,
   "total_variants": 86314,
   "per_service": {
     "acm": {
@@ -23,7 +23,7 @@
       "total": 1569
     },
     "ses": {
-      "passed": 2788,
+      "passed": 2862,
       "total": 2862
     },
     "sqs": {
