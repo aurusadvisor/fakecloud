@@ -119,7 +119,22 @@ impl BedrockService {
     }
 
     fn resolve_action(req: &AwsRequest) -> Option<(&str, Option<String>, Option<String>)> {
-        let segs = &req.path_segments;
+        // Re-split the raw wire path so empty `@httpLabel` segments are
+        // preserved. The shared `path_segments` filters empties, which
+        // would silently misroute a missing-identifier request (e.g.
+        // `DELETE /automated-reasoning-policies//`) to either a wrong
+        // structural route or to the 501 `ActionNotImplemented` fallback.
+        // Keeping the empty segment lets the dispatcher land on the
+        // intended action with an empty `resource_id`; downstream
+        // prevalidation then emits the correct `ValidationException`,
+        // matching AWS's behavior.
+        let raw = req.raw_path.trim_start_matches('/');
+        let segs_owned: Vec<String> = if raw.is_empty() {
+            Vec::new()
+        } else {
+            raw.split('/').map(|s| s.to_string()).collect()
+        };
+        let segs: &[String] = &segs_owned;
         if segs.is_empty() {
             return None;
         }
@@ -891,7 +906,7 @@ impl AwsService for BedrockService {
         // `ValidationException` shape for missing required fields,
         // out-of-bound string lengths, invalid enum values, and integer
         // range violations before the per-handler logic runs.
-        crate::validation::prevalidate(action, &req)?;
+        crate::validation::prevalidate(action, &req, resource_id.as_deref(), extra_id.as_deref())?;
 
         let mutates = !is_read_only_action(action);
         let body = req.json_body();

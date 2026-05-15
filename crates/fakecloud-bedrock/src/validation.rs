@@ -41,6 +41,13 @@ struct OpConstraints {
     query_integers: &'static [(&'static str, i64, i64)],
     /// `(query_param, allowed_values)` for enum-typed httpQuery members.
     query_enums: &'static [(&'static str, &'static [&'static str])],
+    /// `(label_name, min, max)` length constraints on the primary
+    /// `@httpLabel` field (positional `resource_id` in the dispatcher).
+    /// A `None` resource_id (route doesn't carry one) skips the check.
+    path_label: Option<(&'static str, u64, u64)>,
+    /// `(label_name, min, max)` length constraints on the secondary
+    /// `@httpLabel` field (positional `extra_id` in the dispatcher).
+    path_label_extra: Option<(&'static str, u64, u64)>,
 }
 
 const EMPTY: OpConstraints = OpConstraints {
@@ -51,18 +58,37 @@ const EMPTY: OpConstraints = OpConstraints {
     query_strings: &[],
     query_integers: &[],
     query_enums: &[],
+    path_label: None,
+    path_label_extra: None,
 };
 
 /// Run Smithy-aligned prevalidation on `req` for the resolved Bedrock
 /// `action`. Returns `Ok(())` for actions with no entry in the table or
 /// when every constraint is satisfied; otherwise emits a
 /// `ValidationException` matching the wire shape declared on the op.
-pub(crate) fn prevalidate(action: &str, req: &AwsRequest) -> Result<(), AwsServiceError> {
+pub(crate) fn prevalidate(
+    action: &str,
+    req: &AwsRequest,
+    resource_id: Option<&str>,
+    extra_id: Option<&str>,
+) -> Result<(), AwsServiceError> {
     let Some(spec) = lookup(action) else {
         return Ok(());
     };
 
     let body = req.json_body();
+
+    // Path-label length checks. The probe drives `@httpLabel` members by
+    // putting the value in the body; when it generates an empty string for
+    // `too_short` (min = 1), the harness still URL-encodes it into the path,
+    // so we get an empty `resource_id`. Likewise `too_long` produces a path
+    // segment longer than `max`. Verify before per-handler logic runs.
+    if let Some((name, min, max)) = spec.path_label {
+        check_path_label(name, resource_id.unwrap_or(""), min, max)?;
+    }
+    if let Some((name, min, max)) = spec.path_label_extra {
+        check_path_label(name, extra_id.unwrap_or(""), min, max)?;
+    }
 
     // Required body fields: a missing key OR a JSON `null` is treated as
     // absent. Empty strings, empty arrays, and empty objects are rejected
@@ -175,6 +201,23 @@ fn validation_error(message: &str) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", message)
 }
 
+/// Validate a path label value against a Smithy `@length` constraint. The
+/// probe leaves the literal `{Name}` substring in the URI when it omits the
+/// label, so treat any value that still contains the unsubstituted template
+/// as "missing" rather than measuring its character count.
+fn check_path_label(name: &str, value: &str, min: u64, max: u64) -> Result<(), AwsServiceError> {
+    if value.starts_with('{') && value.ends_with('}') {
+        return Err(validation_error(&format!("{name} is required")));
+    }
+    let len = value.chars().count() as u64;
+    if len < min || len > max {
+        return Err(validation_error(&format!(
+            "{name} length {len} is outside the valid range {min}-{max}",
+        )));
+    }
+    Ok(())
+}
+
 fn lookup(action: &str) -> Option<OpConstraints> {
     Some(match action {
         // ── Custom models ────────────────────────────────────────────
@@ -190,9 +233,13 @@ fn lookup(action: &str) -> Option<OpConstraints> {
         },
         "ListCustomModels" => OpConstraints {
             query_strings: &[
-                ("baseModelArnEquals", 1, 1011),
-                ("foundationModelArnEquals", 1, 1011),
+                // ModelArn @length(20, 1011) — the @length min was previously
+                // mis-set to 1 so `negative_too_short` (19-char string)
+                // slipped past validation.
+                ("baseModelArnEquals", 20, 1011),
+                ("foundationModelArnEquals", 20, 1011),
                 ("nameContains", 1, 63),
+                ("nextToken", 1, 2048),
             ],
             query_integers: &[("maxResults", 1, 1000)],
             query_enums: &[
@@ -204,7 +251,7 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             ..EMPTY
         },
         "ListImportedModels" => OpConstraints {
-            query_strings: &[("nameContains", 1, 63)],
+            query_strings: &[("nameContains", 1, 63), ("nextToken", 1, 2048)],
             query_integers: &[("maxResults", 1, 1000)],
             query_enums: &[
                 ("sortBy", &["CreationTime"]),
@@ -213,7 +260,11 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             ..EMPTY
         },
         "ListCustomModelDeployments" => OpConstraints {
-            query_strings: &[("modelArnEquals", 20, 1011), ("nameContains", 1, 63)],
+            query_strings: &[
+                ("modelArnEquals", 20, 1011),
+                ("nameContains", 1, 63),
+                ("nextToken", 1, 2048),
+            ],
             query_integers: &[("maxResults", 1, 1000)],
             query_enums: &[
                 ("statusEquals", &["Creating", "Active", "Failed"]),
@@ -274,7 +325,7 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             ..EMPTY
         },
         "ListModelCustomizationJobs" => OpConstraints {
-            query_strings: &[("nameContains", 1, 63)],
+            query_strings: &[("nameContains", 1, 63), ("nextToken", 1, 2048)],
             query_integers: &[("maxResults", 1, 1000)],
             query_enums: &[
                 (
@@ -307,7 +358,7 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             ..EMPTY
         },
         "ListEvaluationJobs" => OpConstraints {
-            query_strings: &[("nameContains", 1, 63)],
+            query_strings: &[("nameContains", 1, 63), ("nextToken", 1, 2048)],
             query_integers: &[("maxResults", 1, 1000)],
             query_enums: &[
                 (
@@ -345,7 +396,7 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             ..EMPTY
         },
         "ListGuardrails" => OpConstraints {
-            query_strings: &[("guardrailIdentifier", 0, 2048)],
+            query_strings: &[("guardrailIdentifier", 0, 2048), ("nextToken", 1, 2048)],
             query_integers: &[("maxResults", 1, 1000)],
             ..EMPTY
         },
@@ -361,8 +412,13 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             ..EMPTY
         },
         "ListInferenceProfiles" => OpConstraints {
+            query_strings: &[("nextToken", 1, 2048)],
             query_integers: &[("maxResults", 1, 1000)],
-            query_enums: &[("typeEquals", &["SYSTEM_DEFINED", "APPLICATION"])],
+            // The wire name from `@httpQuery("type")` is `type`, but the
+            // smithy member is `typeEquals`. Conformance probes use the
+            // member name for their variant labels; the actual query param
+            // on the wire is `type`.
+            query_enums: &[("type", &["SYSTEM_DEFINED", "APPLICATION"])],
             ..EMPTY
         },
 
@@ -371,7 +427,8 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             required: &["endpointConfig", "modelSourceIdentifier"],
             strings: &[
                 ("clientRequestToken", 1, 256),
-                ("endpointName", 1, 63),
+                // EndpointName @length(1, 30).
+                ("endpointName", 1, 30),
                 ("modelSourceIdentifier", 1, 2048),
             ],
             ..EMPTY
@@ -387,7 +444,11 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             ..EMPTY
         },
         "ListMarketplaceModelEndpoints" => OpConstraints {
-            query_strings: &[("modelSourceEquals", 1, 2048)],
+            // Wire name from `@httpQuery("modelSourceIdentifier")` — the
+            // smithy member is `modelSourceEquals` (probe variant label),
+            // but the actual query string key is `modelSourceIdentifier`.
+            // ModelSourceIdentifier has @length(max:2048), no min.
+            query_strings: &[("modelSourceIdentifier", 0, 2048), ("nextToken", 1, 2048)],
             query_integers: &[("maxResults", 1, 1000)],
             ..EMPTY
         },
@@ -404,10 +465,14 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             ..EMPTY
         },
         "ListModelCopyJobs" => OpConstraints {
+            // Wire names from `@httpQuery` traits — smithy member names
+            // differ from query string keys for several filter members.
             query_strings: &[
                 ("sourceAccountEquals", 0, 50),
                 ("sourceModelArnEquals", 20, 1011),
-                ("targetModelNameContains", 1, 63),
+                // @httpQuery("outputModelNameContains") on `targetModelNameContains`.
+                ("outputModelNameContains", 1, 63),
+                ("nextToken", 1, 2048),
             ],
             query_integers: &[("maxResults", 1, 1000)],
             query_enums: &[
@@ -429,7 +494,7 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             ..EMPTY
         },
         "ListModelImportJobs" => OpConstraints {
-            query_strings: &[("nameContains", 1, 63)],
+            query_strings: &[("nameContains", 1, 63), ("nextToken", 1, 2048)],
             query_integers: &[("maxResults", 1, 1000)],
             query_enums: &[
                 ("statusEquals", &["InProgress", "Completed", "Failed"]),
@@ -457,7 +522,7 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             ..EMPTY
         },
         "ListModelInvocationJobs" => OpConstraints {
-            query_strings: &[("nameContains", 1, 63)],
+            query_strings: &[("nameContains", 1, 63), ("nextToken", 1, 2048)],
             query_integers: &[("maxResults", 1, 1000)],
             query_enums: &[
                 (
@@ -497,6 +562,7 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             ..EMPTY
         },
         "ListPromptRouters" => OpConstraints {
+            query_strings: &[("nextToken", 1, 2048)],
             query_integers: &[("maxResults", 1, 1000)],
             query_enums: &[("type", &["custom", "default"])],
             ..EMPTY
@@ -513,7 +579,11 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             ..EMPTY
         },
         "ListProvisionedModelThroughputs" => OpConstraints {
-            query_strings: &[("modelArnEquals", 20, 1011), ("nameContains", 1, 63)],
+            query_strings: &[
+                ("modelArnEquals", 20, 1011),
+                ("nameContains", 1, 63),
+                ("nextToken", 1, 2048),
+            ],
             query_integers: &[("maxResults", 1, 1000)],
             query_enums: &[
                 (
@@ -532,15 +602,28 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             strings: &[("modelId", 1, 140)],
             ..EMPTY
         },
-        // modelId is bound to the URI path, not the body — required-checks
-        // would always fire on a real call. Leave validation length-only.
+        // modelId is bound as @httpLabel (path), not body/query. BedrockModelId
+        // has `@length max:140` (no min) but the field is `@required`, so the
+        // `path_label` check_path_label() invocation also catches "missing".
         "ListFoundationModelAgreementOffers" => OpConstraints {
-            query_strings: &[("modelId", 1, 140)],
+            path_label: Some(("modelId", 1, 140)),
+            query_enums: &[("offerType", &["ALL", "PUBLIC"])],
             ..EMPTY
         },
-        // modelId is URI-path-bound, not body. Length-only here.
         "GetFoundationModelAvailability" => OpConstraints {
-            query_strings: &[("modelId", 1, 140)],
+            path_label: Some(("modelId", 1, 140)),
+            ..EMPTY
+        },
+        // Filters are bound as @httpQuery. Catch invalid enum values.
+        "ListFoundationModels" => OpConstraints {
+            query_enums: &[
+                (
+                    "byCustomizationType",
+                    &["FINE_TUNING", "CONTINUED_PRE_TRAINING", "DISTILLATION"],
+                ),
+                ("byInferenceType", &["ON_DEMAND", "PROVISIONED"]),
+                ("byOutputModality", &["EMBEDDING", "IMAGE", "TEXT"]),
+            ],
             ..EMPTY
         },
 
@@ -557,7 +640,11 @@ fn lookup(action: &str) -> Option<OpConstraints> {
         },
         "PutResourcePolicy" => OpConstraints {
             required: &["resourceArn", "resourcePolicy"],
-            strings: &[("resourceArn", 1, 255)],
+            strings: &[
+                ("resourceArn", 1, 255),
+                // ResourcePolicyDocument @length(1, 20480).
+                ("resourcePolicy", 1, 20480),
+            ],
             ..EMPTY
         },
 
@@ -566,11 +653,91 @@ fn lookup(action: &str) -> Option<OpConstraints> {
             required: &["guardrailInferenceConfig"],
             ..EMPTY
         },
+        "ListEnforcedGuardrailsConfiguration" => OpConstraints {
+            query_strings: &[("nextToken", 1, 2048)],
+            ..EMPTY
+        },
 
         // ── Automated reasoning ─────────────────────────────────────
         "ListAutomatedReasoningPolicies" => OpConstraints {
-            query_strings: &[("policyArn", 0, 1024)],
+            // policyArn targets AutomatedReasoningPolicyArn (@length 1,2048).
+            // nextToken targets PaginationToken (@length 1,2048).
+            query_strings: &[("policyArn", 1, 2048), ("nextToken", 1, 2048)],
             query_integers: &[("maxResults", 1, 100)],
+            ..EMPTY
+        },
+        "ListAutomatedReasoningPolicyTestResults" => OpConstraints {
+            path_label: Some(("policyArn", 1, 2048)),
+            query_strings: &[("nextToken", 1, 2048)],
+            query_integers: &[("maxResults", 1, 100)],
+            ..EMPTY
+        },
+
+        // ── Automated reasoning policy path-label ops ────────────────
+        "CancelAutomatedReasoningPolicyBuildWorkflow"
+        | "CreateAutomatedReasoningPolicyTestCase"
+        | "CreateAutomatedReasoningPolicyVersion"
+        | "DeleteAutomatedReasoningPolicy"
+        | "DeleteAutomatedReasoningPolicyBuildWorkflow"
+        | "DeleteAutomatedReasoningPolicyTestCase"
+        | "GetAutomatedReasoningPolicy"
+        | "GetAutomatedReasoningPolicyAnnotations"
+        | "GetAutomatedReasoningPolicyBuildWorkflow"
+        | "GetAutomatedReasoningPolicyBuildWorkflowResultAssets"
+        | "GetAutomatedReasoningPolicyNextScenario"
+        | "GetAutomatedReasoningPolicyTestCase"
+        | "GetAutomatedReasoningPolicyTestResult"
+        | "StartAutomatedReasoningPolicyBuildWorkflow"
+        | "StartAutomatedReasoningPolicyTestWorkflow"
+        | "UpdateAutomatedReasoningPolicy"
+        | "UpdateAutomatedReasoningPolicyAnnotations"
+        | "UpdateAutomatedReasoningPolicyTestCase" => OpConstraints {
+            path_label: Some(("policyArn", 1, 2048)),
+            ..EMPTY
+        },
+
+        // ── Custom model / imported model / foundation model path ops ─
+        "DeleteCustomModel" | "GetCustomModel" => OpConstraints {
+            path_label: Some(("modelIdentifier", 1, 2048)),
+            ..EMPTY
+        },
+        "DeleteImportedModel" | "GetImportedModel" => OpConstraints {
+            path_label: Some(("modelIdentifier", 1, 2048)),
+            ..EMPTY
+        },
+        "GetFoundationModel" => OpConstraints {
+            path_label: Some(("modelIdentifier", 1, 2048)),
+            ..EMPTY
+        },
+
+        // ── Custom model deployment path ops ─────────────────────────
+        "DeleteCustomModelDeployment" | "GetCustomModelDeployment" => OpConstraints {
+            path_label: Some(("customModelDeploymentIdentifier", 1, 93)),
+            ..EMPTY
+        },
+
+        // ── Inference profile path ops ───────────────────────────────
+        "DeleteInferenceProfile" | "GetInferenceProfile" => OpConstraints {
+            path_label: Some(("inferenceProfileIdentifier", 1, 2048)),
+            ..EMPTY
+        },
+
+        // ── Prompt router path ops ───────────────────────────────────
+        "DeletePromptRouter" | "GetPromptRouter" => OpConstraints {
+            path_label: Some(("promptRouterArn", 1, 2048)),
+            ..EMPTY
+        },
+
+        // ── Resource policy path ops ─────────────────────────────────
+        "DeleteResourcePolicy" | "GetResourcePolicy" => OpConstraints {
+            path_label: Some(("resourceArn", 1, 255)),
+            ..EMPTY
+        },
+
+        // ── Tag op ───────────────────────────────────────────────────
+        "TagResource" => OpConstraints {
+            required: &["resourceARN", "tags"],
+            strings: &[("resourceARN", 20, 1011)],
             ..EMPTY
         },
 
