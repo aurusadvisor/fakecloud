@@ -375,6 +375,17 @@ impl ContainerRuntime {
         cmd.arg("-e")
             .arg(format!("AWS_LAMBDA_FUNCTION_TIMEOUT={}", func.timeout));
 
+        // Set the handler and task root so the runtime client knows
+        // which binary to invoke and where to find it.
+        cmd.arg("-e")
+            .arg(format!("_HANDLER={}", func.handler));
+        cmd.arg("-e")
+            .arg("LAMBDA_TASK_ROOT=/var/task");
+        // Tell the runtime client (RAPID) to listen on port 8080.
+        // fakecloud maps container port 8080 for the RIE readiness check.
+        cmd.arg("-e")
+            .arg("_LAMBDA_SERVER_PORT=8080");
+
         // EphemeralStorage.Size (MiB) maps to a tmpfs at /tmp so
         // function code that writes there hits the configured limit
         // instead of the docker default. Default 512 MiB matches AWS.
@@ -511,6 +522,17 @@ impl ContainerRuntime {
 
         cmd.arg("-e")
             .arg(format!("AWS_LAMBDA_FUNCTION_TIMEOUT={}", func.timeout));
+
+        // Set the handler and task root so the runtime client knows
+        // which binary to invoke and where to find it.
+        cmd.arg("-e")
+            .arg(format!("_HANDLER={}", func.handler));
+        cmd.arg("-e")
+            .arg("LAMBDA_TASK_ROOT=/var/task");
+        // Tell the runtime client (RAPID) to listen on port 8080.
+        // fakecloud maps container port 8080 for the RIE readiness check.
+        cmd.arg("-e")
+            .arg("_LAMBDA_SERVER_PORT=8080");
 
         // EphemeralStorage.Size (MiB) maps to a tmpfs at /tmp so
         // function code that writes there hits the configured limit
