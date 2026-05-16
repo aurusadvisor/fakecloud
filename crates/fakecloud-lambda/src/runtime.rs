@@ -57,6 +57,7 @@ pub struct ContainerRuntime {
     /// Lets `docker pull` talk to fakecloud ECR without mutating the user's
     /// `~/.docker/config.json`.
     docker_config: Option<Arc<TempDir>>,
+    network: Option<String>,
 }
 
 /// Wrapper around an in-flight streaming invocation. Yields raw body
@@ -135,6 +136,7 @@ impl ContainerRuntime {
         };
 
         let docker_config = build_local_registry_docker_config(server_port).map(Arc::new);
+        let network = std::env::var("FAKECLOUD_LAMBDA_NETWORK").ok();
         Some(Self {
             cli,
             containers: RwLock::new(HashMap::new()),
@@ -143,6 +145,7 @@ impl ContainerRuntime {
             host_ip,
             server_port,
             docker_config,
+            network,
         })
     }
 
@@ -364,6 +367,10 @@ impl ContainerRuntime {
             .arg("--add-host")
             .arg(format!("host.docker.internal:{}", self.host_ip));
 
+        if let Some(ref net) = self.network {
+            cmd.arg("--network").arg(net);
+        }
+
         for (key, value) in &func.environment {
             let transformed_value = value
                 .replace("http://127.0.0.1:", "http://host.docker.internal:")
@@ -498,6 +505,10 @@ impl ContainerRuntime {
             // Map host.docker.internal to the detected host IP (bridge gateway on Linux, or explicit IP)
             .arg("--add-host")
             .arg(format!("host.docker.internal:{}", self.host_ip));
+
+        if let Some(ref net) = self.network {
+            cmd.arg("--network").arg(net);
+        }
 
         for (key, value) in &func.environment {
             // Transform localhost URLs to use host.docker.internal, which we've set up via --add-host

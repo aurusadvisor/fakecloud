@@ -21,13 +21,6 @@ name: RDS support images
 on:
   push:
     tags: ["v*"]
-  pull_request:
-    paths:
-      - .github/workflows/docker-rds-images.yml
-      - crates/fakecloud-rds/assets/postgres/**
-      - crates/fakecloud-rds/assets/mysql/**
-      - crates/fakecloud-rds/assets/mariadb/**
-  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io

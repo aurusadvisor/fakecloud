@@ -12,16 +12,7 @@ on:
       - 'crates/fakecloud-parity/**'
       - 'crates/fakecloud-testkit/**'
       - '.github/workflows/parity-fakecloud.yml'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'crates/fakecloud-parity/**'
-      - 'crates/fakecloud-testkit/**'
-      - '.github/workflows/parity-fakecloud.yml'
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
