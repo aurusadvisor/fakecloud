@@ -15,16 +15,24 @@ use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey, LineEnding
 use rsa::signature::{SignatureEncoding, Signer};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use sha2::{Digest, Sha256};
+use std::sync::OnceLock;
 
 use crate::state::{SentEmail, SesState};
 
 const DEFAULT_KEY_BITS: usize = 2048;
 const SIGNED_HEADERS: &[&str] = &["from", "to", "subject", "date", "message-id"];
 
-/// Generate a fresh RSA-2048 keypair for Easy DKIM. Returns the PEM-encoded
-/// PKCS#8 private key and the SubjectPublicKeyInfo DER as base64
-/// (the format SES publishes via the `*.dkim.amazonses.com` CNAME chain).
-pub fn generate_easy_dkim_keypair() -> (String, String) {
+/// Process-wide cached Easy-DKIM keypair. RSA-2048 generation costs
+/// 100–500 ms; emulator workloads spin up identities in bursts and the
+/// keypair only needs to be stable per-identity, not unique. Cache once
+/// and reuse so CreateEmailIdentity stays sub-millisecond and tests
+/// don't time out under concurrent conformance probes.
+fn cached_easy_dkim_keypair() -> &'static (String, String) {
+    static CACHE: OnceLock<(String, String)> = OnceLock::new();
+    CACHE.get_or_init(generate_easy_dkim_keypair_uncached)
+}
+
+fn generate_easy_dkim_keypair_uncached() -> (String, String) {
     let mut rng = rand::thread_rng();
     let priv_key = RsaPrivateKey::new(&mut rng, DEFAULT_KEY_BITS).expect("rsa keypair generation");
     let pub_key = RsaPublicKey::from(&priv_key);
@@ -39,6 +47,12 @@ pub fn generate_easy_dkim_keypair() -> (String, String) {
         .to_vec();
     let pub_b64 = base64::engine::general_purpose::STANDARD.encode(pub_der);
     (priv_pem, pub_b64)
+}
+
+/// Return a stable Easy-DKIM keypair (PKCS#8 PEM private key, base64
+/// SubjectPublicKeyInfo DER). Generated lazily and reused across calls.
+pub fn generate_easy_dkim_keypair() -> (String, String) {
+    cached_easy_dkim_keypair().clone()
 }
 
 /// Sign the given message and return a fully-formed `DKIM-Signature`

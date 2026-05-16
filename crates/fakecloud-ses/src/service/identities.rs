@@ -46,6 +46,13 @@ impl SesV2Service {
                 ));
             }
         };
+        if identity_name.is_empty() {
+            return Ok(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "EmailIdentity must not be empty",
+            ));
+        }
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -242,6 +249,36 @@ impl SesV2Service {
         policy_name: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        Self::require_nonempty("EmailIdentity", identity_name)?;
+        Self::require_nonempty("PolicyName", policy_name)?;
+        // Reject unsubstituted URI template placeholders (e.g. SDK fed
+        // an empty or absent PolicyName and the literal "{PolicyName}"
+        // remained in the URL).
+        if policy_name.starts_with('{') && policy_name.ends_with('}') {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "PolicyName is required",
+            ));
+        }
+        if policy_name.is_empty() || policy_name.len() > 64 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "PolicyName length must be between 1 and 64",
+            ));
+        }
+        // Smithy regex: `^[a-zA-Z0-9_-]+$`
+        if !policy_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "PolicyName must match pattern [a-zA-Z0-9_-]+",
+            ));
+        }
         let body: Value = Self::parse_body(req)?;
 
         let policy = match body["Policy"].as_str() {

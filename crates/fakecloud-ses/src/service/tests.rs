@@ -628,7 +628,7 @@ async fn test_send_email_rejects_when_account_paused() {
     let resp = svc.handle(req).await.unwrap();
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert_eq!(body["__type"], "AccountSendingPausedException");
+    assert_eq!(body["__type"], "SendingPausedException");
 }
 
 #[tokio::test]
@@ -669,7 +669,7 @@ async fn test_send_email_rejects_when_config_set_paused() {
     let resp = svc.handle(req).await.unwrap();
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert_eq!(body["__type"], "ConfigurationSetSendingPausedException");
+    assert_eq!(body["__type"], "SendingPausedException");
 }
 
 #[tokio::test]
@@ -4010,10 +4010,12 @@ async fn test_get_deliverability_test_report_unknown() {
 async fn test_blacklist_reports_route() {
     let state = make_state();
     let svc = SesV2Service::new(state);
-    let req = make_request(
+    let req = make_request_with_query(
         Method::GET,
         "/v2/email/deliverability-dashboard/blacklist-report",
         "",
+        "BlacklistItemNames=1.2.3.4",
+        HashMap::new(),
     );
     let resp = svc.handle(req).await.unwrap();
     assert_eq!(resp.status, StatusCode::OK);
@@ -4036,10 +4038,12 @@ async fn test_domain_deliverability_campaign_route() {
 async fn test_domain_statistics_report_route() {
     let state = make_state();
     let svc = SesV2Service::new(state);
-    let req = make_request(
+    let req = make_request_with_query(
         Method::GET,
         "/v2/email/deliverability-dashboard/statistics-report/example.com",
         "",
+        "StartDate=2024-01-01&EndDate=2024-01-31",
+        HashMap::new(),
     );
     let resp = svc.handle(req).await.unwrap();
     assert_eq!(resp.status, StatusCode::OK);
@@ -4049,10 +4053,12 @@ async fn test_domain_statistics_report_route() {
 async fn test_list_domain_deliverability_campaigns_route() {
     let state = make_state();
     let svc = SesV2Service::new(state);
-    let req = make_request(
+    let req = make_request_with_query(
         Method::GET,
         "/v2/email/deliverability-dashboard/domains/example.com/campaigns",
         "",
+        "StartDate=2024-01-01&EndDate=2024-01-31",
+        HashMap::new(),
     );
     let resp = svc.handle(req).await.unwrap();
     assert_eq!(resp.status, StatusCode::OK);
@@ -4231,7 +4237,7 @@ async fn send_email_v2_rejects_when_account_sending_paused() {
     let resp = svc.handle(req).await.unwrap();
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert_eq!(body["__type"], "AccountSendingPausedException");
+    assert_eq!(body["__type"], "SendingPausedException");
     assert_eq!(body["message"], "Email sending for the account is paused.");
 }
 
@@ -4319,7 +4325,7 @@ async fn send_email_v2_rejects_when_config_set_sending_paused() {
     let resp = svc.handle(req).await.unwrap();
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert_eq!(body["__type"], "ConfigurationSetSendingPausedException");
+    assert_eq!(body["__type"], "SendingPausedException");
     assert_eq!(
         body["message"],
         "Email sending for the configuration set my-cs is paused."

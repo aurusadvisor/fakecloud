@@ -101,9 +101,8 @@ impl SesV2Service {
     }
 
     /// Reject the send if either account-level sending or the resolved
-    /// configuration set's sending flag is paused. Real SES surfaces
-    /// these as `AccountSendingPausedException` and
-    /// `ConfigurationSetSendingPausedException` (HTTP 400).
+    /// configuration set's sending flag is paused. SES v2 collapses both
+    /// to `SendingPausedException` (HTTP 400) per the Smithy model.
     fn check_sending_enabled(
         &self,
         account_id: &str,
@@ -114,7 +113,7 @@ impl SesV2Service {
         if !state.account_settings.sending_enabled {
             return Some(Self::json_error(
                 StatusCode::BAD_REQUEST,
-                "AccountSendingPausedException",
+                "SendingPausedException",
                 "Email sending for the account is paused.",
             ));
         }
@@ -123,7 +122,7 @@ impl SesV2Service {
                 if !cs.sending_enabled {
                     return Some(Self::json_error(
                         StatusCode::BAD_REQUEST,
-                        "ConfigurationSetSendingPausedException",
+                        "SendingPausedException",
                         &format!("Email sending for the configuration set {name} is paused."),
                     ));
                 }

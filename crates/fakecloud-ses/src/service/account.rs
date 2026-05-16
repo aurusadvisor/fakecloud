@@ -77,6 +77,14 @@ impl SesV2Service {
                 ));
             }
         };
+        // MailType enum: MARKETING | TRANSACTIONAL.
+        if !matches!(mail_type.as_str(), "MARKETING" | "TRANSACTIONAL") {
+            return Ok(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "MailType must be MARKETING or TRANSACTIONAL",
+            ));
+        }
         let website_url = match body["WebsiteURL"].as_str() {
             Some(u) => u.to_string(),
             None => {
@@ -87,8 +95,39 @@ impl SesV2Service {
                 ));
             }
         };
+        // WebsiteURL has length 1..=1000 per the SES v2 Smithy model.
+        // Smithy `@length` counts UTF-8 code points, not bytes.
+        let website_url_len = website_url.chars().count();
+        if website_url_len == 0 || website_url_len > 1000 {
+            return Ok(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "WebsiteURL length must be between 1 and 1000",
+            ));
+        }
         let contact_language = body["ContactLanguage"].as_str().map(|s| s.to_string());
+        if let Some(ref cl) = contact_language {
+            // ContactLanguage enum: EN | JA.
+            if !matches!(cl.as_str(), "EN" | "JA") {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "ContactLanguage must be EN or JA",
+                ));
+            }
+        }
         let use_case_description = body["UseCaseDescription"].as_str().map(|s| s.to_string());
+        if let Some(ref desc) = use_case_description {
+            // UseCaseDescription has length 1..=5000 code points.
+            let desc_len = desc.chars().count();
+            if desc_len == 0 || desc_len > 5000 {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "UseCaseDescription length must be between 1 and 5000",
+                ));
+            }
+        }
         let additional = body["AdditionalContactEmailAddresses"]
             .as_array()
             .map(|arr| {

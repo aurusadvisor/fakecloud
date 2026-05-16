@@ -27,6 +27,13 @@ impl SesV2Service {
                 ));
             }
         };
+        if template_name.is_empty() {
+            return Ok(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "TemplateName must not be empty",
+            ));
+        }
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
