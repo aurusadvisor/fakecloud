@@ -3,12 +3,7 @@ name: Terraform Acceptance
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always

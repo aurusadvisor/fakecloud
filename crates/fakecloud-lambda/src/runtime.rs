@@ -145,6 +145,7 @@ impl ContainerRuntime {
             host_ip,
             server_port,
             docker_config,
+            network,
         })
     }
 

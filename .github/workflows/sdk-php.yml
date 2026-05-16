@@ -2,21 +2,13 @@ name: SDK PHP
 
 on:
   push:
-    paths:
-      - "sdks/php/**"
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-  pull_request:
+    branches: [main]
     paths:
       - "sdks/php/**"
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
   run:
