@@ -304,11 +304,13 @@ pub fn probe_variant_with_model(
                 // operation in.
                 if let (Some(followup), Some((model, _))) = (variant.followup.as_ref(), model_info)
                 {
+                    let response_body: Option<serde_json::Value> = serde_json::from_str(&body).ok();
                     all_violations.extend(run_round_trip_followup(
                         client,
                         endpoint,
                         service_name,
                         variant,
+                        response_body.as_ref(),
                         followup,
                         model,
                     ));
@@ -1749,11 +1751,39 @@ fn truncate(s: &str, max: usize) -> &str {
 /// (empty if everything echoed cleanly or the followup couldn't be
 /// reached for benign reasons; reports HTTP errors as a single violation
 /// so harness operators can spot pairs that need bespoke handling).
+/// Return the names of all `@required` members on the operation's input
+/// shape. Used by the round-trip followup to discover which fields the
+/// reader needs that aren't shared by name with the writer's input.
+fn reader_required_inputs(model: &ServiceModel, operation_name: &str) -> Vec<String> {
+    use crate::smithy::ShapeType;
+    let op = match model.operations.iter().find(|o| o.name == operation_name) {
+        Some(op) => op,
+        None => return Vec::new(),
+    };
+    let input_id = match op.input_shape.as_deref() {
+        Some(id) => id,
+        None => return Vec::new(),
+    };
+    let input_shape = match model.shapes.get(input_id) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    match &input_shape.shape_type {
+        ShapeType::Structure { members } => members
+            .iter()
+            .filter(|m| m.required)
+            .map(|m| m.name.clone())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn run_round_trip_followup(
     client: &reqwest::blocking::Client,
     endpoint: &str,
     service_name: &str,
     create_variant: &TestVariant,
+    create_response: Option<&serde_json::Value>,
     followup: &crate::generators::RoundTripFollowup,
     model: &ServiceModel,
 ) -> Vec<shape_validator::ShapeViolation> {
@@ -1775,6 +1805,64 @@ fn run_round_trip_followup(
 
     let mut get_input = serde_json::Map::new();
     get_input.insert(followup.id_field.clone(), id_value);
+    // Forward every shared identifier so the follow-up Get can resolve a
+    // multi-segment resource (e.g. `restApiId` + `resourceId` +
+    // `httpMethod` on API Gateway v1's `GetMethod`). Skip any that the
+    // writer didn't actually supply — keeps the legacy single-id flow
+    // intact for services where the writer's input only has one shared
+    // identifier member.
+    for extra in &followup.id_fields {
+        if extra == &followup.id_field {
+            continue;
+        }
+        if let Some(v) = create_obj.get(extra) {
+            if !v.is_null() {
+                get_input.insert(extra.clone(), v.clone());
+            }
+        }
+    }
+
+    // Many APIs name the new resource's identifier differently on the
+    // writer's input vs. the reader's input (e.g. `CreateModel.name` ->
+    // `GetModel.modelName`, `CreateAuthorizer` returns `id` ->
+    // `GetAuthorizer.authorizerId`). When the Create response carries
+    // that identifier as a field, look up each of the reader's required
+    // members in the response and fill from there. Conservative match:
+    // exact match first, then `<reader_member>` resolves to either
+    // `id` (the canonical generated identifier slot) or the reader's
+    // shape suffix (`modelName` -> `name`).
+    if let Some(create_response_obj) = create_response.and_then(|v| v.as_object()) {
+        let reader_required = reader_required_inputs(model, &followup.get_operation);
+        for member in reader_required {
+            if get_input.contains_key(&member) {
+                continue;
+            }
+            if let Some(v) = create_response_obj.get(&member) {
+                if !v.is_null() {
+                    get_input.insert(member.clone(), v.clone());
+                    continue;
+                }
+            }
+            // `modelName` -> Create response `name`; same for other
+            // <Resource>Name patterns where the response carries `name`.
+            if member.ends_with("Name") {
+                if let Some(v) = create_response_obj.get("name") {
+                    if !v.is_null() {
+                        get_input.insert(member.clone(), v.clone());
+                        continue;
+                    }
+                }
+            }
+            // `authorizerId`, `vpcLinkId`, ... -> Create response `id`.
+            if member.ends_with("Id") {
+                if let Some(v) = create_response_obj.get("id") {
+                    if !v.is_null() {
+                        get_input.insert(member.clone(), v.clone());
+                    }
+                }
+            }
+        }
+    }
     let get_variant = TestVariant {
         name: format!("{}__followup_get", create_variant.name),
         strategy: crate::generators::Strategy::RoundTrip,

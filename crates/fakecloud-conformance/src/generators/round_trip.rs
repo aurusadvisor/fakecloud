@@ -65,11 +65,54 @@ pub fn generate(
     if let Value::Object(ref mut obj) = input {
         let echo_value = optional_field_value(model, echo_field);
         obj.insert(echo_field.name.clone(), echo_value);
+        // Concurrency-isolate this variant: every required string input
+        // gets a unique identifier so parallel variants targeting the
+        // same writer can't clobber each other's stored state. Without
+        // this, the round_trip's GET could read a sibling variant's
+        // PUT and report a spurious echo drop. Only rewrite string-
+        // typed required members so we don't trample fields with
+        // tighter formats (numbers, enums, etc.).
+        let isolation_tag = format!("rt-{}", echo_field.name);
+        for wm in writer_input_members.iter().filter(|m| m.required) {
+            let is_plain_string = matches!(
+                effective_shape_type(model, &wm.target),
+                Some(crate::smithy::ShapeType::String { enum_values: None }),
+            );
+            if !is_plain_string {
+                continue;
+            }
+            obj.insert(wm.name.clone(), Value::String(isolation_tag.clone()));
+        }
+    }
+
+    // Every input member that also appears on the reader's input is part
+    // of the resource's composite identifier — REST APIs in particular
+    // model multi-segment URIs (`/restapis/{r}/resources/{x}/methods/{m}`)
+    // and the follow-up Get cannot succeed without all of them. Forward
+    // every shared identifier from the writer's input so the probe drives
+    // the reader the way a real SDK would.
+    let reader_input_members =
+        structure_members(model, pair.reader.input_shape.as_deref().unwrap_or(""));
+    let mut id_fields: Vec<String> = writer_input_members
+        .iter()
+        .filter(|wm| {
+            reader_input_members
+                .iter()
+                .any(|rm| rm.name == wm.name && primitive_compatible(model, &rm.target, &wm.target))
+        })
+        .map(|m| m.name.clone())
+        .collect();
+    // Always include the canonical id_source_field even when the model
+    // ordering puts it last so the legacy single-id consumers keep
+    // working.
+    if !id_fields.contains(&pair.id_source_field) {
+        id_fields.push(pair.id_source_field.clone());
     }
 
     let followup = RoundTripFollowup {
         get_operation: pair.reader.name.clone(),
         id_field: pair.id_source_field.clone(),
+        id_fields,
         echo_fields: vec![(echo_field.name.clone(), echo_field.name.clone())],
     };
 
