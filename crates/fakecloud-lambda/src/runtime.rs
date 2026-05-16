@@ -58,6 +58,10 @@ pub struct ContainerRuntime {
     /// `~/.docker/config.json`.
     docker_config: Option<Arc<TempDir>>,
     network: Option<String>,
+    /// Readiness check timeout per attempt (500ms). Total timeout = retries ×
+    /// this value. Default: 40 retries × 500ms = 20s. Override with
+    /// `FAKECLOUD_LAMBDA_READY_TIMEOUT` (number of retries, e.g. 60 = 30s).
+    ready_retries: u32,
 }
 
 /// Wrapper around an in-flight streaming invocation. Yields raw body
@@ -153,6 +157,12 @@ impl ContainerRuntime {
 
         let docker_config = build_local_registry_docker_config(server_port).map(Arc::new);
         let network = std::env::var("FAKECLOUD_LAMBDA_NETWORK").ok();
+        // Readiness check: number of 500ms retries. Default 40 = 20s total.
+        // Override with FAKECLOUD_LAMBDA_READY_TIMEOUT (e.g. 60 = 30s).
+        let ready_retries = std::env::var("FAKECLOUD_LAMBDA_READY_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(40);
         Some(Self {
             cli,
             containers: RwLock::new(HashMap::new()),
@@ -162,6 +172,7 @@ impl ContainerRuntime {
             server_port,
             docker_config,
             network,
+            ready_retries,
         })
     }
 
@@ -459,11 +470,14 @@ impl ContainerRuntime {
                 ))
             })?;
 
-        let ready = wait_for_ready(&self.host_ip, port).await;
+        let ready = wait_for_ready(&self.host_ip, port, self.ready_retries).await;
         if !ready {
             let _ = self.remove_container(&container_id).await;
             return Err(RuntimeError::ContainerStartFailed(
-                "container did not become ready within 20 seconds".to_string(),
+                format!(
+                    "container did not become ready within {} seconds",
+                    self.ready_retries as f64 * 0.5
+                ),
             ));
         }
 
@@ -638,11 +652,14 @@ impl ContainerRuntime {
             })?;
 
         // Wait for RIE to start accepting connections
-        let ready = wait_for_ready(&self.host_ip, port).await;
+        let ready = wait_for_ready(&self.host_ip, port, self.ready_retries).await;
         if !ready {
             let _ = self.remove_container(&container_id).await;
             return Err(RuntimeError::ContainerStartFailed(
-                "container did not become ready within 20 seconds".to_string(),
+                format!(
+                    "container did not become ready within {} seconds",
+                    self.ready_retries as f64 * 0.5
+                ),
             ));
         }
 
@@ -904,8 +921,8 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<(), RuntimeError> {
 
 /// Wait for a Lambda container's RIE to accept connections.
 /// Tries `host_ip` first, then falls back to `127.0.0.1`.
-/// Returns true if the port becomes reachable within 20 seconds.
-async fn wait_for_ready(host_ip: &str, port: u16) -> bool {
+/// `retries` is the number of 500ms polling attempts (total timeout = retries × 500ms).
+async fn wait_for_ready(host_ip: &str, port: u16, retries: u32) -> bool {
     // Try the detected host IP first (works when fakecloud runs inside Docker)
     if TcpStream::connect(format!("{host_ip}:{port}")).await.is_ok() {
         return true;
@@ -914,8 +931,8 @@ async fn wait_for_ready(host_ip: &str, port: u16) -> bool {
     if TcpStream::connect(format!("127.0.0.1:{port}")).await.is_ok() {
         return true;
     }
-    // Give it more time — RIE can take 10-15s to initialize
-    for _ in 0..20 {
+    // Poll — RIE can take 10-15s to initialize
+    for _ in 0..retries {
         tokio::time::sleep(Duration::from_millis(500)).await;
         if TcpStream::connect(format!("{host_ip}:{port}")).await.is_ok()
             || TcpStream::connect(format!("127.0.0.1:{port}")).await.is_ok()
