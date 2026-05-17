@@ -58,6 +58,10 @@ pub struct ContainerRuntime {
     /// `~/.docker/config.json`.
     docker_config: Option<Arc<TempDir>>,
     network: Option<String>,
+    /// Readiness check timeout per attempt (500ms). Total timeout = retries ×
+    /// this value. Default: 40 retries × 500ms = 20s. Override with
+    /// `FAKECLOUD_LAMBDA_READY_TIMEOUT` (number of retries, e.g. 60 = 30s).
+    ready_retries: u32,
 }
 
 /// Wrapper around an in-flight streaming invocation. Yields raw body
@@ -126,17 +130,39 @@ impl ContainerRuntime {
 
         let instance_id = format!("fakecloud-{}", std::process::id());
 
-        // Detect the appropriate host address for containers
-        // On Linux, use the bridge gateway IP directly (more reliable)
-        // On Mac/Windows, use host-gateway which Docker Desktop handles
-        let host_ip = if cfg!(target_os = "linux") {
-            detect_bridge_gateway(&cli).unwrap_or_else(|| "172.17.0.1".to_string())
-        } else {
-            "host-gateway".to_string()
-        };
+        // Detect the appropriate host address for containers.
+        // Priority: explicit env var > host-gateway (Docker Desktop) >
+        // bridge gateway (Linux) > fallback.
+        //
+        // `host-gateway` is a Docker special hostname that resolves to the
+        // host's IP from inside a container. It works on Docker Desktop
+        // (Mac/Windows) and Docker Engine 20.10+.
+        //
+        // When fakecloud runs inside a Docker container (DinD), the Lambda
+        // container's port maps to the *host*. Using `host-gateway` lets
+        // fakecloud reach the host from inside its own container.
+        //
+        // `FAKECLOUD_HOST_IP` lets users override the detected value for
+        // non-standard setups (e.g. Podman, custom Docker networks).
+        let host_ip = std::env::var("FAKECLOUD_HOST_IP")
+            .ok()
+            .or_else(|| {
+                if cfg!(target_os = "linux") {
+                    detect_bridge_gateway(&cli)
+                } else {
+                    Some("host-gateway".to_string())
+                }
+            })
+            .unwrap_or_else(|| "127.0.0.1".to_string());
 
         let docker_config = build_local_registry_docker_config(server_port).map(Arc::new);
         let network = std::env::var("FAKECLOUD_LAMBDA_NETWORK").ok();
+        // Readiness check: number of 500ms retries. Default 40 = 20s total.
+        // Override with FAKECLOUD_LAMBDA_READY_TIMEOUT (e.g. 60 = 30s).
+        let ready_retries = std::env::var("FAKECLOUD_LAMBDA_READY_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(40);
         Some(Self {
             cli,
             containers: RwLock::new(HashMap::new()),
@@ -146,6 +172,7 @@ impl ContainerRuntime {
             server_port,
             docker_config,
             network,
+            ready_retries,
         })
     }
 
@@ -169,10 +196,13 @@ impl ContainerRuntime {
     ) -> Result<Vec<u8>, RuntimeError> {
         let port = self.ensure_warm_container(func, layers).await?;
 
-        // POST to the RIE endpoint
+        // POST to the RIE endpoint. Use self.host_ip so it works when
+        // fakecloud runs inside a Docker container (the Lambda port maps
+        // to the host, not fakecloud's loopback).
         let url = format!(
-            "http://localhost:{}/2015-03-31/functions/function/invocations",
-            port
+            "http://{host_ip}:{port}/2015-03-31/functions/function/invocations",
+            host_ip = self.host_ip,
+            port = port
         );
         let client = reqwest::Client::new();
         let resp = client
@@ -207,8 +237,9 @@ impl ContainerRuntime {
         let port = self.ensure_warm_container(func, layers).await?;
 
         let url = format!(
-            "http://localhost:{}/2015-03-31/functions/function/invocations",
-            port
+            "http://{host_ip}:{port}/2015-03-31/functions/function/invocations",
+            host_ip = self.host_ip,
+            port = port
         );
         let client = reqwest::Client::new();
         let resp = client
@@ -439,22 +470,13 @@ impl ContainerRuntime {
                 ))
             })?;
 
-        let mut ready = false;
-        for _ in 0..20 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
-                .await
-                .is_ok()
-            {
-                ready = true;
-                break;
-            }
-        }
+        let ready = wait_for_ready(&self.host_ip, port, self.ready_retries).await;
         if !ready {
             let _ = self.remove_container(&container_id).await;
-            return Err(RuntimeError::ContainerStartFailed(
-                "container did not become ready within 10 seconds".to_string(),
-            ));
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "container did not become ready within {} seconds",
+                self.ready_retries as f64 * 0.5
+            )));
         }
 
         tracing::info!(
@@ -462,6 +484,7 @@ impl ContainerRuntime {
             container_id = %container_id,
             port = port,
             image = %image,
+            host_ip = %self.host_ip,
             "Lambda image container started"
         );
 
@@ -627,23 +650,13 @@ impl ContainerRuntime {
             })?;
 
         // Wait for RIE to start accepting connections
-        let mut ready = false;
-        for _ in 0..20 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
-                .await
-                .is_ok()
-            {
-                ready = true;
-                break;
-            }
-        }
-
+        let ready = wait_for_ready(&self.host_ip, port, self.ready_retries).await;
         if !ready {
             let _ = self.remove_container(&container_id).await;
-            return Err(RuntimeError::ContainerStartFailed(
-                "container did not become ready within 10 seconds".to_string(),
-            ));
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "container did not become ready within {} seconds",
+                self.ready_retries as f64 * 0.5
+            )));
         }
 
         tracing::info!(
@@ -651,6 +664,7 @@ impl ContainerRuntime {
             container_id = %container_id,
             port = port,
             runtime = %func.runtime,
+            host_ip = %self.host_ip,
             "Lambda container started"
         );
 
@@ -900,6 +914,42 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<(), RuntimeError> {
     }
     Ok(())
 }
+
+/// Wait for a Lambda container's RIE to accept connections.
+/// Tries `host_ip` first, then falls back to `127.0.0.1`.
+/// `retries` is the number of 500ms polling attempts (total timeout = retries × 500ms).
+async fn wait_for_ready(host_ip: &str, port: u16, retries: u32) -> bool {
+    // Try the detected host IP first (works when fakecloud runs inside Docker)
+    if TcpStream::connect(format!("{host_ip}:{port}"))
+        .await
+        .is_ok()
+    {
+        return true;
+    }
+    // Fallback to 127.0.0.1 (works when fakecloud runs natively on the host)
+    if TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .is_ok()
+    {
+        return true;
+    }
+    // Poll — RIE can take 10-15s to initialize
+    for _ in 0..retries {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if TcpStream::connect(format!("{host_ip}:{port}"))
+            .await
+            .is_ok()
+            || TcpStream::connect(format!("127.0.0.1:{port}"))
+                .await
+                .is_ok()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+use tokio::net::TcpStream;
 
 /// Detect the Docker bridge gateway IP on Linux.
 /// Returns None if detection fails.
