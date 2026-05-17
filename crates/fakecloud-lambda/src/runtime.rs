@@ -202,7 +202,7 @@ impl ContainerRuntime {
         let url = format!(
             "http://{host_ip}:{port}/2015-03-31/functions/function/invocations",
             host_ip = self.host_ip,
-            port
+            port = port
         );
         let client = reqwest::Client::new();
         let resp = client
@@ -239,7 +239,7 @@ impl ContainerRuntime {
         let url = format!(
             "http://{host_ip}:{port}/2015-03-31/functions/function/invocations",
             host_ip = self.host_ip,
-            port
+            port = port
         );
         let client = reqwest::Client::new();
         let resp = client
