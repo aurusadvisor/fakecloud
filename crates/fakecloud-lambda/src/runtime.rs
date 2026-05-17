@@ -473,12 +473,10 @@ impl ContainerRuntime {
         let ready = wait_for_ready(&self.host_ip, port, self.ready_retries).await;
         if !ready {
             let _ = self.remove_container(&container_id).await;
-            return Err(RuntimeError::ContainerStartFailed(
-                format!(
-                    "container did not become ready within {} seconds",
-                    self.ready_retries as f64 * 0.5
-                ),
-            ));
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "container did not become ready within {} seconds",
+                self.ready_retries as f64 * 0.5
+            )));
         }
 
         tracing::info!(
@@ -655,12 +653,10 @@ impl ContainerRuntime {
         let ready = wait_for_ready(&self.host_ip, port, self.ready_retries).await;
         if !ready {
             let _ = self.remove_container(&container_id).await;
-            return Err(RuntimeError::ContainerStartFailed(
-                format!(
-                    "container did not become ready within {} seconds",
-                    self.ready_retries as f64 * 0.5
-                ),
-            ));
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "container did not become ready within {} seconds",
+                self.ready_retries as f64 * 0.5
+            )));
         }
 
         tracing::info!(
@@ -924,18 +920,28 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<(), RuntimeError> {
 /// `retries` is the number of 500ms polling attempts (total timeout = retries × 500ms).
 async fn wait_for_ready(host_ip: &str, port: u16, retries: u32) -> bool {
     // Try the detected host IP first (works when fakecloud runs inside Docker)
-    if TcpStream::connect(format!("{host_ip}:{port}")).await.is_ok() {
+    if TcpStream::connect(format!("{host_ip}:{port}"))
+        .await
+        .is_ok()
+    {
         return true;
     }
     // Fallback to 127.0.0.1 (works when fakecloud runs natively on the host)
-    if TcpStream::connect(format!("127.0.0.1:{port}")).await.is_ok() {
+    if TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .is_ok()
+    {
         return true;
     }
     // Poll — RIE can take 10-15s to initialize
     for _ in 0..retries {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        if TcpStream::connect(format!("{host_ip}:{port}")).await.is_ok()
-            || TcpStream::connect(format!("127.0.0.1:{port}")).await.is_ok()
+        if TcpStream::connect(format!("{host_ip}:{port}"))
+            .await
+            .is_ok()
+            || TcpStream::connect(format!("127.0.0.1:{port}"))
+                .await
+                .is_ok()
         {
             return true;
         }
