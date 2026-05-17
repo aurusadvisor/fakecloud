@@ -12,8 +12,16 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
 RUN cargo build --release --bin fakecloud
 
-FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    curl \
+    git \
+    wget \
+    jq \
+    openssh-client \
+    less \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/fakecloud /usr/local/bin/
 EXPOSE 4566
 ENTRYPOINT ["fakecloud"]
