@@ -13,7 +13,7 @@ COPY . .
 RUN cargo build --release --bin fakecloud
 
 FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --fix-missing \
     ca-certificates \
     curl \
     git \
@@ -21,6 +21,9 @@ RUN apt-get update && apt-get install -y \
     jq \
     openssh-client \
     less \
+    libcap2 \
+    libsystemd0 \
+    && apt-get upgrade -y libcap2 libsystemd0 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/fakecloud /usr/local/bin/
 EXPOSE 4566
